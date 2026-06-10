@@ -23,7 +23,7 @@ import logging
 # 配置
 # =============================================================================
 
-STATA_HOME = os.environ.get("STATA_HOME", r"D:\StataNow19")
+STATA_HOME = os.environ.get("STATA_HOME", r"C:\Program Files\StataNow\StataNow19")
 STATA_EDITION = os.environ.get("STATA_EDITION", "mp")
 
 # 日志（写入 stderr 以免干扰 stdio MCP 通信）
@@ -95,6 +95,10 @@ _stata_lock = threading.Lock()
 MAX_OUTPUT_CHARS = 120_000
 # 分页阈值：超过此大小自动分页
 PAGE_SIZE = 4_000
+# Stata 返回码 3000 = "无错误但无实质输出"（如 r-class 命令）
+STATA_RC_NO_OUTPUT = 3000
+# 命令输入最大长度
+MAX_COMMAND_LENGTH = 65_536
 # 最近一次完整输出的缓存（支持翻页）
 _last_output = ""
 
@@ -139,28 +143,92 @@ def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
     return header + chunk + footer
 
 
+def _drain_output() -> str:
+    """排空输出缓冲，返回残留内容。
+
+    等待至少 200ms 确保 Stata 完成所有输出生产。
+    用于执行前清理和 SetBreak 后的错误恢复。
+    """
+    parts = []
+    t_start = time.time()
+    last_nonempty = time.time()
+
+    while time.time() - t_start < 0.2:  # 最少等待 200ms
+        out = config.get_output()
+        if out:
+            parts.append(out)
+            last_nonempty = time.time()
+        # 最近一次输出后至少 30ms 无新输出才退出
+        if time.time() - last_nonempty > 0.03:
+            break
+        time.sleep(0.005)
+
+    return "".join(parts)
+
+
+def _set_break():
+    """安全调用 Stata 中断，用于超时恢复。"""
+    try:
+        sb = config.stlib.StataSO_SetBreak
+        if sb:
+            sb()
+    except Exception as e:
+        logger.warning("StataSO_SetBreak failed: %s", e)
+
+
 def _execute_single(cmd: str):
     """执行单条 Stata 命令，返回 (return_code, output_text)。
 
     使用 RedirectOutput 防止 Stata 输出泄漏到 MCP stdio 通道。
-    两阶段轮询收集输出：先用 1ms 快轮询，再用 5ms 慢轮询清尾。
-    """
-    with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
-        encoded = config.get_encode_str(cmd)
-        rc = config.stlib.StataSO_Execute(encoded, False)
+    内置超时保护：命令执行超过 60 秒时调用 StataSO_SetBreak 中断。
 
+    支持两阶段输出收集：1ms 快轮询 + 5ms 慢轮询清尾。
+    """
+    # 执行前排空残留缓冲
+    _drain_output()
+
+    # 超时看门狗（防止 StataSO_Execute 挂起导致 MCP 通信阻塞）
+    # 使用 threading.Event 避免竞态：SetBreak 仅在命令实际还在运行时触发
+    exec_done = threading.Event()
+    did_break = False
+
+    def _timeout_watchdog():
+        nonlocal did_break
+        if not exec_done.wait(timeout=60):
+            logger.warning("Stata command timed out (>60s), issuing break: %s", cmd[:80])
+            _set_break()
+            did_break = True
+
+    watch = threading.Thread(target=_timeout_watchdog, daemon=True)
+    watch.start()
+
+    try:
+        with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
+            encoded = config.get_encode_str(cmd)
+            rc = config.stlib.StataSO_Execute(encoded, False)
+    except Exception as e:
+        logger.exception("StataSO_Execute crashed on: %s", cmd[:80])
+        exec_done.set()
+        return 999, f"StataSO_Execute 崩溃: {e}"
+
+    exec_done.set()
+
+    # 仅在看门狗触发 break 后排空错误输出
+    if did_break:
+        time.sleep(0.1)
+        _drain_output()
+
+    # 收集输出
     output_parts = []
     total_len = 0
     empty_count = 0
 
-    # 阶段 1: 快速轮询（1ms 间隔，连续 3 次空转即结束）
     for _ in range(300):
         out = config.get_output()
         if out:
             output_parts.append(out)
             total_len += len(out)
             empty_count = 0
-            # 达到上限则截断
             if total_len >= MAX_OUTPUT_CHARS:
                 output_parts.append("\n(输出已截断)")
                 break
@@ -170,19 +238,11 @@ def _execute_single(cmd: str):
                 break
         time.sleep(0.001)
 
-    # 阶段 2: 慢轮询清尾（5ms 间隔）
     if total_len < MAX_OUTPUT_CHARS:
-        for _ in range(5):
-            time.sleep(0.005)
-            out = config.get_output()
-            if out:
-                output_parts.append(out)
-                total_len += len(out)
-                if total_len >= MAX_OUTPUT_CHARS:
-                    output_parts.append("\n(输出已截断)")
-                    break
-            else:
-                break
+        tail = _drain_output()
+        if tail:
+            output_parts.append(tail)
+            total_len += len(tail)
 
     return rc, "".join(output_parts)
 
@@ -202,11 +262,18 @@ def _run_stata_command(cmd: str, page: int = 1) -> str:
     """
     global _last_output
 
+    # 输入验证
+    if not cmd or not cmd.strip():
+        return "(无有效命令)"
+    if len(cmd) > MAX_COMMAND_LENGTH:
+        return f"错误: 命令过长（{len(cmd)} 字符），上限 {MAX_COMMAND_LENGTH} 字符"
+
     with _stata_lock:
         lines = []
         for line in cmd.strip().split("\n"):
             stripped = line.strip()
-            if stripped and not stripped.startswith("*"):
+            # 过滤空行、* 行首注释、// 行注释
+            if stripped and not stripped.startswith("*") and not stripped.startswith("//"):
                 lines.append(stripped)
 
         if not lines:
@@ -217,7 +284,8 @@ def _run_stata_command(cmd: str, page: int = 1) -> str:
             try:
                 rc, out = _execute_single(line)
 
-                if rc != 0 and rc != 3000:
+                # STATA_RC_NO_OUTPUT (3000) = 无错误但无实质输出
+                if rc != 0 and rc != STATA_RC_NO_OUTPUT:
                     prefix = f"[返回码: {rc}] {line[:60]}"
                     all_output.append(f"{prefix}\n{out.strip()}" if out.strip() else prefix)
                 elif out.strip():
@@ -299,7 +367,7 @@ def stata_run(command: str, page: int = 1) -> str:
     return _run_stata_command(command, page)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def stata_run_do_file(filepath: str) -> str:
     """执行一个 Stata .do 文件并返回全部输出。
 
@@ -690,7 +758,7 @@ def stata_status() -> str:
     Returns:
         会话状态摘要。
     """
-    return _run_stata_command("describe")
+    return _run_stata_command("describe\ncd\nmemory")
 
 
 # =============================================================================
