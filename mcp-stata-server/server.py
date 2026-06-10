@@ -295,7 +295,6 @@ def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
             "  2. headless 环境中图形操作过载\n"
             "  3. Stata 会话已损坏\n\n"
             "建议: 重启 MCP Server（退出并重新打开 Claude Code）\n"
-            "回退: 运行 python auto_analysis.py 使用直接 pystata 执行\n"
         )
 
     # --- 执行 ---

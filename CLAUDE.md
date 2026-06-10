@@ -116,10 +116,11 @@ _ping_stata()          # 预检：DLL 是否存活（2 次尝试 + SetBreak 恢�
 | 998 | DLL 无响应 | 立即终止后续命令 + 提示重启 MCP Server |
 
 ### MCP 断线处理
-当 MCP Server 崩溃时（DLL 崩溃或连接断开），工具层抛出异常。此时：
-1. **立即停止调用** Stata MCP 工具——不会自动重连
-2. **切换回退路径**：运行 `python auto_analysis.py` 使用直接 pystata 调用（无需 MCP）
-3. **重启恢复**：需要退出 Claude Code 并重新启动
+当 MCP Server 崩溃时（DLL 崩溃或连接断开），`_execute_safe` 返回 **RC=998** + 明确错误信息，**不会自动执行任何脚本**。Agent 收到错误后应：
+
+1. **分析错误信息**：判断是 DLL 崩溃、超时还是语法错误
+2. **调整策略**：简化命令、避免复杂图形、或切换到更轻量的操作
+3. **若需恢复**：提示用户重启 Claude Code（`! exit` → 重新启动）
 
 ### 错误处理策略
 
