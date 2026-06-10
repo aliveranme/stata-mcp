@@ -105,3 +105,49 @@ Stata 命令执行异常链:
 - `stata_more(page=N)` 翻页，`page=0` 显示全部
 - 输出上限 120K 字符（Claude Code 约束）
 - 任何时候优先 `summarize` / `tabulate` / `codebook` 而非 `list`
+
+## 工具调用效率
+
+### 批量命令优先
+- 每次 `stata_run` 可在 `\n` 后跟多条命令，全部在一个往返中完成
+- 推荐：`stata_run("regress mpg weight\nestat vif\nestat hettest")` — 3 条一次往返
+- 不推荐：3 次独立 `stata_run`（3 倍往返开销，约 3 x 1.5s）
+- 适用于：多步建模（加载→清洗→回归→诊断）
+
+### 并行工具调用
+- 数据探索类工具（describe、summarize、codebook、tabulate）**互不依赖**
+- 应该一次性并行发送，而非逐条等待
+- 回归/图形等工具需要前序结果，必须顺序执行
+
+### 输出分页工作流
+- `stata_list(n=0)` — 大输出（>4K chars）自动返回第 1 页
+- `stata_more(page=N)` — 翻页（`page=0` 时返回全部未截断的文本）
+- `stata_more` 缓存的是上次命令的完整输出，中间不要插入其他 `stata_run`
+
+## 已修复的崩溃历史
+
+| 触发 | 根因 | 修复 |
+|------|------|------|
+| 任意命令 | `StataSO_Execute` stdout 泄漏→JSON-RPC 污染 | `RedirectOutput` + `streamout='off'` |
+| `binscatter` | headless 无图窗→Stata 挂起 | 60s 看门狗 + `StataSO_SetBreak` |
+| `winsor2` 选项冲突 | 级联错误→DLL 崩溃 | `_drain_output` 缓冲隔离 + 逐命令错误处理 |
+| 高并发调用 | threading.Lock 竞态 | 改用 `threading.Event` |
+
+## 权限配置
+
+```json
+{
+  "enableAllProjectMcpServers": true,  // MCP 工具免弹窗
+  "permissions": {
+    "allow": [
+      "WebFetch"  // 不限域名 Web 抓取
+    ]
+  }
+}
+```
+
+## 已知局限
+
+- **`setup.py` 的 `test_server` 函数**：使用 `exec()` + 文本替换避开 `main` 块，易因空格变动失效。将来应改用 `importlib` 直接验证工具注册。
+- **无 CI/lint 配置**：无 `mypy`、`ruff`、`pre-commit`。server.py 混合中英文标识符。
+- **日志仅 stderr**：MCP 传输中断后日志丢失，未配置文件日志处理器。
