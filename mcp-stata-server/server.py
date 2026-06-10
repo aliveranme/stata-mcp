@@ -93,6 +93,50 @@ _stata_lock = threading.Lock()
 
 # MCP 工具结果上限（Claude Code 默认为 25K tokens ≈ 150K 字符）
 MAX_OUTPUT_CHARS = 120_000
+# 分页阈值：超过此大小自动分页
+PAGE_SIZE = 4_000
+# 最近一次完整输出的缓存（支持翻页）
+_last_output = ""
+
+
+def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
+    """将文本分页，返回指定页及导航信息。
+
+    Args:
+        text: 完整文本
+        page: 页码（1-based），0 表示返回全部
+        page_size: 每页字符数
+
+    Returns:
+        指定页内容 + 导航信息
+    """
+    if not text:
+        return "(无输出)"
+
+    total_chars = len(text)
+    total_pages = max(1, (total_chars + page_size - 1) // page_size)
+
+    if page == 0 or page_size <= 0:
+        return text
+
+    if page < 1:
+        page = 1
+    if page > total_pages:
+        page = total_pages
+
+    start = (page - 1) * page_size
+    end = min(start + page_size, total_chars)
+
+    chunk = text[start:end]
+    header = f"── 第 {page}/{total_pages} 页（共 {total_chars} 字符）──\n"
+    footer = f"\n── 第 {page}/{total_pages} 页"
+    if page < total_pages:
+        footer += f" — 使用 stata_more(page={page+1}) 翻下页"
+    if page > 1:
+        footer += f" — stata_more(page={page-1}) 翻上页"
+    footer += " — stata_more(page=0) 显示全部"
+
+    return header + chunk + footer
 
 
 def _execute_single(cmd: str):
@@ -143,19 +187,22 @@ def _execute_single(cmd: str):
     return rc, "".join(output_parts)
 
 
-def _run_stata_command(cmd: str) -> str:
-    """执行 Stata 命令并返回输出文本。
+def _run_stata_command(cmd: str, page: int = 1) -> str:
+    """执行 Stata 命令，支持分页浏览。
 
-    支持多行命令——按 \\n 拆分后逐条执行，保持会话状态。
+    多行命令按 \\n 拆分后逐条执行。
+    当输出超过 PAGE_SIZE 时自动缓存完整输出并返回首页。
 
     Args:
-        cmd: Stata 命令字符串（可包含多行命令，\\n 分隔）。
+        cmd: Stata 命令字符串（多命令用 \\n 分隔）。
+        page: 页码（1-based），0 = 全部，仅对单命令有效。
 
     Returns:
-        Stata 输出文本。
+        Stata 输出文本（可能包含分页导航）。
     """
+    global _last_output
+
     with _stata_lock:
-        # 分割命令，过滤空行和纯注释行
         lines = []
         for line in cmd.strip().split("\n"):
             stripped = line.strip()
@@ -170,7 +217,6 @@ def _run_stata_command(cmd: str) -> str:
             try:
                 rc, out = _execute_single(line)
 
-                # 返回码处理
                 if rc != 0 and rc != 3000:
                     prefix = f"[返回码: {rc}] {line[:60]}"
                     all_output.append(f"{prefix}\n{out.strip()}" if out.strip() else prefix)
@@ -183,7 +229,17 @@ def _run_stata_command(cmd: str) -> str:
                 logger.exception("Error executing: %s", line[:200])
                 all_output.append(f"执行错误 ({line[:40]}): {sys.exc_info()[1]}")
 
-        return "\n".join(all_output) if all_output else "(命令执行成功，无文本输出)"
+        full = "\n".join(all_output) if all_output else "(命令执行成功，无文本输出)"
+        _last_output = full
+
+        # 自动分页：仅当是单条命令且输出超过阈值
+        if len(lines) == 1 and len(full) > PAGE_SIZE:
+            return _paginate(full, page)
+        elif len(lines) > 1 and sum(len(o) for o in all_output) > PAGE_SIZE * 3:
+            # 多命令输出也分页
+            return _paginate(full, page)
+
+        return full
 
 
 def _normalize_path(path: str) -> str:
@@ -220,25 +276,27 @@ def _shutdown_stata():
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-def stata_run(command: str) -> str:
+def stata_run(command: str, page: int = 1) -> str:
     """执行一条或多条 Stata 命令并返回输出。
 
     这是最核心的工具，可以执行任意 Stata 命令。
     支持多行命令，每行一条命令。支持数据加载、统计分析、
     回归、图形生成、数据管理等各种 Stata 操作。
 
+    当输出过长时自动分页。使用 stata_more 工具翻页浏览。
+
     使用示例：
     - 单条命令: "summarize mpg"
     - 多条命令: "sysuse auto, clear\\nsummarize mpg\\ntabulate foreign"
-    - 加载并分析: "use \\"C:/data/mydata.dta\\", clear\\ndescribe\\nsummarize"
 
     Args:
         command: Stata 命令，多条命令用 \\n 分隔。
+        page: 页码（1-based），仅对单条命令有效。默认 1。
 
     Returns:
-        Stata 输出文本（结果表格、统计量、日志消息等）。
+        Stata 输出文本（可能包含分页导航）。
     """
-    return _run_stata_command(command)
+    return _run_stata_command(command, page)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -600,6 +658,27 @@ def stata_list_packages() -> str:
 # =============================================================================
 # MCP 工具 — 会话 (readOnlyHint=True)
 # =============================================================================
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_more(page: int = 0, page_size: int = 0) -> str:
+    """翻页浏览上一条 Stata 命令的完整输出。
+
+    当 stata_run 等工具返回的输出过长时，完整内容被缓存，
+    可使用此工具按页浏览。
+
+    Args:
+        page: 页码（1-based），0 = 显示全部。默认 0。
+        page_size: 每页字符数，0 = 使用默认值 (4000)。默认 0。
+
+    Returns:
+        指定页的输出内容及导航信息。
+    """
+    global _last_output
+    if not _last_output:
+        return "(没有缓存的输出，请先执行 Stata 命令)"
+    ps = page_size if page_size > 0 else PAGE_SIZE
+    return _paginate(_last_output, page, ps)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))

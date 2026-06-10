@@ -113,9 +113,10 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 ### 通用执行
 | 工具 | 说明 |
 |------|------|
-| `stata_run` | **执行任意 Stata 命令** |
+| `stata_run` | **执行任意 Stata 命令**（含分页） |
 | `stata_run_do_file` | 执行 .do 文件 |
 | `stata_graph` | 生成图形 |
+| `stata_more` | **翻页浏览大输出** |
 
 ### 包管理
 | 工具 | 说明 |
