@@ -171,11 +171,9 @@ def _parse_command_blocks(cmd: str) -> list:
             i += 1
             continue
 
-        # 跳过注释行：* 行首 和 // 行（但不包括 /// 续行符）
-        if stripped.startswith("*"):
-            i += 1
-            continue
-        if stripped.startswith("//") and not stripped.startswith("///"):
+        # 跳过注释行：* 行首、// 行（包括 /// 行首注释）
+        # 注：/// 只有在行尾时才是续行符，在行首等同于 // 注释
+        if stripped.startswith("*") or stripped.startswith("//"):
             i += 1
             continue
 
