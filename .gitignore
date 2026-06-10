@@ -21,6 +21,9 @@ env/
 .DS_Store
 Thumbs.db
 
+# Test output
+_test_output/
+
 # Claude Code
 .claude/workspace/
 

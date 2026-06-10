@@ -87,63 +87,79 @@ mcp = FastMCP(
 _stata_lock = threading.Lock()
 
 
+def _execute_single(cmd: str) -> tuple:
+    """执行单条 Stata 命令，返回 (return_code, output_text)。"""
+    encoded = config.get_encode_str(cmd)
+    rc = config.stlib.StataSO_Execute(encoded, False)
+
+    # 阶段 1：快速轮询
+    output_parts = []
+    empty_count = 0
+    for _ in range(200):
+        out = config.get_output()
+        if out:
+            output_parts.append(out)
+            empty_count = 0
+        else:
+            empty_count += 1
+            if empty_count >= 5:
+                break
+        time.sleep(0.005)
+
+    # 阶段 2：延迟等待
+    time.sleep(0.08)
+    for _ in range(10):
+        out = config.get_output()
+        if out:
+            output_parts.append(out)
+            time.sleep(0.01)
+        else:
+            break
+
+    return rc, "".join(output_parts)
+
+
 def _run_stata_command(cmd: str) -> str:
     """执行 Stata 命令并返回输出文本。
 
-    使用 Stata DLL 的 StataSO_Execute 接口执行命令，
-    通过两阶段轮询获取完整输出缓冲。
+    支持多行命令——按 \\n 拆分后逐条执行，保持会话状态。
 
     Args:
-        cmd: Stata 命令字符串（可包含多行命令）。
+        cmd: Stata 命令字符串（可包含多行命令，\\n 分隔）。
 
     Returns:
         Stata 输出文本。
     """
     with _stata_lock:
-        try:
-            encoded = config.get_encode_str(cmd)
-            rc = config.stlib.StataSO_Execute(encoded, False)
+        # 分割命令，过滤空行和纯注释行
+        lines = []
+        for line in cmd.strip().split("\n"):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("*"):
+                lines.append(stripped)
 
-            # ---- 阶段 1：快速轮询获取主体输出 ----
-            output_parts = []
-            empty_count = 0
-            max_empty = 5  # 连续 5 次空结果后进入阶段 2
-            for _ in range(200):
-                out = config.get_output()
-                if out:
-                    output_parts.append(out)
-                    empty_count = 0
-                else:
-                    empty_count += 1
-                    if empty_count >= max_empty:
-                        break
-                time.sleep(0.005)
+        if not lines:
+            return "(无有效命令)"
 
-            # ---- 阶段 2：等待延迟输出 ----
-            time.sleep(0.08)
-            for _ in range(10):
-                out = config.get_output()
-                if out:
-                    output_parts.append(out)
-                    time.sleep(0.01)
-                else:
-                    break
+        all_output = []
+        for line in lines:
+            try:
+                rc, out = _execute_single(line)
 
-            result = "".join(output_parts).strip()
+                # 返回码处理
+                if rc != 0 and rc != 3000:
+                    prefix = f"[返回码: {rc}] {line[:60]}"
+                    all_output.append(f"{prefix}\n{out.strip()}" if out.strip() else prefix)
+                elif out.strip():
+                    all_output.append(out.strip())
 
-            # ---- 返回码处理 ----
-            # rc=3000 是 "command produced output but no error" 的正常标记
-            if rc != 0 and rc != 3000:
-                prefix = f"[返回码: {rc}]"
-                return f"{prefix}\n{result}" if result else f"{prefix}\n错误：命令执行失败，无输出。"
+            except SystemError as e:
+                all_output.append(f"Stata 系统错误 ({line[:40]}): {e}")
+            except Exception:
+                logger.exception("Error executing: %s", line[:200])
+                all_output.append(f"执行错误 ({line[:40]}): {sys.exc_info()[1]}")
 
-            return result if result else "(命令执行成功，无文本输出)"
-
-        except SystemError as e:
-            return f"Stata 系统错误: {e}"
-        except Exception:
-            logger.exception("Unexpected error executing command: %s", cmd[:200])
-            return f"执行命令时出错: {sys.exc_info()[1]}"
+        return "\n".join(all_output) if all_output else "(命令执行成功，无文本输出)"
 
 
 def _normalize_path(path: str) -> str:
@@ -505,27 +521,30 @@ def stata_graph(command: str) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_install_package(package: str, source: str = "ssc") -> str:
+def stata_install_package(package: str, source: str = "ssc", replace: bool = False) -> str:
     """安装 Stata 扩展包。
 
     从 ssc、net 地址或 GitHub 安装 Stata 包。
+    支持 force/replace 选项来解决版本冲突。
 
     Args:
         package: 包名称（如 "outreg2"、"estout"、"ivreg2"）。
         source: 安装源 — "ssc"（默认）、"net"、或完整 URL。
+        replace: 是否强制替换已有文件（解决版本冲突，默认 False）。
 
     Returns:
         安装过程输出。
     """
+    replace_opt = ", replace" if replace else ""
     if source.lower() == "ssc":
-        cmd = f"ssc install {package}"
+        cmd = f"ssc install {package}{replace_opt}"
     elif source.lower() == "net":
         cmd = (
-            f"net install {package},"
+            f"net install {package}{replace_opt},"
             f" from(https://fmwww.bc.edu/RePEc/bocode/{package[0]})"
         )
     else:
-        cmd = f"net install {package}, from({source})"
+        cmd = f"net install {package}{replace_opt}, from({source})"
     return _run_stata_command(cmd)
 
 
