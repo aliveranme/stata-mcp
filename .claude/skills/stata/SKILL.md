@@ -35,13 +35,41 @@ description: >
 3. **路径用正斜杠** — `D:/data/file.dta`，不要用反斜杠
 4. **带空格的路径用双引号包裹** — `use "D:/my data/file.dta", clear`
 5. **检查返回值** — 用 `stata_display` 查看 `r(mean)`、`e(N)`、`e(r2)` 等
+6. **限制输出大小** — 永远不要执行 `list` 而不限制观测数。数据量大时必须用
+   `in 1/N` 或 `n` 参数限制。输出超过 4000 字符会自动分页
 
 ### 命令执行策略
 
-- **单次查询** → 使用专用工具（`stata_summarize`、`stata_tabulate` 等）
+- **单次查询** → 使用专用工具（`stata_summarize`、`stata_tabulate` 等，输出紧凑）
 - **多步骤流程** → 使用 `stata_run`，用 `\n` 连接多条命令
 - **已有 .do 文件** → 使用 `stata_run_do_file`
 - **每次 `stata_run` 应包含逻辑完整的一组命令**，避免零碎调用
+
+### 输出大小控制（重要！）
+
+**始终在产生输出的命令中限制范围**，避免生成几万字符的原始输出：
+
+| 命令 | 不推荐（输出过大） | 推荐（限制输出） |
+|------|-------------------|-----------------|
+| `list` | `list` — 输出全部 74 条，40K 字符 | `list in 1/10` — 只显示前 10 条 |
+| `summarize` | 无限制 — 通常安全 | `summarize varlist if condition` |
+| `tabulate` | 无限制 — 通常安全 | `tabulate var in 1/100` |
+| `browse` | 不可用（GUI 命令） | 改用 `list in 1/N` |
+| `describe` | 永远安全 | — |
+
+**分页工作流**：
+```
+1. stata_list(n=10)         → 先看前 10 条了解数据结构
+2. stata_summarize()         → 用描述统计看整体
+3. stata_list(in_range="1/l") → 确实需要全部数据时，会自动分页
+4. stata_more(page=2)        → 翻页浏览
+```
+
+**经验法则**：
+- 观测数 < 50：`list` 全部输出通常 OK
+- 观测数 50-500：`list in 1/20` 预览 + `summarize` + `codebook` 了解全貌
+- 观测数 > 500：只用 `summarize`、`tabulate`、`codebook`，避免用 `list`
+- 回归/检验命令的输出通常不会过大，无需限制
 
 ---
 
@@ -342,9 +370,11 @@ esttab m1 m2 using "results.csv", replace
 1. **分析前先 `stata_status`**，了解当前会话状态
 2. **完整流程**：加载 → 探索 → 清洗 → 分析 → 输出结果
 3. **向用户展示关键结果**，而非原始 Stata 日志的全部内容
-4. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装
-5. **图形需导出**：`graph export "output/fig1.png", replace width(1200)`
-6. **大输出自动分页**：当输出超过 4000 字符时自动分页。每条命令的完整输出
-   会被缓存，使用 `stata_more(page=N)` 翻页，`stata_more(page=0)` 显示全部。
-   示例：`list` 输出 40K 字符 → 自动返回第 1 页 → `stata_more(page=3)` 跳到第 3 页
-7. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
+4. **输出大小第一原则**：永远不要产生无限制的原始输出。
+   - `list` 必须限定 `in 1/N`（已知 74 条数据 `in 1/20`，未知数据 `in 1/10`）
+   - 优先用 `summarize`、`tabulate`、`codebook` 而非 `list`
+   - 确实需要全量数据时利用自动分页：先看首页，需要时再 `stata_more`
+5. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装
+6. **图形需导出**：`graph export "output/fig1.png", replace width(1200)`
+7. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
+8. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
