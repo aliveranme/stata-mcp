@@ -91,39 +91,54 @@ mcp = FastMCP(
 
 _stata_lock = threading.Lock()
 
+# MCP 工具结果上限（Claude Code 默认为 25K tokens ≈ 150K 字符）
+MAX_OUTPUT_CHARS = 120_000
+
 
 def _execute_single(cmd: str):
     """执行单条 Stata 命令，返回 (return_code, output_text)。
 
     使用 RedirectOutput 防止 Stata 输出泄漏到 MCP stdio 通道。
+    两阶段轮询收集输出：先用 1ms 快轮询，再用 5ms 慢轮询清尾。
     """
     with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
         encoded = config.get_encode_str(cmd)
         rc = config.stlib.StataSO_Execute(encoded, False)
 
-    # 从 Stata 缓冲收集输出
     output_parts = []
+    total_len = 0
     empty_count = 0
-    for _ in range(200):
+
+    # 阶段 1: 快速轮询（1ms 间隔，连续 3 次空转即结束）
+    for _ in range(300):
         out = config.get_output()
         if out:
             output_parts.append(out)
+            total_len += len(out)
             empty_count = 0
+            # 达到上限则截断
+            if total_len >= MAX_OUTPUT_CHARS:
+                output_parts.append("\n(输出已截断)")
+                break
         else:
             empty_count += 1
-            if empty_count >= 5:
+            if empty_count >= 3:
                 break
-        time.sleep(0.005)
+        time.sleep(0.001)
 
-    # 延迟等待尾部输出
-    time.sleep(0.05)
-    for _ in range(10):
-        out = config.get_output()
-        if out:
-            output_parts.append(out)
-            time.sleep(0.01)
-        else:
-            break
+    # 阶段 2: 慢轮询清尾（5ms 间隔）
+    if total_len < MAX_OUTPUT_CHARS:
+        for _ in range(5):
+            time.sleep(0.005)
+            out = config.get_output()
+            if out:
+                output_parts.append(out)
+                total_len += len(out)
+                if total_len >= MAX_OUTPUT_CHARS:
+                    output_parts.append("\n(输出已截断)")
+                    break
+            else:
+                break
 
     return rc, "".join(output_parts)
 
