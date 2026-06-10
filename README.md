@@ -56,7 +56,14 @@ set STATA_EDITION=mp
 # 创建虚拟环境
 cd mcp-stata-server
 uv venv
+
+# Windows Git Bash / MSYS2:
 source .venv/Scripts/activate
+# Windows PowerShell:
+# .venv\Scripts\Activate.ps1
+# Windows CMD:
+# .venv\Scripts\activate.bat
+
 uv pip install fastmcp
 
 # 复制并编辑 .mcp.json
@@ -121,10 +128,12 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 ## 项目结构
 
 ```
-temp/
-├── .mcp.json                          # MCP Server 配置
+stata-mcp/
+├── .mcp.json                          # MCP Server 配置（setup.py 自动生成）
+├── .mcp.json.example                  # MCP Server 配置模板（手动安装用）
 ├── .gitignore
 ├── README.md                          # 本文档
+├── setup.py                           # 一键安装脚本
 ├── mcp-stata-server/
 │   ├── server.py                      # MCP Server 主程序（19 个工具）
 │   └── requirements.txt               # Python 依赖（fastmcp）
@@ -132,7 +141,7 @@ temp/
     ├── skills/
     │   └── stata/
     │       └── SKILL.md               # Stata 编程知识 Skill
-    └── settings.local.json            # Claude Code 本地配置
+    └── settings.local.json            # Claude Code 本地配置（插件启用）
 ```
 
 ## Skill 内容概览
@@ -191,3 +200,15 @@ uv pip freeze > requirements.txt
 ## 许可证
 
 MIT License
+
+## 兼容性
+
+| 组件 | 要求 |
+|------|------|
+| **操作系统** | Windows（pystata 依赖 Windows DLL） |
+| **Stata 版本** | StataNow 19 / Stata 18（MP / SE / BE） |
+| **Python** | 3.10+ |
+| **Claude Code** | 最新版本（支持 MCP stdio） |
+
+> **注意**：macOS / Linux 用户需使用 [stata_kernel](https://github.com/kylebarron/stata_kernel)
+> 或 subprocess 方式调用 Stata CLI，本项目的 pystata 方案仅支持 Windows。

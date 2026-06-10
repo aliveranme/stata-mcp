@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-StataNow 19 MCP Server — 通过 pystata 执行 Stata 命令。
+Stata MCP Server — 通过 pystata 执行 Stata 命令。
 
-使用 StataNow 19 内置的 Python 集成 (pystata) 直接调用 Stata DLL，
+使用 Stata 内置的 Python 集成 (pystata) 直接调用 Stata DLL，
 支持执行 do 文件、交互式命令、包管理和数据处理。
+
+兼容 StataNow 19 / Stata 18（MP / SE / BE 版本）。
 
 环境变量:
     STATA_HOME: Stata 安装目录（默认 D:\\StataNow19）
