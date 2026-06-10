@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.factory.ai)",
+      "WebFetch(domain:api-docs.deepseek.com)",
+      "Bash(pip3 list *)",
+      "Bash(uv --version)",
+      "Bash(\"D:/StataNow19/StataMP-64.exe\" /?)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "stata"
+  ],
+  "enabledPlugins": {
+    "mcp-server-dev@claude-plugins-official": true
+  },
+  "enableAllProjectMcpServers": true
+}

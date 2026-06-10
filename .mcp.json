@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "stata": {
+      "command": "F:/Projects/temp/temp/temp/mcp-stata-server/.venv/Scripts/python.exe",
+      "args": ["F:/Projects/temp/temp/temp/mcp-stata-server/server.py"]
+    }
+  }
+}
