@@ -18,8 +18,8 @@ description: >
 结果输出全流程。
 
 **MCP Server 信息：**
-- 名称：`stata`，19 个工具覆盖数据管理、探索、分析、包管理和会话控制
-- Stata 版本：StataNow 19.5 MP
+- 名称：`stata`，20 个工具覆盖数据管理、探索、分析、包管理和会话控制
+- Stata 版本：StataNow 19 / Stata 18+（取决于安装的版本）
 - 连接方式：本地 stdio，通过 pystata 直接调用 DLL
 - **会话持久**：Stata 在服务器启动时初始化一次，所有命令共享同一会话。
   数据加载后会一直保留在内存中，直到被 `clear` 或替换。
@@ -376,5 +376,11 @@ esttab m1 m2 using "results.csv", replace
    - 确实需要全量数据时利用自动分页：先看首页，需要时再 `stata_more`
 5. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装
 6. **图形需导出**：`graph export "output/fig1.png", replace width(1200)`
-7. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
-8. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
+7. **图形导出需两步**：图形命令后立即导出，否则图窗可能丢失。
+   ```stata
+   scatter mpg weight
+   graph export "output/scatter.png", replace width(1200)
+   ```
+   在无显示环境中可使用 `set graphics off` 前导。
+8. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
+9. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
