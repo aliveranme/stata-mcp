@@ -18,6 +18,7 @@ import time
 import threading
 import atexit
 import logging
+import tempfile
 
 # =============================================================================
 # 配置
@@ -143,6 +144,68 @@ def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
     return header + chunk + footer
 
 
+def _parse_command_blocks(cmd: str) -> list:
+    """将多行 Stata 输入解析为可执行块。
+
+    修复以下 MCP Server 核心问题：
+    - `///` 续行符被误判为 `//` 注释过滤 → 保持原样
+    - `{ }` 复合块（compound braces）跨多行被拆散 → 合并为单次执行
+    - `*` 和 `//` 注释行正常跳过
+
+    Args:
+        cmd: 原始多行命令字符串。
+
+    Returns:
+        可执行命令块列表，每块作为单一 StataSO_Execute 调用。
+    """
+    raw_lines = cmd.strip().split("\n")
+    blocks = []
+    i = 0
+
+    while i < len(raw_lines):
+        line = raw_lines[i]
+        stripped = line.strip()
+
+        # 跳过空行
+        if not stripped:
+            i += 1
+            continue
+
+        # 跳过注释行：* 行首 和 // 行（但不包括 /// 续行符）
+        if stripped.startswith("*"):
+            i += 1
+            continue
+        if stripped.startswith("//") and not stripped.startswith("///"):
+            i += 1
+            continue
+
+        # 处理 /// 续行符：合并到下一行
+        while stripped.endswith("///"):
+            i += 1
+            if i < len(raw_lines):
+                # 去掉 ///，合并续行内容
+                stripped = stripped.rstrip("/") + " " + raw_lines[i].strip()
+            else:
+                break
+
+        # 处理 { } 复合块：跨多行合并为单次执行
+        if "{" in stripped and "}" not in stripped:
+            block_lines = [stripped]
+            brace_depth = stripped.count("{") - stripped.count("}")
+            i += 1
+            while i < len(raw_lines) and brace_depth > 0:
+                next_line = raw_lines[i]
+                block_lines.append(next_line)
+                brace_depth += next_line.count("{") - next_line.count("}")
+                i += 1
+            blocks.append("\n".join(block_lines))
+        else:
+            blocks.append(stripped)
+            i += 1
+
+    return blocks
+
+
 def _drain_output() -> str:
     """排空输出缓冲，返回残留内容。
 
@@ -176,13 +239,100 @@ def _set_break():
         logger.warning("StataSO_SetBreak failed: %s", e)
 
 
-def _execute_single(cmd: str):
+def _ping_stata() -> bool:
+    """快速心跳：检测 Stata DLL 是否存活。
+
+    执行一个无害命令(display 42)，预期返回码 0。
+    若失败则尝试排空缓冲 + SetBreak 恢复一次。
+    Returns:
+        True = 存活, False = 无响应。
+    """
+    for attempt in range(2):  # 首次 + 一次恢复重试
+        try:
+            with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
+                encoded = config.get_encode_str("display 42")
+                rc = config.stlib.StataSO_Execute(encoded, False)
+            # 收集并丢弃输出
+            for _ in range(30):
+                config.get_output()
+                time.sleep(0.001)
+            if rc == 0 or rc == 3000:
+                return True
+        except Exception:
+            pass
+
+        if attempt == 0:
+            logger.warning("Stata ping failed, attempting recovery...")
+            _drain_output()
+            _set_break()
+            time.sleep(0.1)
+
+    return False
+
+
+def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
+    """安全执行 Stata 命令，包含预检 + 崩溃恢复。
+
+    流程：
+      1. ping 预检（Stata DLL 是否存活）
+      2. 若存活 → _execute_single() 正常执行
+      3. 若 _execute_single 返回崩溃码(999) → 尝试恢复
+      4. 若 ping 失败 → 直接返回错误信息
+
+    Args:
+        cmd: Stata 命令字符串。
+        timeout: 超时秒数（默认 60）。
+
+    Returns:
+        (return_code, output_text)
+    """
+    # --- 预检 ---
+    if not _ping_stata():
+        logger.error("Stata 无响应，无法执行命令: %s", cmd[:80])
+        return 998, (
+            "[错误] Stata DLL 无响应。这可能由以下原因导致：\n"
+            "  1. 上一个命令导致 Stata DLL 崩溃\n"
+            "  2. headless 环境中图形操作过载\n"
+            "  3. Stata 会话已损坏\n\n"
+            "建议: 重启 MCP Server（退出并重新打开 Claude Code）\n"
+            "回退: 运行 python auto_analysis.py 使用直接 pystata 执行\n"
+        )
+
+    # --- 执行 ---
+    rc, out = _execute_single(cmd, timeout)
+
+    # --- 崩溃检测与恢复 ---
+    if rc == 999:
+        logger.warning("StataSO_Execute 崩溃, 尝试恢复会话...")
+        _drain_output()
+        _set_break()
+        time.sleep(0.2)
+
+        # 再次 ping 确认恢复
+        if _ping_stata():
+            out += "\n(Stata 已自动恢复，请重试命令)"
+        else:
+            out += (
+                "\n(Stata 崩溃且无法自动恢复，需要重启 MCP Server)"
+            )
+
+    return rc, out
+
+
+def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     """执行单条 Stata 命令，返回 (return_code, output_text)。
 
     使用 RedirectOutput 防止 Stata 输出泄漏到 MCP stdio 通道。
-    内置超时保护：命令执行超过 60 秒时调用 StataSO_SetBreak 中断。
+    内置超时保护：命令执行超过 timeout 秒时调用 StataSO_SetBreak 中断。
 
     支持两阶段输出收集：1ms 快轮询 + 5ms 慢轮询清尾。
+
+    Args:
+        cmd: Stata 命令字符串。
+        timeout: 超时秒数（默认 60）。
+
+    Returns:
+        (return_code, output_text)
     """
     # 执行前排空残留缓冲
     _drain_output()
@@ -194,8 +344,8 @@ def _execute_single(cmd: str):
 
     def _timeout_watchdog():
         nonlocal did_break
-        if not exec_done.wait(timeout=60):
-            logger.warning("Stata command timed out (>60s), issuing break: %s", cmd[:80])
+        if not exec_done.wait(timeout=timeout):
+            logger.warning("Stata command timed out (>%ss), issuing break: %s", timeout, cmd[:80])
             _set_break()
             did_break = True
 
@@ -247,15 +397,18 @@ def _execute_single(cmd: str):
     return rc, "".join(output_parts)
 
 
-def _run_stata_command(cmd: str, page: int = 1) -> str:
+def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60) -> str:
     """执行 Stata 命令，支持分页浏览。
 
     多行命令按 \\n 拆分后逐条执行。
+    支援 `///` 续行符和 `{ }` 复合块（自动合并为单次 StataSO_Execute 调用）。
     当输出超过 PAGE_SIZE 时自动缓存完整输出并返回首页。
+    所有执行经过 _execute_safe（预检 + 超时 + 崩溃恢复）。
 
     Args:
         cmd: Stata 命令字符串（多命令用 \\n 分隔）。
         page: 页码（1-based），0 = 全部，仅对单命令有效。
+        timeout: 每条命令的超时秒数（默认 60）。
 
     Returns:
         Stata 输出文本（可能包含分页导航）。
@@ -269,41 +422,42 @@ def _run_stata_command(cmd: str, page: int = 1) -> str:
         return f"错误: 命令过长（{len(cmd)} 字符），上限 {MAX_COMMAND_LENGTH} 字符"
 
     with _stata_lock:
-        lines = []
-        for line in cmd.strip().split("\n"):
-            stripped = line.strip()
-            # 过滤空行、* 行首注释、// 行注释
-            if stripped and not stripped.startswith("*") and not stripped.startswith("//"):
-                lines.append(stripped)
+        # 使用新的解析器：正确处理 /// 续行和 { } 复合块
+        blocks = _parse_command_blocks(cmd)
 
-        if not lines:
+        if not blocks:
             return "(无有效命令)"
 
         all_output = []
-        for line in lines:
+        for block in blocks:
             try:
-                rc, out = _execute_single(line)
+                rc, out = _execute_safe(block, timeout)
+
+                # RC=998: Stata DLL dead, abort chain
+                if rc == 998:
+                    all_output.append(out)
+                    break
 
                 # STATA_RC_NO_OUTPUT (3000) = 无错误但无实质输出
                 if rc != 0 and rc != STATA_RC_NO_OUTPUT:
-                    prefix = f"[返回码: {rc}] {line[:60]}"
+                    prefix = f"[返回码: {rc}] {block[:60]}"
                     all_output.append(f"{prefix}\n{out.strip()}" if out.strip() else prefix)
                 elif out.strip():
                     all_output.append(out.strip())
 
             except SystemError as e:
-                all_output.append(f"Stata 系统错误 ({line[:40]}): {e}")
+                all_output.append(f"Stata 系统错误 ({block[:40]}): {e}")
             except Exception:
-                logger.exception("Error executing: %s", line[:200])
-                all_output.append(f"执行错误 ({line[:40]}): {sys.exc_info()[1]}")
+                logger.exception("Error executing: %s", block[:200])
+                all_output.append(f"执行错误 ({block[:40]}): {sys.exc_info()[1]}")
 
         full = "\n".join(all_output) if all_output else "(命令执行成功，无文本输出)"
         _last_output = full
 
         # 自动分页：仅当是单条命令且输出超过阈值
-        if len(lines) == 1 and len(full) > PAGE_SIZE:
+        if len(blocks) == 1 and len(full) > PAGE_SIZE:
             return _paginate(full, page)
-        elif len(lines) > 1 and sum(len(o) for o in all_output) > PAGE_SIZE * 3:
+        elif len(blocks) > 1 and sum(len(o) for o in all_output) > PAGE_SIZE * 3:
             # 多命令输出也分页
             return _paginate(full, page)
 
@@ -344,7 +498,7 @@ def _shutdown_stata():
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-def stata_run(command: str, page: int = 1) -> str:
+def stata_run(command: str, page: int = 1, timeout: int = 60) -> str:
     """执行一条或多条 Stata 命令并返回输出。
 
     这是最核心的工具，可以执行任意 Stata 命令。
@@ -353,6 +507,11 @@ def stata_run(command: str, page: int = 1) -> str:
 
     当输出过长时自动分页。使用 stata_more 工具翻页浏览。
 
+    内置安全机制：
+    - 执行前自动检测 Stata DLL 存活（ping）
+    - 若 DLL 无响应，返回明确错误信息而非崩溃
+    - 若命令超时，自动中断返回而非挂起
+
     使用示例：
     - 单条命令: "summarize mpg"
     - 多条命令: "sysuse auto, clear\\nsummarize mpg\\ntabulate foreign"
@@ -360,11 +519,14 @@ def stata_run(command: str, page: int = 1) -> str:
     Args:
         command: Stata 命令，多条命令用 \\n 分隔。
         page: 页码（1-based），仅对单条命令有效。默认 1。
+        timeout: 命令超时秒数（默认 60，最长 300）。
 
     Returns:
         Stata 输出文本（可能包含分页导航）。
     """
-    return _run_stata_command(command, page)
+    # 限定时长范围
+    safe_timeout = max(10, min(timeout, 300))
+    return _run_stata_command(command, page, timeout=safe_timeout)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
@@ -644,25 +806,133 @@ def stata_ttest(varname: str, byvar: str = "", options: str = "") -> str:
 # MCP 工具 — 图形 (readOnlyHint=True)
 # =============================================================================
 
+GRAPH_SCHEMES = {
+    "s2color": "Stata 默认彩色",
+    "s2mono": "黑白/灰度",
+    "s2manual": "Stata 手册风格",
+    "economist": "The Economist 杂志风格（需安装）",
+    "cleanplots": "简洁出版风格（需安装）",
+    "plottig": "Tufte/Edward 风格（需安装）",
+}
+
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_graph(command: str) -> str:
-    """生成 Stata 图形并返回描述信息。
+def stata_graph(
+    command: str,
+    scheme: str = "s2color",
+    export: str = "",
+    width: int = 800,
+    replace: bool = True,
+) -> str:
+    """生成 Stata 图形并可选导出为文件。
 
-    注意：MCP 模式无法直接展示图形，建议使用 graph export 导出为文件。
-
-    使用示例：
-    - "scatter mpg weight"
-    - "histogram price, frequency"
-    - "graph export \\"C:/output/scatter.png\\", replace"
+    自动在命令前设置图形方案（scheme）。
+    当指定 export 时,使用临时 .do 文件将 graph + export 包装在单次
+    StataSO_Execute 调用中,避免图形窗口在 headless 环境中丢失。
 
     Args:
-        command: 图形命令（scatter, histogram, twoway 等）。
+        command: 图形命令(scatter mpg weight, histogram price 等)。
+        scheme: 图形方案(默认 's2color')。常用方案:
+                s2color(默认彩色), s2mono(灰度), s2manual(手册风格)。
+        export: 导出 PNG 文件路径(留空不导出)。例:"C:/output/scatter.png"。
+        width: 导出图片宽度(像素,默认 800)。
+        replace: 是否覆盖已有文件(默认 True)。
 
     Returns:
         图形生成确认信息。
     """
-    return _run_stata_command(command)
+    try:
+        if not export:
+            return _run_stata_command(f"set scheme {scheme}\n{command}")
+
+        # 导出模式：通过 .do 文件确保 graph + export 在同一次调用中
+        export_path = _normalize_path(export)
+        replace_opt = "replace" if replace else ""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".do", delete=False, encoding="utf-8"
+        ) as f:
+            do_path = f.name
+            f.write(f"set scheme {scheme}\n")
+            f.write(f"{command}\n")
+            f.write(
+                f'graph export "{export_path}", {replace_opt} width({width})\n'
+            )
+            f.write("graph drop _all\n")
+
+        do_path_normalized = _normalize_path(do_path)
+        result = _run_stata_command(f'do "{do_path_normalized}"')
+        return result
+
+    except Exception as e:
+        return f"图形生成失败: {type(e).__name__}: {e}"
+    finally:
+        # 确保 .do 文件被清理
+        try:
+            if "do_path" in dir() and os.path.isfile(do_path):
+                os.unlink(do_path)
+        except Exception:
+            pass
+
+
+# =============================================================================
+# MCP 工具 — Excel 导出 (destructiveHint=True)
+# =============================================================================
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_export_excel(
+    filepath: str,
+    varlist: str = "",
+    sheet: str = "Sheet1",
+    replace: bool = True,
+    results: bool = False,
+) -> str:
+    """将当前数据集导出为 Excel (.xlsx) 文件。
+
+    使用 Stata 的 export excel 命令导出数据。
+    也支持使用 esttab 或 outreg2 导出回归结果表到 Excel。
+
+    Args:
+        filepath: 导出路径（建议 .xlsx 扩展名）。
+        varlist: 要导出的变量列表（空格分隔），留空 = 全部变量。
+        sheet: Excel 工作表名（默认 "Sheet1"）。
+        replace: 是否覆盖已有文件（默认 True）。
+        results: 若为 True，将当前存储的回归结果导出为表格而非原始数据。
+
+    Returns:
+        导出确认信息。
+    """
+    export_path = _normalize_path(filepath)
+    replace_opt = "replace" if replace else ""
+    firstrow_opt = "firstrow(variables)"
+
+    if results:
+        # 导出回归结果为 Excel 表
+        cmd = (
+            f"esttab using \"{export_path}\", {replace_opt} "
+            f"sheet({sheet}) plain nogaps nomtitle nonumber"
+        )
+    else:
+        # 导出数据集
+        if varlist.strip():
+            cmd = (
+                f"export excel {varlist} using \"{export_path}\", "
+                f"{replace_opt} {firstrow_opt} sheet({sheet})"
+            )
+        else:
+            cmd = (
+                f"export excel using \"{export_path}\", "
+                f"{replace_opt} {firstrow_opt} sheet({sheet})"
+            )
+
+    result = _run_stata_command(cmd)
+
+    # 验证文件已生成
+    if os.path.isfile(export_path):
+        size_kb = os.path.getsize(export_path) // 1024
+        return f"✓ 已导出 {size_kb} KB → {export_path}\n{result}"
+    return result
 
 
 # =============================================================================
@@ -759,6 +1029,26 @@ def stata_status() -> str:
         会话状态摘要。
     """
     return _run_stata_command("describe\ncd\nmemory")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_ping() -> str:
+    """心跳检测 — 快速测试 Stata MCP Server 是否存活。
+
+    执行一个极简的 Stata 命令(display 42)并返回。
+    如果 Stata DLL 已崩溃或 MCP 连接已断开，此工具会报错。
+
+    Returns:
+        "pong" + 当前 Stata 版本信息。
+    """
+    try:
+        result = _run_stata_command("display 42")
+        version = getattr(config, "stversion", "?")
+        edition = getattr(config, "stedition", "?")
+        status = "alive" if "42" in result else "degraded"
+        return f"pong | Stata {version} {edition} | {status}"
+    except Exception as e:
+        return f"Stata 心跳失败: {type(e).__name__}: {e}"
 
 
 # =============================================================================

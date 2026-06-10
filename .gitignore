@@ -34,3 +34,8 @@ _test_output/
 *.log
 *.smcl
 *.dta
+
+# Generated analysis output (auto_analysis.py / test_stata_mcp.py)
+*.png
+*.xlsx
+temp_do/
