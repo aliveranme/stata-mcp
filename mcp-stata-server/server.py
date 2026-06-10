@@ -56,8 +56,10 @@ except ImportError as e:
 
 try:
     config.init(STATA_EDITION, splash=False)
+    # 关键: 关闭流式输出，避免额外线程干扰 MCP stdio
+    config.stconfig['streamout'] = 'off'
     logger.info(
-        "Stata %s %s initialized at %s",
+        "Stata %s %s initialized at %s (streamout=off)",
         config.stversion,
         config.stedition,
         config.sthome,
@@ -66,6 +68,9 @@ except SystemError as e:
     logger.error("Stata initialization failed: %s", e)
     print(f"FATAL: Failed to initialize Stata: {e}", file=sys.stderr)
     sys.exit(1)
+
+# stout 必须在 init() 之后导入（check_initialized 检查）
+from pystata.core import stout
 
 
 # =============================================================================
@@ -87,12 +92,16 @@ mcp = FastMCP(
 _stata_lock = threading.Lock()
 
 
-def _execute_single(cmd: str) -> tuple:
-    """执行单条 Stata 命令，返回 (return_code, output_text)。"""
-    encoded = config.get_encode_str(cmd)
-    rc = config.stlib.StataSO_Execute(encoded, False)
+def _execute_single(cmd: str):
+    """执行单条 Stata 命令，返回 (return_code, output_text)。
 
-    # 阶段 1：快速轮询
+    使用 RedirectOutput 防止 Stata 输出泄漏到 MCP stdio 通道。
+    """
+    with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
+        encoded = config.get_encode_str(cmd)
+        rc = config.stlib.StataSO_Execute(encoded, False)
+
+    # 从 Stata 缓冲收集输出
     output_parts = []
     empty_count = 0
     for _ in range(200):
@@ -106,8 +115,8 @@ def _execute_single(cmd: str) -> tuple:
                 break
         time.sleep(0.005)
 
-    # 阶段 2：延迟等待
-    time.sleep(0.08)
+    # 延迟等待尾部输出
+    time.sleep(0.05)
     for _ in range(10):
         out = config.get_output()
         if out:
