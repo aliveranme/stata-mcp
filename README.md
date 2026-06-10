@@ -24,51 +24,50 @@
 ## 前置条件
 
 - **Windows** 操作系统
-- **StataNow 19**（或 Stata 18+ MP/SE/BE），安装在 `D:\StataNow19`（可通过环境变量自定义）
+- **StataNow 19** 或 **Stata 18+**（MP / SE / BE 版本均可）
 - **Python 3.10+**（推荐 3.12+）
 - **Claude Code**（最新版本）
 
 ## 快速开始
 
-### 1. 配置环境
+### 1. 克隆并运行安装脚本
 
 ```bash
-# 克隆仓库
-git clone <repo-url>
-cd temp
+git clone https://gitea.aliveranme.space/aliveranme/stata-mcp.git
+cd stata-mcp
+python setup.py
+```
 
-# 创建 Python 虚拟环境并安装依赖
+`setup.py` 自动完成：
+1. 检测 Stata 安装路径（检查常见目录 + 环境变量 `STATA_HOME`）
+2. 创建 Python 虚拟环境并安装 `fastmcp`
+3. 生成 `.mcp.json` 配置文件（含正确路径）
+4. 验证 MCP Server 可正常启动
+
+### 2. 手动安装（备选）
+
+如果自动检测失败，先设置环境变量再运行：
+
+```bash
+# 设置 Stata 路径
+set STATA_HOME=D:/StataNow19
+set STATA_EDITION=mp
+
+# 创建虚拟环境
 cd mcp-stata-server
 uv venv
-source .venv/Scripts/activate  # Windows Git Bash
+source .venv/Scripts/activate
 uv pip install fastmcp
+
+# 复制并编辑 .mcp.json
+cd ..
+cp .mcp.json.example .mcp.json
+# 编辑 .mcp.json，将 <repo-path> 替换为实际路径
 ```
 
-### 2. 配置 Stata 路径（可选）
+### 3. 连接 Claude Code
 
-如果 Stata 安装在非默认路径，设置环境变量：
-
-```bash
-export STATA_HOME="E:/Stata18"      # 默认 D:/StataNow19
-export STATA_EDITION="se"           # 默认 mp，可选 se/be
-```
-
-### 3. 配置 Claude Code
-
-项目根目录的 `.mcp.json` 已包含 MCP Server 配置：
-
-```json
-{
-  "mcpServers": {
-    "stata": {
-      "command": "F:/Projects/temp/temp/temp/mcp-stata-server/.venv/Scripts/python.exe",
-      "args": ["F:/Projects/temp/temp/temp/mcp-stata-server/server.py"]
-    }
-  }
-}
-```
-
-重启 Claude Code 或运行 `/reload-plugins` 即可连接。
+重启 Claude Code（或运行 `/reload-plugins`），`.mcp.json` 中配置的 `stata` MCP Server 会自动连接。
 
 ### 4. 验证
 

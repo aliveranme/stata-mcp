@@ -24,6 +24,9 @@ Thumbs.db
 # Claude Code
 .claude/workspace/
 
+# Generated MCP config (run setup.py to create)
+.mcp.json
+
 # Stata
 *.log
 *.smcl
