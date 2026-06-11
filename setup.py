@@ -205,48 +205,67 @@ def generate_mcp_json(project_root, python_exe, stata_home):
 # =============================================================================
 
 def test_server(project_root, python_exe, stata_home):
-    """测试 MCP Server 能否正常加载。"""
+    """测试 MCP Server 能否正常加载。
+
+    使用 importlib 加载 server 模块并枚举工具数量。
+    在子进程中执行以避免污染主进程状态。
+    """
+    import json
     server_script = os.path.join(project_root, "mcp-stata-server", "server.py")
     env = os.environ.copy()
     env["STATA_HOME"] = stata_home
     env["STATA_EDITION"] = "mp"
 
     print(f"  正在测试服务器...")
-    test_code = (
-        "import  sys, os\n"
-        "os.environ['STATA_HOME'] = " + repr(stata_home) + "\n"
-        "os.environ['STATA_EDITION'] = 'mp'\n"
-        "exec(open(" + repr(server_script) + ", encoding='utf-8').read()"
-        ".replace('if __name__ == \"__main__\":', 'if False:'))\n"
-        "import asyncio\n"
-        "async def c():\n"
-        "    tools = await mcp.list_tools()\n"
-        "    print('TOOLS:' + str(len(tools)))\n"
-        "asyncio.run(c())\n"
-    )
 
-    result = subprocess.run(
-        [python_exe, "-c", test_code],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=os.path.join(project_root, "mcp-stata-server"),
-    )
+    # 写入临时测试脚本（比 exec() 字符串拼接更可靠）
+    test_script = os.path.join(project_root, "mcp-stata-server", "_test_bootstrap.py")
+    with open(test_script, "w", encoding="utf-8") as f:
+        f.write(
+            '"""Bootstrap test — imported by setup.py to verify MCP server."""\n'
+            "import sys, os\n"
+            f"sys.path.insert(0, {repr(os.path.join(stata_home, 'utilities'))})\n"
+            "os.environ['STATA_HOME'] = " + repr(stata_home) + "\n"
+            "os.environ['STATA_EDITION'] = 'mp'\n"
+            "import importlib.util\n"
+            "spec = importlib.util.spec_from_file_location(\n"
+            "    'stata_server', " + repr(server_script) + "\n"
+            ")\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            "import asyncio\n"
+            "async def _list():\n"
+            "    tools = await mod.mcp.list_tools()\n"
+            "    print('TOOLS:' + str(len(tools)))\n"
+            "asyncio.run(_list())\n"
+        )
 
-    # 在 stdout/stderr 中查找 TOOLS: 标记
-    combined = (result.stdout or "") + (result.stderr or "")
-    if "TOOLS:" in combined:
-        n_tools = combined.split("TOOLS:")[-1].strip().split()[0]
-        print(f"  {green('✓')} 服务器正常 — 注册了 {n_tools} 个工具")
-        return True
-    else:
-        print(f"  {red('✗')} 服务器测试失败")
-        if result.stderr.strip():
-            lines = [l for l in result.stderr.strip().split("\n") if "TOOLS:" not in l]
-            for l in lines[-3:]:
-                print(f"    {l[:200]}")
-        return False
+    try:
+        result = subprocess.run(
+            [python_exe, test_script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=os.path.join(project_root, "mcp-stata-server"),
+        )
+
+        # 在 stdout/stderr 中查找 TOOLS: 标记
+        combined = (result.stdout or "") + (result.stderr or "")
+        if "TOOLS:" in combined:
+            n_tools = combined.split("TOOLS:")[-1].strip().split()[0]
+            print(f"  {green('✓')} 服务器正常 — 注册了 {n_tools} 个工具")
+            return True
+        else:
+            print(f"  {red('✗')} 服务器测试失败")
+            if result.stderr.strip():
+                lines = [l for l in result.stderr.strip().split("\n") if "TOOLS:" not in l]
+                for l in lines[-3:]:
+                    print(f"    {l[:200]}")
+            return False
+    finally:
+        if os.path.isfile(test_script):
+            os.unlink(test_script)
 
 
 # =============================================================================

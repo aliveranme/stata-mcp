@@ -18,7 +18,6 @@ import time
 import threading
 import atexit
 import logging
-import tempfile
 
 # =============================================================================
 # 配置
@@ -102,6 +101,32 @@ STATA_RC_NO_OUTPUT = 3000
 MAX_COMMAND_LENGTH = 65_536
 # 最近一次完整输出的缓存（支持翻页）
 _last_output = ""
+# Ping 缓存：避免高频命令的重复心跳开销
+_last_ping_time = 0.0
+PING_CACHE_SECONDS = 2.0  # 2 秒内跳过重复 ping
+
+# Stata 返回码中文释义
+STATA_RC_MESSAGES = {
+    0: "成功",
+    1: "未指定的错误",
+    2: "无效的命令或选项",
+    3: "未找到指定的文件",
+    4: "内存不足",
+    5: "变量不存在",
+    6: "系统错误",
+    7: "操作被中断",
+    8: "无效的语法表达式",
+    9: "变量类型不匹配",
+    10: "数据集中无观测值",
+    20: "矩阵尺寸不匹配",
+    99: "观测值不足",
+    111: "变量名已存在",
+    198: "命令语法错误",
+    199: "选项语法错误",
+    3000: "命令执行成功，无文本输出",
+    999: "Stata DLL 内部崩溃",
+    998: "Stata DLL 无响应",
+}
 
 
 def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
@@ -204,25 +229,28 @@ def _parse_command_blocks(cmd: str) -> list:
     return blocks
 
 
-def _drain_output() -> str:
+def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
     """排空输出缓冲，返回残留内容。
 
-    等待至少 200ms 确保 Stata 完成所有输出生产。
+    使用自适应等待策略：
+    - 前 100ms 密集轮询（1ms 间隔）
+    - 每轮检查 20ms 安静窗口确保输出完整
+    参数可调：min_wait=最小等待秒，quiet_gap=安静判定秒。
+
     用于执行前清理和 SetBreak 后的错误恢复。
     """
     parts = []
     t_start = time.time()
     last_nonempty = time.time()
 
-    while time.time() - t_start < 0.2:  # 最少等待 200ms
+    while time.time() - t_start < min_wait:
         out = config.get_output()
         if out:
             parts.append(out)
             last_nonempty = time.time()
-        # 最近一次输出后至少 30ms 无新输出才退出
-        if time.time() - last_nonempty > 0.03:
+        if time.time() - last_nonempty > quiet_gap:
             break
-        time.sleep(0.005)
+        time.sleep(0.001)
 
     return "".join(parts)
 
@@ -241,20 +269,25 @@ def _ping_stata() -> bool:
     """快速心跳：检测 Stata DLL 是否存活。
 
     执行一个无害命令(display 42)，预期返回码 0。
+    成功时更新 _last_ping_time 缓存。
     若失败则尝试排空缓冲 + SetBreak 恢复一次。
+
     Returns:
         True = 存活, False = 无响应。
     """
+    global _last_ping_time
+
     for attempt in range(2):  # 首次 + 一次恢复重试
         try:
             with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
                 encoded = config.get_encode_str("display 42")
                 rc = config.stlib.StataSO_Execute(encoded, False)
-            # 收集并丢弃输出
+            # 快速排空（已缓存，不再需要全量 drain）
             for _ in range(30):
                 config.get_output()
                 time.sleep(0.001)
             if rc == 0 or rc == 3000:
+                _last_ping_time = time.time()
                 return True
         except Exception:
             pass
@@ -271,8 +304,9 @@ def _ping_stata() -> bool:
 def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
     """安全执行 Stata 命令，包含预检 + 崩溃恢复。
 
+    **预检优化**：2 秒内对同一会话的连续调用跳过重复 ping。
     流程：
-      1. ping 预检（Stata DLL 是否存活）
+      1. ping 预检（缓存有效则跳过）
       2. 若存活 → _execute_single() 正常执行
       3. 若 _execute_single 返回崩溃码(999) → 尝试恢复
       4. 若 ping 失败 → 直接返回错误信息
@@ -284,16 +318,20 @@ def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
     Returns:
         (return_code, output_text)
     """
-    # --- 预检 ---
-    if not _ping_stata():
-        logger.error("Stata 无响应，无法执行命令: %s", cmd[:80])
-        return 998, (
-            "[错误] Stata DLL 无响应。这可能由以下原因导致：\n"
-            "  1. 上一个命令导致 Stata DLL 崩溃\n"
-            "  2. headless 环境中图形操作过载\n"
-            "  3. Stata 会话已损坏\n\n"
-            "建议: 重启 MCP Server（退出并重新打开 Claude Code）\n"
-        )
+    # --- 预检（带缓存）---
+    now = time.time()
+    if now - _last_ping_time >= PING_CACHE_SECONDS:
+        if not _ping_stata():
+            logger.error("Stata 无响应，无法执行命令: %s", cmd[:80])
+            return 998, (
+                "[错误] Stata DLL 无响应。这可能由以下原因导致：\n"
+                "  1. 上一个命令导致 Stata DLL 崩溃\n"
+                "  2. headless 环境中图形操作过载\n"
+                "  3. Stata 会话已损坏\n\n"
+                "建议: 重启 MCP Server（退出并重新打开 Claude Code）\n"
+            )
+    else:
+        logger.debug("Skipped ping (cached %.1fs ago)", now - _last_ping_time)
 
     # --- 执行 ---
     rc, out = _execute_single(cmd, timeout)
@@ -322,7 +360,10 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     使用 RedirectOutput 防止 Stata 输出泄漏到 MCP stdio 通道。
     内置超时保护：命令执行超过 timeout 秒时调用 StataSO_SetBreak 中断。
 
-    支持两阶段输出收集：1ms 快轮询 + 5ms 慢轮询清尾。
+    **输出收集优化**：自适应轮询 + 智能清尾。
+    - 首次 300ms 快轮询：1ms 间隔，连续 3 次空转退出
+    - 然后 50ms 短 drain：仅在小输出时执行
+    - 仅在输出量 ≥ 10K 时执行完整 drain（100ms）
 
     Args:
         cmd: Stata 命令字符串。
@@ -331,11 +372,10 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     Returns:
         (return_code, output_text)
     """
-    # 执行前排空残留缓冲
-    _drain_output()
+    # 执行前排空残留缓冲（最短 drain）
+    _drain_output(min_wait=0.05, quiet_gap=0.01)
 
     # 超时看门狗（防止 StataSO_Execute 挂起导致 MCP 通信阻塞）
-    # 使用 threading.Event 避免竞态：SetBreak 仅在命令实际还在运行时触发
     exec_done = threading.Event()
     did_break = False
 
@@ -363,13 +403,14 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     # 仅在看门狗触发 break 后排空错误输出
     if did_break:
         time.sleep(0.1)
-        _drain_output()
+        _drain_output(min_wait=0.05)
 
-    # 收集输出
+    # --- 自适应输出收集 ---
     output_parts = []
     total_len = 0
     empty_count = 0
 
+    # 阶段 1: 快轮询 (300×1ms, 连续 3 空转退出)
     for _ in range(300):
         out = config.get_output()
         if out:
@@ -385,13 +426,29 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
                 break
         time.sleep(0.001)
 
+    # 阶段 2: 智能清尾 — 仅在输出较小时做短 drain
     if total_len < MAX_OUTPUT_CHARS:
-        tail = _drain_output()
+        if total_len < 10_000:
+            # 小输出：短 drain（50ms 上限）
+            tail = _drain_output(min_wait=0.05, quiet_gap=0.01)
+        else:
+            # 大输出：完整 drain（100ms 上限）
+            tail = _drain_output(min_wait=0.1, quiet_gap=0.015)
         if tail:
             output_parts.append(tail)
             total_len += len(tail)
 
     return rc, "".join(output_parts)
+
+
+def _format_error(rc: int, block: str, out: str) -> str:
+    """格式化 Stata 错误信息，包含返回码释义。"""
+    msg = STATA_RC_MESSAGES.get(rc, f"未知返回码({rc})")
+    prefix = f"[返回码: {rc}] {msg}"
+    snippet = block[:60]
+    if out.strip():
+        return f"{prefix} — {snippet}\n{out.strip()}"
+    return f"{prefix} — {snippet}"
 
 
 def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60) -> str:
@@ -437,8 +494,7 @@ def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60) -> str:
 
                 # STATA_RC_NO_OUTPUT (3000) = 无错误但无实质输出
                 if rc != 0 and rc != STATA_RC_NO_OUTPUT:
-                    prefix = f"[返回码: {rc}] {block[:60]}"
-                    all_output.append(f"{prefix}\n{out.strip()}" if out.strip() else prefix)
+                    all_output.append(_format_error(rc, block, out))
                 elif out.strip():
                     all_output.append(out.strip())
 
@@ -824,8 +880,12 @@ def stata_graph(
     """生成 Stata 图形并可选导出为文件。
 
     自动在命令前设置图形方案（scheme）。
-    当指定 export 时,使用临时 .do 文件将 graph + export 包装在单次
+    当指定 export 时,使用 { } 复合块将 graph + export 包装在单次
     StataSO_Execute 调用中,避免图形窗口在 headless 环境中丢失。
+
+    支持两种导出方式（推荐使用第一种）：
+    1. export 参数 — 自动生成 { } 复合块，无需临时文件
+    2. 或在 command 中手动写 capture noisily { ... }
 
     Args:
         command: 图形命令(scatter mpg weight, histogram price 等)。
@@ -842,34 +902,30 @@ def stata_graph(
         if not export:
             return _run_stata_command(f"set scheme {scheme}\n{command}")
 
-        # 导出模式：通过 .do 文件确保 graph + export 在同一次调用中
+        # 导出模式：使用 { } 复合块确保 graph + export 原子执行
         export_path = _normalize_path(export)
         replace_opt = "replace" if replace else ""
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".do", delete=False, encoding="utf-8"
-        ) as f:
-            do_path = f.name
-            f.write(f"set scheme {scheme}\n")
-            f.write(f"{command}\n")
-            f.write(
-                f'graph export "{export_path}", {replace_opt} width({width})\n'
-            )
-            f.write("graph drop _all\n")
+        compound = (
+            f"capture noisily {{\n"
+            f"    set scheme {scheme}\n"
+            f"    {command}\n"
+            f'    graph export "{export_path}", {replace_opt} width({width})\n'
+            f"    graph drop _all\n"
+            f"}}"
+        )
 
-        do_path_normalized = _normalize_path(do_path)
-        result = _run_stata_command(f'do "{do_path_normalized}"')
+        result = _run_stata_command(compound)
+
+        # 验证文件是否生成
+        if os.path.isfile(export_path):
+            size_kb = os.path.getsize(export_path) // 1024
+            result += f"\n(图形已导出: {export_path}, {size_kb}KB)"
+
         return result
 
     except Exception as e:
         return f"图形生成失败: {type(e).__name__}: {e}"
-    finally:
-        # 确保 .do 文件被清理
-        try:
-            if "do_path" in dir() and os.path.isfile(do_path):
-                os.unlink(do_path)
-        except Exception:
-            pass
 
 
 # =============================================================================
@@ -906,7 +962,13 @@ def stata_export_excel(
 
     if results:
         # 导出回归结果为 Excel 表
+        # 先检查 estout 是否已安装，未安装则自动安装
         cmd = (
+            f"capture which estout\n"
+            f"if _rc {{\n"
+            f'    display "正在安装 estout..."\n'
+            f"    ssc install estout, quiet\n"
+            f"}}\n"
             f"esttab using \"{export_path}\", {replace_opt} "
             f"sheet({sheet}) plain nogaps nomtitle nonumber"
         )

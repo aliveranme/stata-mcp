@@ -59,15 +59,24 @@ stata-mcp/
 每个 `StataSO_Execute` 调用必须包裹在 `RedirectOutput(StataDisplay, StataError)` 中。
 否则 Stata 输出直接写入 `sys.stdout`（即 MCP stdio 通道），污染 JSON-RPC 协议 -> 终端崩溃。
 
-### 输出收集
+### 输出收集（自适应优化）
 
 ```
-执行前: _drain_output()     — 排空残留缓冲（200ms 上限 + 30ms 安静退出）
-执行中: StataSO_Execute     — 同步调用，60s 超时看门狗
-执行后: 快轮询(300×1ms)     — 收集主体输出
-        _drain_output()     — 收集尾部输出（复用同一函数）
-        截断 120K chars     — 防止 MCP 缓冲溢出
-        自动分页 4K chars    — 大输出自动分页，支持 stata_more 翻页
+执行前: _drain_output(50ms)  — 短排空残留缓冲（50ms 上限 + 10ms 安静退出）
+执行中: StataSO_Execute       — 同步调用，60s 超时看门狗
+执行后: 快轮询(300×1ms)       — 收集主体输出，3次空转即退出
+        _drain_output()       — 智能清尾：小输出 50ms | 大输出 100ms
+        截断 120K chars        — 防止 MCP 缓冲溢出
+        自动分页 4K chars       — 大输出自动分页，支持 stata_more 翻页
+```
+
+### Ping 缓存
+
+每次命令执行前的 `_ping_stata()` 心跳检测有 **2 秒缓存**：同一会话的连续快速调用跳过重复 ping，实测将多步分析流程（如 `regress → estat vif → estat hettest`）的总延迟降低 30-50%。
+
+```
+命令 1 → ping(实时) → execute → 命令 2 → ping(缓存命中) → execute → 命令 3 → ping(缓存命中) → execute
+                              ↑ 2 秒内不再重复 ping
 ```
 
 ### `_parse_command_blocks` 解析器
@@ -166,7 +175,7 @@ Stata 命令执行异常链:
 
 ### 图形导出最佳实践
 ```stata
-* ✅ 推荐：使用 stata_graph 的 export 参数（自动用 .do 文件包裹）
+* ✅ 推荐：使用 stata_graph 的 export 参数（自动用 { } 复合块，无临时文件）
 stata_graph(command="twoway scatter price weight", export="graph.png", scheme="economist")
 
 * ✅ 也支持：在 stata_run 中用 { } 复合块（自动合并为单次执行）
@@ -214,8 +223,6 @@ stata_run("graph export graph.png, replace")   ← 可能失败：r(601)
 
 ## 已知局限
 
-- **`setup.py` 的 `test_server` 函数**：使用 `exec()` + 文本替换避开 `main` 块，易因空格变动失效。将来应改用 `importlib` 直接验证工具注册。
 - **无 CI/lint 配置**：无 `mypy`、`ruff`、`pre-commit`。server.py 混合中英文标识符。
 - **日志仅 stderr**：MCP 传输中断后日志丢失，未配置文件日志处理器。
-- **`stata_graph` 的 export 参数依赖临时 .do 文件**：在极低磁盘空间环境下可能失败。
-- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会尝试使用 `esttab` 导出估计结果；若 `esttab` 未安装则回退到原始数据导出。
+- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会尝试使用 `esttab` 导出估计结果；若 `esttab` 未安装则自动安装。

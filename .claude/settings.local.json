@@ -6,14 +6,15 @@
       "WebFetch(domain:api-docs.deepseek.com)",
       "Bash(pip3 list *)",
       "Bash(uv --version)",
-      "Bash(\"D:/StataNow19/StataMP-64.exe\" /?)"
+      "Bash(\"D:/StataNow19/StataMP-64.exe\" /?)",
+      "Skill(code-review:code-review)"
     ]
   },
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "stata"
   ],
   "enabledPlugins": {
     "mcp-server-dev@claude-plugins-official": true
-  },
-  "enableAllProjectMcpServers": true
+  }
 }

@@ -10,6 +10,7 @@ build/
 venv/
 env/
 
+work/
 # IDE
 .vscode/
 .idea/
