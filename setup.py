@@ -347,7 +347,10 @@ def main():
 
     # ---- Step 4: 验证 ----
     print(bold("Step 4: 验证"))
-    test_server(project_root, python_exe, stata_home, stata_edition)
+    if not test_server(project_root, python_exe, stata_home, stata_edition):
+        print()
+        print(f"  {red('✗')} 服务器验证未通过，请检查上面的错误信息")
+        return 1
     print()
 
     # ---- 完成 ----

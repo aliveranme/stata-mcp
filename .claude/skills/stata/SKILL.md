@@ -86,25 +86,25 @@ description: >
 | 工具 | 用途 |
 |------|------|
 | `stata_describe` | 变量基本信息 |
-| `stata_codebook` | 详细变量字典 |
-| `stata_summarize` | 描述统计量 |
-| `stata_list` | 查看数据值 |
-| `stata_tabulate` | 频数/交叉表 |
+| `stata_codebook` | 详细变量字典；支持 `condition` |
+| `stata_summarize` | 描述统计量；支持 `condition` / `detail` |
+| `stata_list` | 查看数据值；支持 `condition` / `in_range` |
+| `stata_tabulate` | 频数/交叉表；支持 `condition`、卡方检验 |
 | `stata_display` | 表达式计算/返回值 |
 
 ### 统计分析（只读）
 | 工具 | 用途 | 模型类型 |
 |------|------|----------|
-| `stata_regress` | 线性回归 (OLS) | 横截面 |
-| `stata_logistic` | Logistic 回归 | 二元选择 |
-| `stata_ttest` | t 检验 | 均值比较 |
+| `stata_regress` | 线性回归 (OLS)；支持 `condition` | 横截面 |
+| `stata_logistic` | Logistic 回归；支持 `condition` | 二元选择 |
+| `stata_ttest` | t 检验；支持 `condition`、按组检验 | 均值比较 |
 
 ### 通用执行
 | 工具 | 用途 |
 |------|------|
 | `stata_run` | **执行任意 Stata 命令**（用于以上工具未覆盖的操作） |
 | `stata_run_do_file` | 执行 .do 文件 |
-| `stata_graph` | 生成图形（推荐使用 `export` 参数直接导出） |
+| `stata_graph` | 生成图形（推荐使用 `export` 参数直接导出；支持 `height`） |
 
 ### 结果导出
 | 工具 | 用途 |
@@ -114,10 +114,15 @@ description: >
 ### 包管理
 | 工具 | 用途 |
 |------|------|
-| `stata_install_package` | 安装扩展包 |
+| `stata_install_package` | 安装扩展包（ssc 或完整 from() URL） |
 | `stata_find_package` | 搜索扩展包 |
 | `stata_list_packages` | 列出已安装包 |
-| `stata_status` | 查看会话状态 |
+
+### 会话控制
+| 工具 | 用途 |
+|------|------|
+| `stata_status` | 查看会话状态（当前数据、工作目录、内存） |
+| `stata_ping` | 快速检测 Stata DLL 存活 |
 
 ### 工具选择指南
 

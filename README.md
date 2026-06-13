@@ -97,25 +97,25 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 | 工具 | 说明 |
 |------|------|
 | `stata_describe` | 变量基本信息（类型、标签） |
-| `stata_codebook` | 详细变量字典（值标签、分布） |
-| `stata_summarize` | 描述统计量（均值、标准差等） |
-| `stata_list` | 查看数据值 |
-| `stata_tabulate` | 频数表 / 交叉表 |
+| `stata_codebook` | 详细变量字典（值标签、分布）；支持 `condition` |
+| `stata_summarize` | 描述统计量（均值、标准差等）；支持 `condition` 和 `detail` |
+| `stata_list` | 查看数据值；支持 `condition` / `in_range` |
+| `stata_tabulate` | 频数表 / 交叉表；支持 `condition`、卡方检验 |
 | `stata_display` | 表达式计算 / 查看返回值 |
 
 ### 统计分析
 | 工具 | 说明 |
 |------|------|
-| `stata_regress` | 线性回归 (OLS) |
-| `stata_logistic` | Logistic 回归 (Logit) |
-| `stata_ttest` | t 检验 |
+| `stata_regress` | 线性回归 (OLS)；支持 `condition` |
+| `stata_logistic` | Logistic 回归 (Logit)；支持 `condition` |
+| `stata_ttest` | t 检验；支持 `condition`、按组检验 |
 
 ### 通用执行
 | 工具 | 说明 |
 |------|------|
 | `stata_run` | **执行任意 Stata 命令**（含分页） |
 | `stata_run_do_file` | 执行 .do 文件 |
-| `stata_graph` | 生成图形 |
+| `stata_graph` | 生成图形；推荐 `export` 参数直接导出，支持 `height` |
 | `stata_more` | **翻页浏览大输出** |
 
 ### 导出
@@ -129,7 +129,12 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 | `stata_install_package` | 安装扩展包（ssc 或完整 from() URL） |
 | `stata_find_package` | 搜索扩展包 |
 | `stata_list_packages` | 列出已安装包 |
-| `stata_status` | 会话状态 |
+
+### 会话控制
+| 工具 | 说明 |
+|------|------|
+| `stata_status` | 会话状态（当前数据、工作目录、内存） |
+| `stata_ping` | 快速检测 Stata DLL 存活 |
 
 ## 项目结构
 

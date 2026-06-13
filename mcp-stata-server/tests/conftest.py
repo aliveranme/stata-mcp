@@ -1,5 +1,6 @@
 import os
 import sys
+import atexit
 from unittest.mock import MagicMock
 
 # Ensure server.py can be imported as a plain module.
@@ -17,7 +18,13 @@ def _fake_isdir(path):
     return _real_isdir(path)
 
 
-os.path.isdir = _fake_isdir
+if os.path.isdir is not _fake_isdir:
+    os.path.isdir = _fake_isdir
+
+    def _restore_isdir():
+        os.path.isdir = _real_isdir
+
+    atexit.register(_restore_isdir)
 
 # Stub pystata so that importing server.py does not require an actual Stata install.
 if "pystata" not in sys.modules:

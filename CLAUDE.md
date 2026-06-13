@@ -202,7 +202,7 @@ stata_run("graph export graph.png, replace")   ← 可能失败：r(601)
 | 任意命令 | `StataSO_Execute` stdout 泄漏→JSON-RPC 污染 | `RedirectOutput` + `streamout='off'` |
 | `binscatter` | headless 无图窗→Stata 挂起 | 60s 看门狗 + `StataSO_SetBreak` |
 | `winsor2` 选项冲突 | 级联错误→DLL 崩溃 | `_drain_output` 缓冲隔离 + 逐命令错误处理 |
-| 高并发调用 | threading.Lock 竞态 | 改用 `threading.Event` |
+| 高并发调用 | Stata DLL 非线程安全，并发调用会竞态崩溃 | 使用 `threading.Lock` 将所有命令串行化，并配合 `SetBreak` 恢复 |
 | `///` 续行被过滤 | 解析器把 `///` 当 `//` 注释跳过 | `_parse_command_blocks` 区隔 `///` vs `//` |
 | graph + export 分步失败 | 两次 `StataSO_Execute` 间图形窗口丢失 | `_parse_command_blocks` 支持 `{ }` 复合块原子执行 |
 | 中文字符在 Stata 报错 | 单引号 `'` 被 Stata 解释为宏引用 | 改用 `\`"中文\"'` 语法 |
@@ -224,5 +224,5 @@ stata_run("graph export graph.png, replace")   ← 可能失败：r(601)
 ## 已知局限
 
 - **无 CI/lint 配置**：无 `mypy`、`ruff`、`pre-commit`。server.py 混合中英文标识符。
-- **日志仅 stderr**：MCP 传输中断后日志丢失，未配置文件日志处理器。
+- **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
 - **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会尝试使用 `esttab` 导出估计结果；若 `esttab` 未安装则自动安装。

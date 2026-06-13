@@ -40,8 +40,12 @@ _log_formatter = logging.Formatter("[stata-mcp] %(levelname)s: %(message)s")
 logger = logging.getLogger("stata-mcp")
 logger.setLevel(logging.WARNING)
 logger.propagate = False
-# 清除可能已存在的处理器，避免重复输出（模块重载场景）
+# 清除可能已存在的处理器，避免重复输出（模块重载场景）；先关闭释放文件句柄
 for _h in list(logger.handlers):
+    try:
+        _h.close()
+    except Exception:
+        pass
     logger.removeHandler(_h)
 
 _stderr_handler = logging.StreamHandler(sys.stderr)
@@ -211,8 +215,8 @@ def _parse_command_blocks(cmd: str) -> list:
 
     def _scan_line(line: str, in_block_comment: bool):
         """扫描单行，返回 (有效内容, 是否有续行, 花括号深度变化, 是否仍在块注释中, 续行前是否有空格)。"""
-        stripped = line.lstrip()
-        if not in_block_comment and stripped.startswith("*"):
+        # Stata 的 * 注释必须位于第 1 列（不允许前导空白）
+        if not in_block_comment and line.startswith("*"):
             # 完整行注释；花括号均不计算
             return "", False, 0, False, False
 
