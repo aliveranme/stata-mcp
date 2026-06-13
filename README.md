@@ -14,7 +14,7 @@
 │  ┌──────────────┐          ┌──────────────────┐  │
 │  │  stata Skill │◄────────►│  stata MCP Server │  │
 │  │  (知识层)     │  指导     │  (执行层)          │  │
-│  │  - 语法规范   │          │  - 19 个工具       │  │
+│  │  - 语法规范   │          │  - 22 个工具       │  │
 │  │  - 分析模板   │          │  - pystata 直接调用 │  │
 │  │  - 常见陷阱   │          │  - StataNow 19.5 MP │  │
 │  └──────────────┘          └──────────────────┘  │
@@ -118,10 +118,15 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 | `stata_graph` | 生成图形 |
 | `stata_more` | **翻页浏览大输出** |
 
+### 导出
+| 工具 | 说明 |
+|------|------|
+| `stata_export_excel` | 数据集导出为 .xlsx；回归结果导出为 CSV |
+
 ### 包管理
 | 工具 | 说明 |
 |------|------|
-| `stata_install_package` | 安装扩展包（ssc/net） |
+| `stata_install_package` | 安装扩展包（ssc 或完整 from() URL） |
 | `stata_find_package` | 搜索扩展包 |
 | `stata_list_packages` | 列出已安装包 |
 | `stata_status` | 会话状态 |
@@ -136,8 +141,10 @@ stata-mcp/
 ├── README.md                          # 本文档
 ├── setup.py                           # 一键安装脚本
 ├── mcp-stata-server/
-│   ├── server.py                      # MCP Server 主程序（19 个工具）
-│   └── requirements.txt               # Python 依赖（fastmcp）
+│   ├── server.py                      # MCP Server 主程序（22 个工具）
+│   ├── requirements.txt               # Python 依赖
+│   ├── pyproject.toml                 # 项目配置与测试配置
+│   └── tests/                         # pytest 测试套件
 └── .claude/
     ├── skills/
     │   └── stata/
@@ -168,10 +175,12 @@ stata-mcp/
 ### 输出轮询机制
 
 ```
-StataSO_Execute(cmd)          ← 同步调用
-  ├── 阶段 1：快速轮询        ← 5ms 间隔，连续 5 次空转后进入阶段 2
-  ├── 阶段 2：延迟等待        ← 80ms 等待 Stata 生产尾部输出
-  └── 最终检查                ← 再轮询 10 次确认无遗漏
+执行前: _drain_output(50ms)  — 短排空残留缓冲（50ms 上限 + 10ms 安静退出）
+执行中: StataSO_Execute       — 同步调用，60s 超时看门狗
+执行后: 快轮询(300×1ms)       — 收集主体输出，3次空转即退出
+        _drain_output()       — 智能清尾：小输出 50ms | 大输出 100ms
+        截断 120K chars        — 防止 MCP 缓冲溢出
+        自动分页 4K chars       — 大输出自动分页，支持 stata_more 翻页
 ```
 
 ### 环境变量

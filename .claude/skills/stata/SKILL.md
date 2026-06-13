@@ -18,7 +18,7 @@ description: >
 结果输出全流程。
 
 **MCP Server 信息：**
-- 名称：`stata`，20 个工具覆盖数据管理、探索、分析、包管理和会话控制
+- 名称：`stata`，22 个工具覆盖数据管理、探索、分析、导出、包管理和会话控制
 - Stata 版本：StataNow 19 / Stata 18+（取决于安装的版本）
 - 连接方式：本地 stdio，通过 pystata 直接调用 DLL
 - **会话持久**：Stata 在服务器启动时初始化一次，所有命令共享同一会话。
@@ -104,7 +104,12 @@ description: >
 |------|------|
 | `stata_run` | **执行任意 Stata 命令**（用于以上工具未覆盖的操作） |
 | `stata_run_do_file` | 执行 .do 文件 |
-| `stata_graph` | 生成图形 |
+| `stata_graph` | 生成图形（推荐使用 `export` 参数直接导出） |
+
+### 结果导出
+| 工具 | 用途 |
+|------|------|
+| `stata_export_excel` | 导出数据集为 .xlsx；回归结果导出为 CSV |
 
 ### 包管理
 | 工具 | 用途 |
@@ -359,7 +364,7 @@ esttab m1 m2 using "results.csv", replace
 | `reghdfe` | 高维固定效应 |
 | `coefplot` | 系数可视化 |
 | `winsor2` | 缩尾处理 |
-| `binscatter` | 分箱散点图 |
+| `binscatter` | 分箱散点图（headless 环境可能挂起，优先用原生 `twoway scatter`） |
 | `eventdd` | 事件研究 DID |
 | `ppmlhdfe` | PPML 高维固定效应 |
 
@@ -376,11 +381,6 @@ esttab m1 m2 using "results.csv", replace
    - 确实需要全量数据时利用自动分页：先看首页，需要时再 `stata_more`
 5. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装
 6. **图形需导出**：`graph export "output/fig1.png", replace width(1200)`
-7. **图形导出需两步**：图形命令后立即导出，否则图窗可能丢失。
-   ```stata
-   scatter mpg weight
-   graph export "output/scatter.png", replace width(1200)
-   ```
-   在无显示环境中可使用 `set graphics off` 前导。
+7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway scatter mpg weight", export="output/scatter.png", scheme="s2color")`。也可以在 `stata_run` 中用 `{ }` 复合块原子执行。不要分两步单独调用（先 `scatter` 再 `graph export`），否则图窗可能丢失。
 8. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
 9. **分析完成后向用户汇报**：用了什么方法、关键发现是什么

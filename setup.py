@@ -33,32 +33,47 @@ def bold(s): return f"\033[1m{s}\033[0m"
 
 STATA_COMMON_PATHS = [
     "D:/StataNow19",
+    "C:/Program Files/StataNow19",
+    "C:/Program Files (x86)/StataNow19",
+    "C:/Program Files/StataNow",
     "C:/Program Files/Stata18",
     "C:/Program Files/Stata17",
     "C:/Program Files (x86)/Stata18",
     "C:/Program Files (x86)/Stata17",
+    "D:/StataNow",
     "D:/Stata18",
     "D:/Stata17",
     "E:/Stata18",
     "E:/Stata17",
 ]
 
+STATA_EDITIONS = ["mp", "se", "be"]
+
+
+def _detect_edition(path):
+    """检测路径中可用的 Stata 版本（mp/se/be），优先 mp。"""
+    for edition in STATA_EDITIONS:
+        dll = os.path.join(path, f"{edition}-64.dll")
+        if os.path.isfile(dll):
+            return edition
+    return None
+
 
 def find_stata_installation():
-    """查找 Stata 安装目录。"""
+    """查找 Stata 安装目录和版本，返回 (path, edition)。"""
     # 1. 检查环境变量
     env_home = os.environ.get("STATA_HOME")
     if env_home and os.path.isdir(env_home):
-        return env_home
+        edition = _detect_edition(env_home) or "mp"
+        return env_home, edition
 
     # 2. 检查常见路径
     for path in STATA_COMMON_PATHS:
         if os.path.isdir(path):
-            # 验证关键文件
-            dll = os.path.join(path, "mp-64.dll")
+            edition = _detect_edition(path)
             utilities = os.path.join(path, "utilities", "pystata")
-            if os.path.isfile(dll) and os.path.isdir(utilities):
-                return path
+            if edition and os.path.isdir(utilities):
+                return path, edition
 
     # 3. 搜索 Program Files
     prog = os.environ.get("ProgramFiles", "C:/Program Files")
@@ -71,23 +86,23 @@ def find_stata_installation():
                 if entry.lower().startswith("stata"):
                     full = os.path.join(base, entry)
                     if os.path.isdir(full):
-                        dll = os.path.join(full, "mp-64.dll")
+                        edition = _detect_edition(full)
                         utilities = os.path.join(full, "utilities", "pystata")
-                        if os.path.isfile(dll) and os.path.isdir(utilities):
-                            return full
+                        if edition and os.path.isdir(utilities):
+                            return full, edition
         except PermissionError:
             continue
 
-    return None
+    return None, None
 
 
-def verify_stata(path):
+def verify_stata(path, edition="mp"):
     """验证 Stata 安装是否包含必要组件。"""
-    dll = os.path.join(path, "mp-64.dll")
+    dll = os.path.join(path, f"{edition}-64.dll")
     pystata = os.path.join(path, "utilities", "pystata")
     errors = []
     if not os.path.isfile(dll):
-        errors.append(f"缺少 mp-64.dll: {dll}")
+        errors.append(f"缺少 {edition}-64.dll: {dll}")
     if not os.path.isdir(pystata):
         errors.append(f"缺少 pystata: {pystata}")
     return errors
@@ -169,7 +184,7 @@ def install_deps(venv_dir, project_root):
 # Step 3: 生成 .mcp.json
 # =============================================================================
 
-def generate_mcp_json(project_root, python_exe, stata_home):
+def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
     """生成 .mcp.json 配置文件。"""
     server_script = os.path.join(project_root, "mcp-stata-server", "server.py")
     server_script = os.path.normpath(server_script).replace("\\", "/")
@@ -181,7 +196,7 @@ def generate_mcp_json(project_root, python_exe, stata_home):
                 "args": [server_script],
                 "env": {
                     "STATA_HOME": stata_home.replace("\\", "/"),
-                    "STATA_EDITION": "mp"
+                    "STATA_EDITION": stata_edition
                 }
             }
         }
@@ -204,7 +219,7 @@ def generate_mcp_json(project_root, python_exe, stata_home):
 # Step 4: 验证
 # =============================================================================
 
-def test_server(project_root, python_exe, stata_home):
+def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
     """测试 MCP Server 能否正常加载。
 
     使用 importlib 加载 server 模块并枚举工具数量。
@@ -214,7 +229,7 @@ def test_server(project_root, python_exe, stata_home):
     server_script = os.path.join(project_root, "mcp-stata-server", "server.py")
     env = os.environ.copy()
     env["STATA_HOME"] = stata_home
-    env["STATA_EDITION"] = "mp"
+    env["STATA_EDITION"] = stata_edition
 
     print(f"  正在测试服务器...")
 
@@ -226,7 +241,7 @@ def test_server(project_root, python_exe, stata_home):
             "import sys, os\n"
             f"sys.path.insert(0, {repr(os.path.join(stata_home, 'utilities'))})\n"
             "os.environ['STATA_HOME'] = " + repr(stata_home) + "\n"
-            "os.environ['STATA_EDITION'] = 'mp'\n"
+            f"os.environ['STATA_EDITION'] = {repr(stata_edition)}\n"
             "import importlib.util\n"
             "spec = importlib.util.spec_from_file_location(\n"
             "    'stata_server', " + repr(server_script) + "\n"
@@ -283,11 +298,11 @@ def main():
 
     # ---- Step 1: 查找 Stata ----
     print(bold("Step 1: 检测 Stata 安装"))
-    stata_home = find_stata_installation()
+    stata_home, stata_edition = find_stata_installation()
 
     if stata_home:
-        print(f"  {green('✓')} 找到 Stata: {stata_home}")
-        errors = verify_stata(stata_home)
+        print(f"  {green('✓')} 找到 Stata: {stata_home} ({stata_edition}-64)")
+        errors = verify_stata(stata_home, stata_edition)
         if errors:
             for e in errors:
                 print(f"  {yellow('⚠')} {e}")
@@ -301,7 +316,8 @@ def main():
         user_input = input("  > ").strip().strip('"')
         if user_input and os.path.isdir(user_input):
             stata_home = user_input
-            errors = verify_stata(stata_home)
+            stata_edition = _detect_edition(stata_home) or "mp"
+            errors = verify_stata(stata_home, stata_edition)
             if errors:
                 for e in errors:
                     print(f"  {red('✗')} {e}")
@@ -326,12 +342,12 @@ def main():
 
     # ---- Step 3: 生成配置 ----
     print(bold("Step 3: 生成 .mcp.json"))
-    generate_mcp_json(project_root, python_exe, stata_home)
+    generate_mcp_json(project_root, python_exe, stata_home, stata_edition)
     print()
 
     # ---- Step 4: 验证 ----
     print(bold("Step 4: 验证"))
-    test_server(project_root, python_exe, stata_home)
+    test_server(project_root, python_exe, stata_home, stata_edition)
     print()
 
     # ---- 完成 ----

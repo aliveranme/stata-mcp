@@ -27,9 +27,13 @@ _test_output/
 
 # Claude Code
 .claude/workspace/
+.claude/settings.local.json
 
 # Generated MCP config (run setup.py to create)
 .mcp.json
+
+# Server runtime logs
+mcp-stata-server/logs/
 
 # Stata
 *.log

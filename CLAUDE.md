@@ -24,7 +24,7 @@ stata-mcp/
 | `cd mcp-stata-server && source .venv/Scripts/activate && python server.py` | 调试模式启动 |
 | `uv pip install fastmcp && uv pip freeze > requirements.txt` | 添加新依赖 |
 
-## MCP 工具（23 个）
+## MCP 工具（22 个）
 
 | 类别 | 工具 | 只读? | 说明 |
 |------|------|:-----:|------|
@@ -33,8 +33,8 @@ stata-mcp/
 | 数据探索 | `stata_describe`, `stata_codebook`, `stata_summarize`, `stata_list`, `stata_tabulate`, `stata_display` | ✓ | 只读探索 |
 | 分析 | `stata_regress`, `stata_logistic`, `stata_ttest` | ✓ | OLS / Logit / t 检验 |
 | 图形 | `stata_graph` | ✓ | 执行图形命令，支持 scheme 样式和自动导出 |
-| 导出 | `stata_export_excel` | — | 数据集或回归结果导出为 .xlsx |
-| 包管理 | `stata_install_package`, `stata_find_package`, `stata_list_packages` | — | ssc/net 安装 |
+| 导出 | `stata_export_excel` | — | 数据集导出为 .xlsx；回归结果导出为 CSV |
+| 包管理 | `stata_install_package`, `stata_find_package`, `stata_list_packages` | — | ssc 或完整 URL 安装 |
 | 翻页 | `stata_more` | ✓ | 大输出分页浏览（缓存 120K chars） |
 | 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + 内存 |
 | 心跳 | `stata_ping` | ✓ | 快速检测 Stata DLL 存活状态 |

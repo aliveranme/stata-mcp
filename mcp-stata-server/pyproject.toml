@@ -1,0 +1,20 @@
+[project]
+name = "stata-mcp-server"
+version = "0.1.0"
+description = "MCP server that drives Stata via the pystata DLL bridge"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

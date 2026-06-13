@@ -18,6 +18,7 @@ import time
 import threading
 import atexit
 import logging
+from logging.handlers import RotatingFileHandler
 
 # =============================================================================
 # 配置
@@ -26,13 +27,32 @@ import logging
 STATA_HOME = os.environ.get("STATA_HOME", r"C:\Program Files\StataNow\StataNow19")
 STATA_EDITION = os.environ.get("STATA_EDITION", "mp")
 
-# 日志（写入 stderr 以免干扰 stdio MCP 通信）
-logging.basicConfig(
-    level=logging.WARNING,
-    format="[stata-mcp] %(levelname)s: %(message)s",
-    stream=sys.stderr,
+# 日志同时写入 stderr（避免污染 MCP stdio）和日志文件，便于故障排查
+_LOG_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 )
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_FILE = os.path.join(_LOG_DIR, "stata-mcp.log")
+
+_log_formatter = logging.Formatter("[stata-mcp] %(levelname)s: %(message)s")
+
+# 配置 "stata-mcp" logger，避免修改 root logger 产生全局副作用
 logger = logging.getLogger("stata-mcp")
+logger.setLevel(logging.WARNING)
+logger.propagate = False
+# 清除可能已存在的处理器，避免重复输出（模块重载场景）
+for _h in list(logger.handlers):
+    logger.removeHandler(_h)
+
+_stderr_handler = logging.StreamHandler(sys.stderr)
+_stderr_handler.setFormatter(_log_formatter)
+logger.addHandler(_stderr_handler)
+
+_file_handler = RotatingFileHandler(
+    _LOG_FILE, encoding="utf-8", maxBytes=5 * 1024 * 1024, backupCount=3
+)
+_file_handler.setFormatter(_log_formatter)
+logger.addHandler(_file_handler)
 
 # =============================================================================
 # Stata 初始化
@@ -172,10 +192,15 @@ def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
 def _parse_command_blocks(cmd: str) -> list:
     """将多行 Stata 输入解析为可执行块。
 
-    修复以下 MCP Server 核心问题：
-    - `///` 续行符被误判为 `//` 注释过滤 → 保持原样
-    - `{ }` 复合块（compound braces）跨多行被拆散 → 合并为单次执行
-    - `*` 和 `//` 注释行正常跳过
+    处理规则：
+    - 空行跳过
+    - 行首 * 为完整行注释，跳过
+    - 行首 // 为完整行注释，跳过
+    - 行内 // 为注释（字符串内不生效）
+    - /* ... */ 为块注释（字符串内不生效，支持跨行）
+    - 行中或行尾 /// 为续行符（其后注释文本会被忽略），与下一行合并
+    - { 与 } 用于复合块；字符串、注释内的花括号不计入深度
+    - 复合块跨多行收集，深度归零后发出
 
     Args:
         cmd: 原始多行命令字符串。
@@ -183,48 +208,146 @@ def _parse_command_blocks(cmd: str) -> list:
     Returns:
         可执行命令块列表，每块作为单一 StataSO_Execute 调用。
     """
-    raw_lines = cmd.strip().split("\n")
-    blocks = []
-    i = 0
 
-    while i < len(raw_lines):
-        line = raw_lines[i]
-        stripped = line.strip()
+    def _scan_line(line: str, in_block_comment: bool):
+        """扫描单行，返回 (有效内容, 是否有续行, 花括号深度变化, 是否仍在块注释中, 续行前是否有空格)。"""
+        stripped = line.lstrip()
+        if not in_block_comment and stripped.startswith("*"):
+            # 完整行注释；花括号均不计算
+            return "", False, 0, False, False
 
-        # 跳过空行
-        if not stripped:
-            i += 1
-            continue
+        content = []
+        brace_delta = 0
+        in_string = False
+        in_compound_string = False
+        n = len(line)
+        i = 0
 
-        # 跳过注释行：* 行首、// 行（包括 /// 行首注释）
-        # 注：/// 只有在行尾时才是续行符，在行首等同于 // 注释
-        if stripped.startswith("*") or stripped.startswith("//"):
-            i += 1
-            continue
+        if in_block_comment:
+            # 先尝试结束当前跨行块注释
+            while i < n:
+                if line[i] == "*" and i + 1 < n and line[i + 1] == "/":
+                    i += 2
+                    in_block_comment = False
+                    break
+                i += 1
+            if in_block_comment:
+                # 本行仍未结束块注释，整行跳过
+                return "", False, 0, True, False
 
-        # 处理 /// 续行符：合并到下一行
-        while stripped.endswith("///"):
-            i += 1
-            if i < len(raw_lines):
-                # 去掉 ///，合并续行内容
-                stripped = stripped.rstrip("/") + " " + raw_lines[i].strip()
-            else:
+        while i < n:
+            ch = line[i]
+            nxt = line[i + 1] if i + 1 < n else ""
+
+            if in_string:
+                content.append(ch)
+                if in_compound_string:
+                    if ch == "'" and nxt == '"':
+                        in_compound_string = False
+                        in_string = False
+                else:
+                    if ch == '"':
+                        in_string = False
+                i += 1
+                continue
+
+            # 复合字符串 '" ... "'
+            if ch == '"' and nxt == "'":
+                in_string = True
+                in_compound_string = True
+                content.append(ch)
+                i += 1
+                continue
+
+            # 普通字符串
+            if ch == '"':
+                in_string = True
+                content.append(ch)
+                i += 1
+                continue
+
+            # 块注释 /* ... */
+            if ch == "/" and nxt == "*":
+                i += 2
+                while i < n:
+                    if line[i] == "*" and i + 1 < n and line[i + 1] == "/":
+                        i += 2
+                        break
+                    i += 1
+                else:
+                    # 未在本行遇到 */，块注释延续到下一行
+                    in_block_comment = True
+                continue
+
+            # 行注释或续行符
+            if ch == "/" and nxt == "/":
+                # 三个斜杠 /// 视为续行符，其后所有内容忽略
+                if i + 2 < n and line[i + 2] == "/":
+                    space_before = bool(content) and content[-1].isspace()
+                    return "".join(content), True, brace_delta, False, space_before
+                # 否则 // 注释到行尾
                 break
 
-        # 处理 { } 复合块：跨多行合并为单次执行
-        if "{" in stripped and "}" not in stripped:
-            block_lines = [stripped]
-            brace_depth = stripped.count("{") - stripped.count("}")
+            if ch == "{":
+                brace_delta += 1
+            elif ch == "}":
+                brace_delta -= 1
+
+            content.append(ch)
             i += 1
-            while i < len(raw_lines) and brace_depth > 0:
-                next_line = raw_lines[i]
-                block_lines.append(next_line)
-                brace_depth += next_line.count("{") - next_line.count("}")
-                i += 1
-            blocks.append("\n".join(block_lines))
+
+        return "".join(content), False, brace_delta, in_block_comment, False
+
+    blocks = []
+    buffer = []
+    brace_depth = 0
+    in_block_comment = False
+    in_continuation = False
+    cont_space_before = False
+
+    for raw_line in cmd.split("\n"):
+        line = raw_line.strip("\r")
+        if not line.strip() and brace_depth == 0 and not buffer and not in_block_comment and not in_continuation:
+            continue
+
+        content, has_cont, delta, in_block_comment, space_before = _scan_line(line, in_block_comment)
+        brace_depth += delta
+        if brace_depth < 0:
+            brace_depth = 0
+
+        if has_cont:
+            # 行首 ///（content 为空）视为注释，忽略
+            if not content.strip():
+                continue
+            # 与 buffer 中当前行合并：/// 所在行与下一行属于同一条命令
+            if buffer:
+                last = buffer[-1]
+                sep = " " if space_before else ""
+                buffer[-1] = last.rstrip() + sep + content.rstrip()
+            else:
+                buffer.append(content.rstrip())
+            in_continuation = True
+            cont_space_before = space_before
+            continue
+
+        if in_continuation and buffer:
+            last = buffer[-1]
+            sep = " " if cont_space_before else ""
+            buffer[-1] = last.rstrip() + sep + content.lstrip()
+            in_continuation = False
         else:
-            blocks.append(stripped)
-            i += 1
+            buffer.append(content)
+
+        if brace_depth == 0 and not in_block_comment:
+            block_text = "\n".join(buffer)
+            if block_text.strip():
+                blocks.append(block_text)
+            buffer = []
+
+    if buffer:
+        block_text = "\n".join(buffer)
+        if block_text.strip():
+            blocks.append(block_text)
 
     return blocks
 
@@ -572,13 +695,13 @@ def stata_run(command: str, page: int = 1, timeout: int = 60) -> str:
     Args:
         command: Stata 命令，多条命令用 \\n 分隔。
         page: 页码（1-based），仅对单条命令有效。默认 1。
-        timeout: 命令超时秒数（默认 60，最长 300）。
+        timeout: 命令超时秒数（默认 60，最长 1800）。
 
     Returns:
         Stata 输出文本（可能包含分页导航）。
     """
     # 限定时长范围
-    safe_timeout = max(10, min(timeout, 300))
+    safe_timeout = max(10, min(timeout, 1800))
     return _run_stata_command(command, page, timeout=safe_timeout)
 
 
@@ -682,7 +805,11 @@ def stata_describe(varlist: str = "", simple: bool = False) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_summarize(varlist: str = "", detail: bool = False) -> str:
+def stata_summarize(
+    varlist: str = "",
+    detail: bool = False,
+    condition: str = "",
+) -> str:
     """计算变量的摘要统计量。
 
     包括观测数、均值、标准差、最小值、最大值。
@@ -691,18 +818,26 @@ def stata_summarize(varlist: str = "", detail: bool = False) -> str:
     Args:
         varlist: 变量列表（空格分隔），留空 = 全部变量。
         detail: 是否显示详细统计量（默认 False）。
+        condition: if 条件子句（可选）。例："!missing(price) & foreign == 1"。
 
     Returns:
         摘要统计量表格。
     """
     cmd = f"summarize {varlist}".strip()
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
     if detail:
         cmd += ", detail"
     return _run_stata_command(cmd)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_list(varlist: str = "", n: int = 10, in_range: str = "") -> str:
+def stata_list(
+    varlist: str = "",
+    n: int = 10,
+    in_range: str = "",
+    condition: str = "",
+) -> str:
     """列出当前数据集中的数据值。
 
     以表格形式展示观测数据。默认显示前 10 条。
@@ -711,6 +846,7 @@ def stata_list(varlist: str = "", n: int = 10, in_range: str = "") -> str:
         varlist: 要列出的变量（空格分隔），留空 = 全部。
         n: 显示前 n 条观测（默认 10，设为 0 显示全部，慎用）。
         in_range: 观测范围如 "1/20" 或 "1/l"。
+        condition: if 条件子句（可选）。
 
     Returns:
         数据表格。
@@ -718,6 +854,8 @@ def stata_list(varlist: str = "", n: int = 10, in_range: str = "") -> str:
     cmd = "list"
     if varlist.strip():
         cmd += f" {varlist}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
     if in_range.strip():
         cmd += f" in {in_range}"
     elif n > 0:
@@ -726,7 +864,11 @@ def stata_list(varlist: str = "", n: int = 10, in_range: str = "") -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_codebook(varlist: str = "", compact: bool = False) -> str:
+def stata_codebook(
+    varlist: str = "",
+    compact: bool = False,
+    condition: str = "",
+) -> str:
     """生成数据集的 Codebook（变量字典）。
 
     显示变量标签、值标签、缺失值、分布信息等。
@@ -735,18 +877,26 @@ def stata_codebook(varlist: str = "", compact: bool = False) -> str:
     Args:
         varlist: 变量列表（空格分隔），留空 = 全部变量。
         compact: 是否使用紧凑模式（默认 False）。
+        condition: if 条件子句（可选）。
 
     Returns:
         Codebook 报告。
     """
     cmd = f"codebook {varlist}".strip()
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
     if compact:
         cmd += ", compact"
     return _run_stata_command(cmd)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_tabulate(varname: str, byvar: str = "", chi2: bool = False) -> str:
+def stata_tabulate(
+    varname: str,
+    byvar: str = "",
+    chi2: bool = False,
+    condition: str = "",
+) -> str:
     """创建频数分布表或交叉表。
 
     单变量：频数分布表。双变量：二维交叉表，可选卡方检验。
@@ -755,6 +905,7 @@ def stata_tabulate(varname: str, byvar: str = "", chi2: bool = False) -> str:
         varname: 主变量名。
         byvar: 可选的第二个变量，用于交叉表。
         chi2: 是否显示卡方检验结果（默认 False）。
+        condition: if 条件子句（可选）。
 
     Returns:
         频数/交叉表。
@@ -764,8 +915,10 @@ def stata_tabulate(varname: str, byvar: str = "", chi2: bool = False) -> str:
     cmd = f"tabulate {varname}"
     if byvar.strip():
         cmd += f" {byvar}"
-        if chi2:
-            cmd += ", chi2"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    if byvar.strip() and chi2:
+        cmd += ", chi2"
     return _run_stata_command(cmd)
 
 
@@ -791,7 +944,12 @@ def stata_display(expression: str) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_regress(depvar: str, indepvars: str, options: str = "") -> str:
+def stata_regress(
+    depvar: str,
+    indepvars: str,
+    options: str = "",
+    condition: str = "",
+) -> str:
     """运行线性回归分析 (OLS)。
 
     返回系数表、标准误、t 值、p 值和模型诊断统计量。
@@ -800,18 +958,26 @@ def stata_regress(depvar: str, indepvars: str, options: str = "") -> str:
         depvar: 因变量名。
         indepvars: 自变量列表（空格分隔）。
         options: 额外选项，如 "robust"（稳健标准误）、"noconstant"。
+        condition: if 条件子句（可选）。例："foreign == 1 & price < 10000"。
 
     Returns:
         回归分析结果表。
     """
     cmd = f"regress {depvar} {indepvars}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
     if options.strip():
         cmd += f", {options}"
     return _run_stata_command(cmd)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_logistic(depvar: str, indepvars: str, options: str = "") -> str:
+def stata_logistic(
+    depvar: str,
+    indepvars: str,
+    options: str = "",
+    condition: str = "",
+) -> str:
     """运行 Logistic 回归分析。
 
     执行 Logit 模型估计，返回系数、标准误和模型拟合统计量。
@@ -820,18 +986,26 @@ def stata_logistic(depvar: str, indepvars: str, options: str = "") -> str:
         depvar: 二元因变量名（取值 0/1）。
         indepvars: 自变量列表（空格分隔）。
         options: 额外选项，如 "or"（优势比）、"robust"。
+        condition: if 条件子句（可选）。例："age >= 18"。
 
     Returns:
         Logistic 回归结果表。
     """
     cmd = f"logit {depvar} {indepvars}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
     if options.strip():
         cmd += f", {options}"
     return _run_stata_command(cmd)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_ttest(varname: str, byvar: str = "", options: str = "") -> str:
+def stata_ttest(
+    varname: str,
+    byvar: str = "",
+    options: str = "",
+    condition: str = "",
+) -> str:
     """运行 t 检验。
 
     支持单样本 t 检验、独立样本 t 检验（按分组变量）、配对 t 检验。
@@ -840,16 +1014,22 @@ def stata_ttest(varname: str, byvar: str = "", options: str = "") -> str:
         varname: 要检验的变量名。
         byvar: 分组变量（可选，用于独立样本 t 检验）。
         options: 额外选项，如 "unequal"。
+        condition: if 条件子句（可选）。例："!missing(price)".
 
     Returns:
         t 检验结果表。
     """
     if byvar.strip():
-        cmd = f"ttest {varname}, by({byvar})"
+        cmd = f"ttest {varname}"
+        if condition.strip():
+            cmd += f" if {condition.strip()}"
+        cmd += f", by({byvar})"
         if options.strip():
             cmd += f" {options}"
     else:
         cmd = f"ttest {varname}"
+        if condition.strip():
+            cmd += f" if {condition.strip()}"
         if options.strip():
             cmd += f", {options}"
     return _run_stata_command(cmd)
@@ -875,6 +1055,7 @@ def stata_graph(
     scheme: str = "s2color",
     export: str = "",
     width: int = 800,
+    height: int = 0,
     replace: bool = True,
 ) -> str:
     """生成 Stata 图形并可选导出为文件。
@@ -891,8 +1072,10 @@ def stata_graph(
         command: 图形命令(scatter mpg weight, histogram price 等)。
         scheme: 图形方案(默认 's2color')。常用方案:
                 s2color(默认彩色), s2mono(灰度), s2manual(手册风格)。
-        export: 导出 PNG 文件路径(留空不导出)。例:"C:/output/scatter.png"。
+        export: 导出图形文件路径（留空不导出）。支持 .png/.pdf/.svg/.emf/.wmf 等格式；
+                Stata 按扩展名自动推断格式。例:"C:/output/scatter.png"。
         width: 导出图片宽度(像素,默认 800)。
+        height: 导出图片高度(像素,默认 0 表示不指定)。
         replace: 是否覆盖已有文件(默认 True)。
 
     Returns:
@@ -905,20 +1088,23 @@ def stata_graph(
         # 导出模式：使用 { } 复合块确保 graph + export 原子执行
         export_path = _normalize_path(export)
         replace_opt = "replace" if replace else ""
+        size_opts = f"width({width})"
+        if height > 0:
+            size_opts += f" height({height})"
 
         compound = (
             f"capture noisily {{\n"
             f"    set scheme {scheme}\n"
             f"    {command}\n"
-            f'    graph export "{export_path}", {replace_opt} width({width})\n'
+            f'    graph export "{export_path}", {replace_opt} {size_opts}\n'
             f"    graph drop _all\n"
             f"}}"
         )
 
         result = _run_stata_command(compound)
 
-        # 验证文件是否生成
-        if os.path.isfile(export_path):
+        # 验证文件是否生成；仅在 Stata 未报错时追加成功提示，避免 replace=False 已存在文件时给出假阳性
+        if os.path.isfile(export_path) and "[返回码:" not in result:
             size_kb = os.path.getsize(export_path) // 1024
             result += f"\n(图形已导出: {export_path}, {size_kb}KB)"
 
@@ -941,17 +1127,19 @@ def stata_export_excel(
     replace: bool = True,
     results: bool = False,
 ) -> str:
-    """将当前数据集导出为 Excel (.xlsx) 文件。
+    """将当前数据集导出为 Excel (.xlsx) 文件，或将回归结果导出为 CSV。
 
     使用 Stata 的 export excel 命令导出数据。
-    也支持使用 esttab 或 outreg2 导出回归结果表到 Excel。
+    当 results=True 时，使用 esttab 导出回归结果表；esttab 不支持 xlsx
+    与 sheet() 选项，因此强制输出为 CSV（如原路径为 .xlsx，会自动改
+    为 .csv 并提示）。
 
     Args:
-        filepath: 导出路径（建议 .xlsx 扩展名）。
+        filepath: 导出路径（数据导出建议 .xlsx；回归结果导出会改为 .csv）。
         varlist: 要导出的变量列表（空格分隔），留空 = 全部变量。
-        sheet: Excel 工作表名（默认 "Sheet1"）。
+        sheet: Excel 工作表名（默认 "Sheet1"，仅用于数据导出）。
         replace: 是否覆盖已有文件（默认 True）。
-        results: 若为 True，将当前存储的回归结果导出为表格而非原始数据。
+        results: 若为 True，将当前存储的回归结果导出为 CSV 表格而非原始数据。
 
     Returns:
         导出确认信息。
@@ -961,19 +1149,32 @@ def stata_export_excel(
     firstrow_opt = "firstrow(variables)"
 
     if results:
-        # 导出回归结果为 Excel 表
-        # 先检查 estout 是否已安装，未安装则自动安装
+        # esttab 不支持 xlsx/sheet，统一输出 CSV
+        base, ext = os.path.splitext(export_path)
+        if ext.lower() != ".csv":
+            export_path = base + ".csv"
+            if ext.lower() == ".xlsx":
+                changed_msg = (
+                    f"提示：回归结果导出不支持 .xlsx/sheet()，"
+                    f"已自动改用 CSV 路径：{export_path}\n"
+                )
+            else:
+                changed_msg = f"提示：回归结果已导出为 CSV：{export_path}\n"
+        else:
+            changed_msg = ""
+
         cmd = (
             f"capture which estout\n"
             f"if _rc {{\n"
             f'    display "正在安装 estout..."\n'
             f"    ssc install estout, quiet\n"
             f"}}\n"
-            f"esttab using \"{export_path}\", {replace_opt} "
-            f"sheet({sheet}) plain nogaps nomtitle nonumber"
+            f"esttab using \"{export_path}\", csv {replace_opt} "
+            f"plain nogaps nomtitle nonumber"
         )
     else:
-        # 导出数据集
+        changed_msg = ""
+        # 导出数据集为 Excel
         if varlist.strip():
             cmd = (
                 f"export excel {varlist} using \"{export_path}\", "
@@ -987,11 +1188,11 @@ def stata_export_excel(
 
     result = _run_stata_command(cmd)
 
-    # 验证文件已生成
-    if os.path.isfile(export_path):
+    # 验证文件已生成；仅在 Stata 未报错时追加成功提示，避免 replace=False 已存在文件时误判
+    if os.path.isfile(export_path) and "[返回码:" not in result:
         size_kb = os.path.getsize(export_path) // 1024
-        return f"✓ 已导出 {size_kb} KB → {export_path}\n{result}"
-    return result
+        return f"{changed_msg}✓ 已导出 {size_kb} KB → {export_path}\n{result}"
+    return changed_msg + result
 
 
 # =============================================================================
@@ -1003,27 +1204,24 @@ def stata_export_excel(
 def stata_install_package(package: str, source: str = "ssc", replace: bool = False) -> str:
     """安装 Stata 扩展包。
 
-    从 ssc、net 地址或 GitHub 安装 Stata 包。
+    从 ssc 或完整 from() URL 安装 Stata 包。
     支持 force/replace 选项来解决版本冲突。
 
     Args:
         package: 包名称（如 "outreg2"、"estout"、"ivreg2"）。
-        source: 安装源 — "ssc"（默认）、"net"、或完整 URL。
+        source: 安装源 — "ssc"（默认）或完整的 from() URL。
+                例："https://fmwww.bc.edu/RePEc/bocode/o"
         replace: 是否强制替换已有文件（解决版本冲突，默认 False）。
 
     Returns:
         安装过程输出。
     """
     replace_opt = ", replace" if replace else ""
-    if source.lower() == "ssc":
+    src_lower = source.lower().strip()
+    if src_lower == "ssc":
         cmd = f"ssc install {package}{replace_opt}"
-    elif source.lower() == "net":
-        cmd = (
-            f"net install {package}{replace_opt},"
-            f" from(https://fmwww.bc.edu/RePEc/bocode/{package[0]})"
-        )
     else:
-        cmd = f"net install {package}{replace_opt}, from({source})"
+        cmd = f"net install {package}{replace_opt}, from({source.strip()})"
     return _run_stata_command(cmd)
 
 
