@@ -24,7 +24,7 @@ def test_logistic_omits_condition_when_empty():
     with patch("server._run_stata_command") as mock_run:
         stata_logistic("foreign", "mpg weight", options="or")
         cmd = mock_run.call_args[0][0]
-        assert cmd == "logit foreign mpg weight, or"
+        assert cmd == "logistic foreign mpg weight, or"
 
 
 def test_ttest_with_byvar_and_condition():
@@ -122,3 +122,25 @@ def test_graph_export_includes_height_when_set():
         assert 'graph export "C:/output/fig.png"' in cmd
         assert "width(1200)" in cmd
         assert "height(800)" in cmd
+
+
+def test_graph_rejects_unsafe_brace_in_export_mode():
+    with patch("server._run_stata_command") as mock_run:
+        from server import stata_graph
+        result = stata_graph(
+            "twoway scatter price weight }",  # 字符串外的 } 会破坏复合块
+            export="C:/output/fig.png",
+        )
+        assert "错误" in result
+        assert "会破坏复合块的" in result
+        mock_run.assert_not_called()
+
+
+def test_graph_allows_brace_inside_string():
+    with patch("server._run_stata_command") as mock_run, patch(
+        "server.os.path.isfile", return_value=True
+    ), patch("server.os.path.getsize", return_value=1024):
+        from server import stata_graph
+        stata_graph('twoway scatter price weight, title("a} b")', export="C:/output/fig.png")
+        cmd = mock_run.call_args[0][0]
+        assert "capture noisily {" in cmd

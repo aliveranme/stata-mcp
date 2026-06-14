@@ -320,25 +320,40 @@ def _parse_command_blocks(cmd: str) -> list:
             brace_depth = 0
 
         if has_cont:
-            # 行首 ///（content 为空）视为注释，忽略
-            if not content.strip():
-                continue
-            # 与 buffer 中当前行合并：/// 所在行与下一行属于同一条命令
-            if buffer:
-                last = buffer[-1]
-                sep = " " if space_before else ""
-                buffer[-1] = last.rstrip() + sep + content.rstrip()
+            if content.strip():
+                # 与 buffer 中当前行合并：/// 所在行与下一行属于同一条命令
+                if buffer:
+                    last = buffer[-1]
+                    sep = " " if space_before else ""
+                    buffer[-1] = last.rstrip() + sep + content.rstrip()
+                else:
+                    buffer.append(content.rstrip())
+                in_continuation = True
+                cont_space_before = space_before
             else:
-                buffer.append(content.rstrip())
-            in_continuation = True
-            cont_space_before = space_before
+                # /// 行无实质内容（如 /// comment 或行首 ///）时中断当前续行链，
+                # 并把已累积的 buffer 作为一个 block 发出，避免后续行被错误拼接。
+                in_continuation = False
+                if brace_depth == 0 and not in_block_comment and buffer:
+                    block_text = "\n".join(buffer)
+                    if block_text.strip():
+                        blocks.append(block_text)
+                    buffer = []
             continue
 
         if in_continuation and buffer:
-            last = buffer[-1]
-            sep = " " if cont_space_before else ""
-            buffer[-1] = last.rstrip() + sep + content.lstrip()
+            if content.strip():
+                last = buffer[-1]
+                sep = " " if cont_space_before else ""
+                buffer[-1] = last.rstrip() + sep + content.lstrip()
             in_continuation = False
+            # 若续行被空行（或仅注释行）结束，直接尝试发出当前 block
+            if brace_depth == 0 and not in_block_comment:
+                block_text = "\n".join(buffer)
+                if block_text.strip():
+                    blocks.append(block_text)
+                buffer = []
+                continue
         else:
             buffer.append(content)
 
@@ -466,17 +481,19 @@ def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
     # --- 崩溃检测与恢复 ---
     if rc == 999:
         logger.warning("StataSO_Execute 崩溃, 尝试恢复会话...")
-        _drain_output()
-        _set_break()
-        time.sleep(0.2)
+        try:
+            _drain_output()
+            _set_break()
+            time.sleep(0.2)
 
-        # 再次 ping 确认恢复
-        if _ping_stata():
-            out += "\n(Stata 已自动恢复，请重试命令)"
-        else:
-            out += (
-                "\n(Stata 崩溃且无法自动恢复，需要重启 MCP Server)"
-            )
+            # 再次 ping 确认恢复
+            if _ping_stata():
+                out += "\n(Stata 已自动恢复，请重试命令)"
+            else:
+                out += "\n(Stata 崩溃且无法自动恢复，需要重启 MCP Server)"
+        except Exception as e:
+            logger.exception("Stata 崩溃恢复失败: %s", e)
+            out += "\n(Stata 崩溃且无法自动恢复，需要重启 MCP Server)"
 
     return rc, out
 
@@ -649,10 +666,46 @@ def _normalize_path(path: str) -> str:
     return os.path.normpath(os.path.abspath(path)).replace("\\", "/")
 
 
+def _get_stata_cwd_no_lock() -> str:
+    """直接调用 Stata DLL 获取 Stata 当前工作目录（不获取 _stata_lock）。
+
+    调用者不要在本函数内获取 _stata_lock，避免与 _run_stata_command 产生死锁。
+    """
+    try:
+        with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
+            encoded = config.get_encode_str("display c(pwd)")
+            rc = config.stlib.StataSO_Execute(encoded, False)
+        if rc not in (0, STATA_RC_NO_OUTPUT):
+            return ""
+        parts = []
+        for _ in range(50):
+            out = config.get_output()
+            if out:
+                parts.append(out)
+            elif parts:
+                break
+            time.sleep(0.001)
+        lines = [ln.strip() for ln in "".join(parts).splitlines() if ln.strip()]
+        return lines[-1] if lines else ""
+    except Exception:
+        return ""
+
+
 def _check_file_exists(filepath: str) -> str | None:
-    """检查文件是否存在，返回错误消息或 None。"""
-    if not os.path.isfile(filepath):
-        return f"错误: 文件不存在 — {filepath}"
+    """检查文件是否存在，返回错误消息或 None。
+
+    对于相对路径，优先使用 Stata 当前工作目录拼接，避免与 Python 启动目录混淆。
+    若无法获取 Stata cwd，则回退到 Python 当前工作目录。
+    """
+    check_path = filepath
+    if not os.path.isabs(filepath):
+        cwd = _get_stata_cwd_no_lock()
+        if cwd:
+            check_path = os.path.normpath(os.path.join(cwd, filepath)).replace("\\", "/")
+        else:
+            check_path = os.path.abspath(filepath)
+    if not os.path.isfile(check_path):
+        return f"错误: 文件不存在 — {check_path}"
     return None
 
 
@@ -677,7 +730,7 @@ def _shutdown_stata():
 # =============================================================================
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def stata_run(command: str, page: int = 1, timeout: int = 60) -> str:
     """执行一条或多条 Stata 命令并返回输出。
 
@@ -984,7 +1037,7 @@ def stata_logistic(
 ) -> str:
     """运行 Logistic 回归分析。
 
-    执行 Logit 模型估计，返回系数、标准误和模型拟合统计量。
+    执行 Stata 原生 `logistic` 命令，默认输出优势比（OR）、标准误和模型拟合统计量。
 
     Args:
         depvar: 二元因变量名（取值 0/1）。
@@ -995,7 +1048,7 @@ def stata_logistic(
     Returns:
         Logistic 回归结果表。
     """
-    cmd = f"logit {depvar} {indepvars}"
+    cmd = f"logistic {depvar} {indepvars}"
     if condition.strip():
         cmd += f" if {condition.strip()}"
     if options.strip():
@@ -1053,6 +1106,47 @@ GRAPH_SCHEMES = {
 }
 
 
+def _has_unsafe_brace(cmd: str) -> bool:
+    """检查 graph command 中是否存在会破坏外层 { } 复合块的右花括号。
+
+    忽略双引号字符串内部以及 /* */ 块注释、// 行注释中的花括号；只统计
+    普通代码区域的 unmatched `}`。
+    """
+    in_string = False
+    depth = 0
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        nxt = cmd[i + 1] if i + 1 < n else ""
+        if in_string:
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            i += 2
+            while i < n and not (cmd[i] == "*" and i + 1 < n and cmd[i + 1] == "/"):
+                i += 1
+            if i < n:
+                i += 2
+            continue
+        if ch == "/" and nxt == "/":
+            break
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            if depth == 0:
+                return True
+            depth -= 1
+        i += 1
+    return False
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def stata_graph(
     command: str,
@@ -1086,6 +1180,12 @@ def stata_graph(
         图形生成确认信息。
     """
     try:
+        if export and _has_unsafe_brace(command):
+            return (
+                "错误: graph command 中包含会破坏复合块的 '}'，"
+                "请避免在 command 中使用未转义的右花括号（字符串内除外）"
+            )
+
         if not export:
             return _run_stata_command(f"set scheme {scheme}\n{command}")
 
@@ -1303,10 +1403,11 @@ def stata_ping() -> str:
         "pong" + 当前 Stata 版本信息。
     """
     try:
-        result = _run_stata_command("display 42")
+        with _stata_lock:
+            rc, result = _execute_single("display 42")
         version = getattr(config, "stversion", "?")
         edition = getattr(config, "stedition", "?")
-        status = "alive" if "42" in result else "degraded"
+        status = "alive" if rc in (0, STATA_RC_NO_OUTPUT) and "42" in result else "degraded"
         return f"pong | Stata {version} {edition} | {status}"
     except Exception as e:
         return f"Stata 心跳失败: {type(e).__name__}: {e}"

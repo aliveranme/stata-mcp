@@ -120,3 +120,27 @@ capture noisily {
     assert "clear" in blocks[0]
     assert "capture noisily {" in blocks[1]
     assert "regress mpg weight" in blocks[1]
+
+
+def test_continuation_empty_line_ends_continuation():
+    # /// 续行后的空行应中断续行，不要把 gen b=2 拼接到 gen a=1
+    blocks = _parse_command_blocks("gen a = 1 ///\n\ngen b = 2")
+    assert len(blocks) == 2
+    assert blocks[0] == "gen a = 1"
+    assert blocks[1] == "gen b = 2"
+
+
+def test_continuation_comment_line_ends_continuation():
+    # /// 续行链中间的 /// comment 行应中断续行
+    blocks = _parse_command_blocks("gen a = 1 ///\n/// this is a comment\ngen b = 2")
+    assert len(blocks) == 2
+    assert blocks[0] == "gen a = 1"
+    assert blocks[1] == "gen b = 2"
+
+
+def test_continuation_continues_with_indented_line():
+    # 正常缩进续行目标行仍应合并
+    blocks = _parse_command_blocks("regress mpg ///\n    weight")
+    assert len(blocks) == 1
+    assert "regress mpg" in blocks[0]
+    assert "weight" in blocks[0]
