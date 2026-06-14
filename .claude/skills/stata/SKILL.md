@@ -389,3 +389,4 @@ esttab m1 m2 using "results.csv", replace
 7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway scatter mpg weight", export="output/scatter.png", scheme="s2color")`。也可以在 `stata_run` 中用 `{ }` 复合块原子执行。不要分两步单独调用（先 `scatter` 再 `graph export`），否则图窗可能丢失。
 8. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
 9. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
+10. **谨慎使用 `!` 系统命令**：`stata_run` 可执行任意 Stata 命令，包括 `!` 开头的操作系统命令（如 `! del file.txt`）。在未明确告知用户风险前，不要主动构造删除、修改系统文件或执行 shell 的命令。

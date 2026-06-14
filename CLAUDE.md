@@ -43,7 +43,7 @@ stata-mcp/
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录（setup.py 自动检测时优先于 env var） |
+| `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。优先级：环境变量 > `setup.py` 自动检测 > 该默认值；手动安装时可在 `.mcp.json` 中覆盖。 |
 | `STATA_EDITION` | `mp` | 版本 (mp/se/be) |
 
 ## 关键设计决策

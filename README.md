@@ -49,8 +49,8 @@ python setup.py
 如果自动检测失败，先设置环境变量再运行：
 
 ```bash
-# 设置 Stata 路径
-set STATA_HOME=D:/StataNow19
+# 设置 Stata 路径（请替换为你本机实际安装路径；setup.py 通常会自动检测）
+set STATA_HOME="C:/Program Files/StataNow/StataNow19"
 set STATA_EDITION=mp
 
 # 创建虚拟环境
@@ -115,7 +115,7 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 |------|------|
 | `stata_run` | **执行任意 Stata 命令**（含分页） |
 | `stata_run_do_file` | 执行 .do 文件 |
-| `stata_graph` | 生成图形；推荐 `export` 参数直接导出，支持 `height` |
+| `stata_graph` | 生成图形；推荐 `export` 参数直接导出，支持 `height`。注意：`export` 模式会自动用 `{ }` 包装命令，请勿在 `command` 中手动包含未转义的 `}`。 |
 | `stata_more` | **翻页浏览大输出** |
 
 ### 导出
@@ -192,7 +192,7 @@ stata-mcp/
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `STATA_HOME` | `D:\StataNow19` | Stata 安装目录 |
+| `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。环境变量优先级最高；未设置时由 `setup.py` 自动检测，手动安装可覆盖。 |
 | `STATA_EDITION` | `mp` | Stata 版本（mp/se/be） |
 
 ## 开发

@@ -4,7 +4,7 @@
       "command": "<repo-path>/mcp-stata-server/.venv/Scripts/python.exe",
       "args": ["<repo-path>/mcp-stata-server/server.py"],
       "env": {
-        "STATA_HOME": "D:/StataNow19",
+        "STATA_HOME": "C:/Program Files/StataNow/StataNow19",
         "STATA_EDITION": "mp"
       }
     }

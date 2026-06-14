@@ -14,7 +14,11 @@ import sys
 import os
 import subprocess
 import shutil
+import tempfile
 from pathlib import Path
+
+# Python 版本要求，需与 pyproject.toml 中的 requires-python 保持一致
+MIN_PYTHON_VERSION = (3, 10)
 
 
 # =============================================================================
@@ -32,19 +36,40 @@ def bold(s): return f"\033[1m{s}\033[0m"
 # =============================================================================
 
 STATA_COMMON_PATHS = [
-    "D:/StataNow19",
+    # StataNow 19.x
+    "C:/Program Files/StataNow19.5",
     "C:/Program Files/StataNow19",
+    "C:/Program Files (x86)/StataNow19.5",
     "C:/Program Files (x86)/StataNow19",
     "C:/Program Files/StataNow",
+    "D:/StataNow19.5",
+    "D:/StataNow19",
+    "D:/StataNow",
+    "E:/StataNow19.5",
+    "E:/StataNow19",
+    "E:/StataNow",
+    # Stata 18 / 17
     "C:/Program Files/Stata18",
     "C:/Program Files/Stata17",
     "C:/Program Files (x86)/Stata18",
     "C:/Program Files (x86)/Stata17",
-    "D:/StataNow",
     "D:/Stata18",
     "D:/Stata17",
     "E:/Stata18",
     "E:/Stata17",
+    # 显式 edition 子目录（某些安装方式）
+    "C:/Program Files/StataMP18",
+    "C:/Program Files/StataSE18",
+    "C:/Program Files/StataBE18",
+    "C:/Program Files/StataMP17",
+    "C:/Program Files/StataSE17",
+    "C:/Program Files/StataBE17",
+    "D:/StataMP18",
+    "D:/StataSE18",
+    "D:/StataBE18",
+    "D:/StataMP17",
+    "D:/StataSE17",
+    "D:/StataBE17",
 ]
 
 STATA_EDITIONS = ["mp", "se", "be"]
@@ -59,12 +84,30 @@ def _detect_edition(path):
     return None
 
 
+def _edition_with_warning(path):
+    """尝试检测 edition；若无法检测则默认 mp 并打印警告。"""
+    edition = _detect_edition(path)
+    if edition is not None:
+        return edition
+    has_any_dll = any(
+        os.path.isfile(os.path.join(path, f"{e}-64.dll")) for e in STATA_EDITIONS
+    )
+    if not has_any_dll:
+        print(
+            yellow(
+                f"⚠ 无法从 {path} 检测 Stata 版本（未找到 mp/se/be-64.dll），"
+                f"将默认使用 mp。若启动失败请手动设置 STATA_EDITION 环境变量。"
+            )
+        )
+    return "mp"
+
+
 def find_stata_installation():
     """查找 Stata 安装目录和版本，返回 (path, edition)。"""
     # 1. 检查环境变量
     env_home = os.environ.get("STATA_HOME")
     if env_home and os.path.isdir(env_home):
-        edition = _detect_edition(env_home) or "mp"
+        edition = _edition_with_warning(env_home)
         return env_home, edition
 
     # 2. 检查常见路径
@@ -75,7 +118,7 @@ def find_stata_installation():
             if edition and os.path.isdir(utilities):
                 return path, edition
 
-    # 3. 搜索 Program Files
+    # 3. 搜索 Program Files 及常见根目录（只进入以 "Stata" 开头的目录）
     prog = os.environ.get("ProgramFiles", "C:/Program Files")
     prog_x86 = os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")
     for base in [prog, prog_x86, "D:/", "E:/"]:
@@ -83,6 +126,7 @@ def find_stata_installation():
             continue
         try:
             for entry in os.listdir(base):
+                # 限定只扫描名称以 Stata 开头的目录，避免遍历无关文件夹
                 if entry.lower().startswith("stata"):
                     full = os.path.join(base, entry)
                     if os.path.isdir(full):
@@ -224,6 +268,7 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
 
     使用 importlib 加载 server 模块并枚举工具数量。
     在子进程中执行以避免污染主进程状态。
+    临时脚本写入系统临时目录，避免在项目目录中残留。
     """
     import json
     server_script = os.path.join(project_root, "mcp-stata-server", "server.py")
@@ -233,29 +278,32 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
 
     print(f"  正在测试服务器...")
 
-    # 写入临时测试脚本（比 exec() 字符串拼接更可靠）
-    test_script = os.path.join(project_root, "mcp-stata-server", "_test_bootstrap.py")
-    with open(test_script, "w", encoding="utf-8") as f:
-        f.write(
-            '"""Bootstrap test — imported by setup.py to verify MCP server."""\n'
-            "import sys, os\n"
-            f"sys.path.insert(0, {repr(os.path.join(stata_home, 'utilities'))})\n"
-            "os.environ['STATA_HOME'] = " + repr(stata_home) + "\n"
-            f"os.environ['STATA_EDITION'] = {repr(stata_edition)}\n"
-            "import importlib.util\n"
-            "spec = importlib.util.spec_from_file_location(\n"
-            "    'stata_server', " + repr(server_script) + "\n"
-            ")\n"
-            "mod = importlib.util.module_from_spec(spec)\n"
-            "spec.loader.exec_module(mod)\n"
-            "import asyncio\n"
-            "async def _list():\n"
-            "    tools = await mod.mcp.list_tools()\n"
-            "    print('TOOLS:' + str(len(tools)))\n"
-            "asyncio.run(_list())\n"
-        )
-
+    # 写入系统临时目录，测试结束后显式删除
+    test_script = None
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix="_stata_mcp_bootstrap.py", delete=False, encoding="utf-8"
+        ) as f:
+            test_script = f.name
+            f.write(
+                '"""Bootstrap test — imported by setup.py to verify MCP server."""\n'
+                "import sys, os\n"
+                f"sys.path.insert(0, {repr(os.path.join(stata_home, 'utilities'))})\n"
+                "os.environ['STATA_HOME'] = " + repr(stata_home) + "\n"
+                f"os.environ['STATA_EDITION'] = {repr(stata_edition)}\n"
+                "import importlib.util\n"
+                "spec = importlib.util.spec_from_file_location(\n"
+                "    'stata_server', " + repr(server_script) + "\n"
+                ")\n"
+                "mod = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(mod)\n"
+                "import asyncio\n"
+                "async def _list():\n"
+                "    tools = await mod.mcp.list_tools()\n"
+                "    print('TOOLS:' + str(len(tools)))\n"
+                "asyncio.run(_list())\n"
+            )
+
         result = subprocess.run(
             [python_exe, test_script],
             env=env,
@@ -279,8 +327,11 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
                     print(f"    {l[:200]}")
             return False
     finally:
-        if os.path.isfile(test_script):
-            os.unlink(test_script)
+        if test_script and os.path.isfile(test_script):
+            try:
+                os.unlink(test_script)
+            except OSError:
+                pass
 
 
 # =============================================================================
@@ -288,6 +339,17 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
 # =============================================================================
 
 def main():
+    # 先检查 Python 版本，避免创建不兼容的虚拟环境
+    if sys.version_info < MIN_PYTHON_VERSION:
+        print(
+            red(
+                f"✗ Python 版本过低：需要 Python {MIN_PYTHON_VERSION[0]}.{MIN_PYTHON_VERSION[1]} 及以上，"
+                f"当前为 Python {sys.version_info.major}.{sys.version_info.minor}。"
+            )
+        )
+        print("  请使用符合要求的 Python 解释器重新运行 setup.py。")
+        return 1
+
     print()
     print(bold("===== Stata MCP Server 安装配置 ====="))
     print()
@@ -316,7 +378,7 @@ def main():
         user_input = input("  > ").strip().strip('"')
         if user_input and os.path.isdir(user_input):
             stata_home = user_input
-            stata_edition = _detect_edition(stata_home) or "mp"
+            stata_edition = _edition_with_warning(stata_home)
             errors = verify_stata(stata_home, stata_edition)
             if errors:
                 for e in errors:
