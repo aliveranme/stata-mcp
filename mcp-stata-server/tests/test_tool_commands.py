@@ -107,7 +107,9 @@ def test_export_excel_dataset_uses_excel():
     with patch("server._run_stata_command") as mock_run, patch(
         "server.os.path.isfile", return_value=True
     ), patch("server.os.path.getsize", return_value=1024):
-        stata_export_excel("C:/output/data.xlsx", varlist="mpg price", sheet="Data")
+        stata_export_excel(
+            "C:/output/data.xlsx", varlist="mpg price", sheet="Data", replace=True
+        )
         cmd = mock_run.call_args[0][0]
         assert cmd == 'export excel mpg price using "C:/output/data.xlsx", replace firstrow(variables) sheet(Data)'
 
