@@ -13,6 +13,17 @@ from server import (
 )
 
 
+def test_regress_accepts_factor_and_timeseries_varlist():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_regress("y", "i.group x1 L.x2 c.price##i.foreign [aw=weight]")
+        assert "错误" not in result
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "i.group" in cmd
+        assert "L.x2" in cmd
+        assert "[aw=weight]" in cmd
+
+
 def test_regress_builds_command_with_condition_and_options():
     with patch("server._run_stata_command") as mock_run:
         stata_regress("price", "mpg weight", condition="foreign == 1", options="robust")

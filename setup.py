@@ -35,42 +35,63 @@ def bold(s): return f"\033[1m{s}\033[0m"
 # Step 1: 检测 Stata 安装
 # =============================================================================
 
-STATA_COMMON_PATHS = [
-    # StataNow 19.x
-    "C:/Program Files/StataNow19.5",
-    "C:/Program Files/StataNow19",
-    "C:/Program Files (x86)/StataNow19.5",
-    "C:/Program Files (x86)/StataNow19",
-    "C:/Program Files/StataNow",
-    "D:/StataNow19.5",
-    "D:/StataNow19",
-    "D:/StataNow",
-    "E:/StataNow19.5",
-    "E:/StataNow19",
-    "E:/StataNow",
-    # Stata 18 / 17
-    "C:/Program Files/Stata18",
-    "C:/Program Files/Stata17",
-    "C:/Program Files (x86)/Stata18",
-    "C:/Program Files (x86)/Stata17",
-    "D:/Stata18",
-    "D:/Stata17",
-    "E:/Stata18",
-    "E:/Stata17",
-    # 显式 edition 子目录（某些安装方式）
-    "C:/Program Files/StataMP18",
-    "C:/Program Files/StataSE18",
-    "C:/Program Files/StataBE18",
-    "C:/Program Files/StataMP17",
-    "C:/Program Files/StataSE17",
-    "C:/Program Files/StataBE17",
-    "D:/StataMP18",
-    "D:/StataSE18",
-    "D:/StataBE18",
-    "D:/StataMP17",
-    "D:/StataSE17",
-    "D:/StataBE17",
-]
+if sys.platform == "win32":
+    STATA_COMMON_PATHS = [
+        # StataNow 19.x
+        "C:/Program Files/StataNow19.5",
+        "C:/Program Files/StataNow19",
+        "C:/Program Files (x86)/StataNow19.5",
+        "C:/Program Files (x86)/StataNow19",
+        "C:/Program Files/StataNow",
+        "D:/StataNow19.5",
+        "D:/StataNow19",
+        "D:/StataNow",
+        "E:/StataNow19.5",
+        "E:/StataNow19",
+        "E:/StataNow",
+        # Stata 18 / 17
+        "C:/Program Files/Stata18",
+        "C:/Program Files/Stata17",
+        "C:/Program Files (x86)/Stata18",
+        "C:/Program Files (x86)/Stata17",
+        "D:/Stata18",
+        "D:/Stata17",
+        "E:/Stata18",
+        "E:/Stata17",
+        # 显式 edition 子目录（某些安装方式）
+        "C:/Program Files/StataMP18",
+        "C:/Program Files/StataSE18",
+        "C:/Program Files/StataBE18",
+        "C:/Program Files/StataMP17",
+        "C:/Program Files/StataSE17",
+        "C:/Program Files/StataBE17",
+        "D:/StataMP18",
+        "D:/StataSE18",
+        "D:/StataBE18",
+        "D:/StataMP17",
+        "D:/StataSE17",
+        "D:/StataBE17",
+    ]
+elif sys.platform == "darwin":
+    STATA_COMMON_PATHS = [
+        "/Applications/Stata/StataNow.app/Contents/MacOS",
+        "/Applications/Stata/StataNow19.app/Contents/MacOS",
+        "/Applications/Stata/StataNow19.5.app/Contents/MacOS",
+        "/Applications/Stata/Stata18.app/Contents/MacOS",
+        "/Applications/Stata/Stata17.app/Contents/MacOS",
+        "/Applications/Stata/StataMP18.app/Contents/MacOS",
+        "/Applications/Stata/StataSE18.app/Contents/MacOS",
+        "/Applications/Stata/StataBE18.app/Contents/MacOS",
+    ]
+else:
+    STATA_COMMON_PATHS = [
+        "/usr/local/stata",
+        "/usr/local/stata17",
+        "/usr/local/stata18",
+        "/opt/stata",
+        "/opt/stata17",
+        "/opt/stata18",
+    ]
 
 STATA_EDITIONS = ["mp", "se", "be"]
 
@@ -181,7 +202,9 @@ def setup_venv(project_root):
 
 def get_python_exe(venv_dir):
     """获取 venv 中的 Python 可执行文件路径。"""
-    return os.path.join(venv_dir, "Scripts", "python.exe")
+    if sys.platform == "win32":
+        return os.path.join(venv_dir, "Scripts", "python.exe")
+    return os.path.join(venv_dir, "bin", "python")
 
 
 def install_deps(venv_dir, project_root):

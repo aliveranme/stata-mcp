@@ -98,6 +98,14 @@ except SystemError as e:
 # stout 必须在 init() 之后导入（check_initialized 检查）
 from pystata.core import stout
 
+# headless 环境下主动关闭图形窗口创建，避免第三方/复杂图形挂起
+try:
+    with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
+        encoded = config.get_encode_str("set graphics off")
+        config.stlib.StataSO_Execute(encoded, False)
+except Exception as e:
+    logger.warning("Could not set graphics off during init: %s", e)
+
 
 # =============================================================================
 # MCP Server
@@ -163,6 +171,37 @@ _STATA_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
 _INSTALL_SOURCE_RE = re.compile(r"^https://[a-zA-Z0-9][-a-zA-Z0-9.]*(/)?.*$", re.IGNORECASE)
 # 危险字符：换行、回车、空字节、分号（可能分割命令）
 _INJECTABLE_CHARS = {"\n", "\r", "\x00", ";"}
+# varlist 中额外需要注意的 shell/Stata 元字符
+_VARLIST_FORBIDDEN_CHARS = {"\n", "\r", "\x00", ";", "!", "|", "&", "`", "$"}
+# 危险：stata_run 中可能导致主机命令执行或 Python 代码执行的显著前缀
+_DANGEROUS_COMMAND_PREFIXES = ("!", "shell", "python:", "python(")
+
+
+def _has_dangerous_command_prefix(cmd: str) -> str | None:
+    """检查命令是否包含明显的 shell/python 执行入口；返回原因或 None。
+
+    该检查仅作为最后一层护栏，不能替代操作系统级沙箱。它阻止最常见的
+    '!' shell out 和 'python:' 代码注入；复杂的 Stata 宏/ado 绕行仍可能
+    绕过，因此仍需保持最小权限运行 MCP Server。
+    """
+    for raw_line in cmd.split("\n"):
+        line = raw_line.strip()
+        if not line or line.startswith("*") or line.startswith("//"):
+            continue
+        lowered = line.lower()
+        for prefix in _DANGEROUS_COMMAND_PREFIXES:
+            if lowered.startswith(prefix):
+                # shell/python: 等命令后通常跟随要执行的系统/Py 代码
+                target = line[len(prefix):].strip() or "<empty>"
+                return (
+                    f"错误: 命令 '{line[:60]}' 包含危险前缀 '{prefix}'，"
+                    f"可能执行主机系统/Py 代码（目标: {target[:40]}）。"
+                    "如确有必要，请使用操作系统直接操作，而非通过 Stata MCP。"
+                )
+        # 检测 python 主机命令（部分 Stata 版本使用 python 子命令）
+        if lowered == "python" or lowered.startswith("python "):
+            return f"错误: 命令 '{line[:60]}' 尝试调用 Stata 内嵌 Python，已被禁止"
+    return None
 
 
 def _contains_injection_chars(value: str) -> bool:
@@ -195,12 +234,25 @@ def _validate_identifier(value: str, label: str = "变量名") -> str | None:
 
 
 def _validate_varlist(value: str, label: str = "varlist") -> str | None:
-    """校验空格分隔的变量列表，每一项都是合法标识符。"""
+    """校验 Stata 变量列表字符串，仅阻止注入与危险元字符，不限制合法语法。
+
+    允许因子变量（i.var）、时间序列算子（L.var）、交互项（c.x##i.g）、
+    权重子句（[aw=...]）、范围（x1-x10）、通配符（mpg*）等。
+    """
     if not value or not value.strip():
         return None
-    for token in value.split():
-        if err := _validate_identifier(token, label):
-            return err
+    if any(ch in value for ch in _VARLIST_FORBIDDEN_CHARS):
+        return f"错误: {label} 包含非法字符（换行、回车、空字节、分号、!、|、&、反引号或 $）"
+    # 基本的引号成对检查（未转义的双引号需成对）
+    quotes = 0
+    i = 0
+    n = len(value)
+    while i < n:
+        if value[i] == '"':
+            quotes += 1
+        i += 1
+    if quotes % 2 != 0:
+        return f"错误: {label} 包含未闭合的双引号"
     return None
 
 
@@ -275,7 +327,15 @@ def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
     return header + chunk + footer
 
 
-def _parse_command_blocks(cmd: str) -> list:
+def _flush_block(buffer: list[str], blocks: list[str]) -> None:
+    """将 buffer 中非空内容作为一个命令块追加，然后清空 buffer。"""
+    block_text = "\n".join(buffer)
+    if block_text.strip():
+        blocks.append(block_text)
+    buffer.clear()
+
+
+def _parse_command_blocks(cmd: str) -> list[str]:
     """将多行 Stata 输入解析为可执行块。
 
     处理规则：
@@ -416,11 +476,8 @@ def _parse_command_blocks(cmd: str) -> list:
                 # /// 行无实质内容（如 /// comment 或行首 ///）时中断当前续行链，
                 # 并把已累积的 buffer 作为一个 block 发出，避免后续行被错误拼接。
                 in_continuation = False
-                if brace_depth == 0 and not in_block_comment and buffer:
-                    block_text = "\n".join(buffer)
-                    if block_text.strip():
-                        blocks.append(block_text)
-                    buffer = []
+                if brace_depth == 0 and not in_block_comment:
+                    _flush_block(buffer, blocks)
             continue
 
         if in_continuation and buffer:
@@ -431,24 +488,16 @@ def _parse_command_blocks(cmd: str) -> list:
             in_continuation = False
             # 若续行被空行（或仅注释行）结束，直接尝试发出当前 block
             if brace_depth == 0 and not in_block_comment:
-                block_text = "\n".join(buffer)
-                if block_text.strip():
-                    blocks.append(block_text)
-                buffer = []
+                _flush_block(buffer, blocks)
                 continue
         else:
             buffer.append(content)
 
         if brace_depth == 0 and not in_block_comment:
-            block_text = "\n".join(buffer)
-            if block_text.strip():
-                blocks.append(block_text)
-            buffer = []
+            _flush_block(buffer, blocks)
 
     if buffer:
-        block_text = "\n".join(buffer)
-        if block_text.strip():
-            blocks.append(block_text)
+        _flush_block(buffer, blocks)
 
     return blocks
 
@@ -456,9 +505,9 @@ def _parse_command_blocks(cmd: str) -> list:
 def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
     """排空输出缓冲，返回残留内容。
 
-    使用自适应等待策略：
-    - 前 100ms 密集轮询（1ms 间隔）
-    - 每轮检查 20ms 安静窗口确保输出完整
+    使用指数退避轮询：初始 1ms，最大 20ms；在检测到输出后重置回 1ms。
+    安静窗口用于确认输出已结束，避免固定高频轮询浪费 CPU。
+
     参数可调：min_wait=最小等待秒，quiet_gap=安静判定秒。
 
     用于执行前清理和 SetBreak 后的错误恢复。
@@ -466,15 +515,18 @@ def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
     parts = []
     t_start = time.time()
     last_nonempty = time.time()
+    sleep_ms = 1
 
     while time.time() - t_start < min_wait:
         out = config.get_output()
         if out:
             parts.append(out)
             last_nonempty = time.time()
+            sleep_ms = 1
         if time.time() - last_nonempty > quiet_gap:
             break
-        time.sleep(0.001)
+        time.sleep(sleep_ms / 1000.0)
+        sleep_ms = min(sleep_ms * 2, 20)
 
     return "".join(parts)
 
@@ -492,7 +544,7 @@ def _set_break():
 def _ping_stata() -> bool:
     """快速心跳：检测 Stata DLL 是否存活。
 
-    执行一个无害命令(display 42)，预期返回码 0。
+    通过 _execute_single 执行无害命令 "display 42"，自带超时看门狗。
     成功时更新 _last_ping_time 缓存。
     若失败则尝试排空缓冲 + SetBreak 恢复一次。
 
@@ -503,14 +555,8 @@ def _ping_stata() -> bool:
 
     for attempt in range(2):  # 首次 + 一次恢复重试
         try:
-            with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
-                encoded = config.get_encode_str("display 42")
-                rc = config.stlib.StataSO_Execute(encoded, False)
-            # 快速排空（已缓存，不再需要全量 drain）
-            for _ in range(30):
-                config.get_output()
-                time.sleep(0.001)
-            if rc == 0 or rc == 3000:
+            rc, out = _execute_single("display 42", timeout=10)
+            if rc in (0, STATA_RC_NO_OUTPUT) and "42" in out:
                 _last_ping_time = time.time()
                 return True
         except Exception:
@@ -522,6 +568,7 @@ def _ping_stata() -> bool:
             _set_break()
             time.sleep(0.1)
 
+    _last_ping_time = 0.0
     return False
 
 
@@ -572,9 +619,11 @@ def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
             if _ping_stata():
                 out += "\n(Stata 已自动恢复，请重试命令)"
             else:
+                rc = 998
                 out += "\n(Stata 崩溃且无法自动恢复，需要重启 MCP Server)"
         except Exception as e:
             logger.exception("Stata 崩溃恢复失败: %s", e)
+            rc = 998
             out += "\n(Stata 崩溃且无法自动恢复，需要重启 MCP Server)"
 
     return rc, out
@@ -608,6 +657,9 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     def _timeout_watchdog():
         nonlocal did_break
         if not exec_done.wait(timeout=timeout):
+            # 二次检查，避免命令恰好在超时临界点完成时误发 break
+            if exec_done.is_set():
+                return
             logger.warning("Stata command timed out (>%ss), issuing break: %s", timeout, cmd[:80])
             _set_break()
             did_break = True
@@ -636,13 +688,16 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     total_len = 0
     empty_count = 0
 
-    # 阶段 1: 快轮询 (300×1ms, 连续 3 空转退出)
-    for _ in range(300):
+    # 阶段 1: 快轮询（最多 300 次，连续 3 次空转退出，指数退避）
+    sleep_ms = 1
+    attempts = 0
+    while attempts < 300:
         out = config.get_output()
         if out:
             output_parts.append(out)
             total_len += len(out)
             empty_count = 0
+            sleep_ms = 1
             if total_len >= MAX_OUTPUT_CHARS:
                 output_parts.append("\n(输出已截断)")
                 break
@@ -650,7 +705,9 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
             empty_count += 1
             if empty_count >= 3:
                 break
-        time.sleep(0.001)
+        time.sleep(sleep_ms / 1000.0)
+        sleep_ms = min(sleep_ms * 2, 20)
+        attempts += 1
 
     # 阶段 2: 智能清尾 — 仅在输出较小时做短 drain
     if total_len < MAX_OUTPUT_CHARS:
@@ -708,6 +765,13 @@ def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60, require_file:
         if require_file:
             if err := _check_file_exists_locked(require_file):
                 return err
+            # 对相对路径，确保 Stata 实际执行时使用的路径与检查路径一致
+            if not os.path.isabs(require_file):
+                cwd = _get_stata_cwd_locked()
+                if cwd:
+                    py_abs = _normalize_path(require_file)
+                    st_abs = os.path.normpath(os.path.join(cwd, require_file)).replace("\\", "/")
+                    cmd = cmd.replace(f'"{py_abs}"', f'"{st_abs}"')
 
         # 使用新的解析器：正确处理 /// 续行和 { } 复合块
         blocks = _parse_command_blocks(cmd)
@@ -796,15 +860,20 @@ def _resolve_path_for_stata(filepath: str) -> str:
 def _check_file_exists_locked(filepath: str) -> str | None:
     """在 _stata_lock 保护下检查文件是否存在。
 
-    相对路径使用 Python 当前工作目录解析为绝对路径（与 _normalize_path
-    保持一致）。如需要按 Stata 当前目录解析，请先使用 stata_set_cwd。
+    相对路径优先使用 Stata 当前工作目录解析（因为后续命令由 Stata 执行）。
+    若无法获取 Stata cwd，则回退到 MCP server 进程当前工作目录。
     返回错误消息或 None。
     """
     resolved = _resolve_path_for_stata(filepath)
     if isinstance(resolved, str) and resolved.startswith("错误:"):
         return resolved
-    if not os.path.isfile(resolved):
-        return f"错误: 文件不存在 — {resolved}"
+    check_path = resolved
+    if not os.path.isabs(filepath):
+        cwd = _get_stata_cwd_locked()
+        if cwd:
+            check_path = os.path.normpath(os.path.join(cwd, filepath)).replace("\\", "/")
+    if not os.path.isfile(check_path):
+        return f"错误: 文件不存在 — {check_path}"
     return None
 
 
@@ -818,7 +887,6 @@ def _shutdown_stata():
     """优雅关闭 Stata 会话。"""
     try:
         # 尝试获取锁，避免与正在执行的命令并发访问 DLL。
-        # 若 5 秒内无法获取，说明有命令仍在运行，放弃关闭并记录警告。
         if _stata_lock.acquire(timeout=5):
             try:
                 if config.is_stata_initialized():
@@ -826,8 +894,25 @@ def _shutdown_stata():
                     logger.info("Stata shut down cleanly")
             finally:
                 _stata_lock.release()
-        else:
-            logger.warning("Stata shutdown skipped: _stata_lock held by active command")
+            return
+
+        # 若 5 秒内无法获取锁，尝试打断当前命令后再试一次
+        logger.warning("Stata shutdown: _stata_lock held by active command, issuing break...")
+        try:
+            _set_break()
+        except Exception:
+            pass
+        time.sleep(1.5)
+        if _stata_lock.acquire(timeout=3):
+            try:
+                if config.is_stata_initialized():
+                    config.shutdown()
+                    logger.info("Stata shut down cleanly after break")
+            finally:
+                _stata_lock.release()
+            return
+
+        logger.error("Stata shutdown failed: unable to acquire _stata_lock after break")
     except Exception:
         logger.exception("Error during Stata shutdown")
 
@@ -864,10 +949,12 @@ def stata_run(command: str, page: int = 1, timeout: int = 60) -> str:
     Returns:
         Stata 输出文本（可能包含分页导航）。
     """
-    # 限定时长范围；拒绝可能破坏 MCP stdio  transport 的空字节
+    # 限定时长范围；拒绝可能破坏 MCP stdio  transport 的空字节与显著危险前缀
     safe_timeout = max(10, min(timeout, 1800))
     if "\x00" in command:
         return "错误: command 包含空字节"
+    if reason := _has_dangerous_command_prefix(command):
+        return reason
     return _run_stata_command(command, page, timeout=safe_timeout)
 
 
@@ -1123,8 +1210,8 @@ def stata_display(expression: str) -> str:
     Returns:
         表达式计算结果。
     """
-    if "\x00" in expression:
-        return "错误: expression 包含空字节"
+    if err := _validate_no_injection(expression, "expression"):
+        return err
     return _run_stata_command(f"display {expression}")
 
 
@@ -1360,6 +1447,7 @@ def stata_graph(
 
         compound = (
             f"capture noisily {{\n"
+            f"    set graphics off\n"
             f"    set scheme {scheme}\n"
             f"    {command}\n"
             f'    graph export "{export_path}", {replace_opt} {size_opts}\n'
@@ -1437,6 +1525,11 @@ def stata_export_excel(
             changed_msg = ""
 
         cmd = (
+            f"capture which estout\n"
+            f'if _rc {{\n'
+            f'    display "正在安装 estout..."\n'
+            f"    ssc install estout, quiet\n"
+            f"}}\n"
             f'esttab using "{export_path}", csv {replace_opt} '
             f"plain nogaps nomtitles nonumber"
         )
@@ -1459,7 +1552,7 @@ def stata_export_excel(
     # 验证文件已生成；仅在 Stata 未报错时追加成功提示，避免 replace=False 已存在文件时误判
     if os.path.isfile(export_path) and "[返回码:" not in result:
         size_kb = os.path.getsize(export_path) // 1024
-        return f"{changed_msg}✓ 已导出 {size_kb} KB → {export_path}\n{result}"
+        return f"{changed_msg}已导出 {size_kb} KB -> {export_path}\n{result}"
     return changed_msg + result
 
 

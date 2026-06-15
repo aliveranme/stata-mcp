@@ -144,3 +144,52 @@ def test_continuation_continues_with_indented_line():
     assert len(blocks) == 1
     assert "regress mpg" in blocks[0]
     assert "weight" in blocks[0]
+
+
+def test_empty_input_returns_empty_list():
+    assert _parse_command_blocks("") == []
+    assert _parse_command_blocks("   \n\n  ") == []
+
+
+def test_unclosed_block_comment_drops_trailing_text():
+    cmd = """summarize mpg
+/* this comment never ends"""
+    blocks = _parse_command_blocks(cmd)
+    assert len(blocks) == 1
+    assert "summarize mpg" in blocks[0]
+    assert "never ends" not in blocks[0]
+
+
+def test_unmatched_brace_emits_remaining_buffer():
+    # Parser does not enforce brace balance; unmatched '{' stays in buffer
+    # and gets emitted so Stata can report the syntax error.
+    blocks = _parse_command_blocks("capture noisily {\nsummarize mpg")
+    assert len(blocks) == 1
+    assert "capture noisily {" in blocks[0]
+
+
+def test_leading_space_star_is_not_comment():
+    # Stata *-comments must start at column 1; leading spaces keep the line as code.
+    blocks = _parse_command_blocks("  *not a comment\nsummarize mpg")
+    assert len(blocks) == 2
+    assert "*not a comment" in blocks[0]
+    assert "summarize mpg" in blocks[1]
+
+
+def test_standalone_triple_slash_ends_prior_block():
+    blocks = _parse_command_blocks("summarize mpg\n///\ntabulate foreign")
+    assert len(blocks) == 2
+    assert "summarize mpg" in blocks[0]
+    assert "tabulate foreign" in blocks[1]
+
+
+def test_nested_compound_blocks_merge():
+    blocks = _parse_command_blocks("capture noisily {\nforeach v of varlist mpg price {\n    summarize `v'\n}\n}")
+    assert len(blocks) == 1
+    assert "capture noisily {" in blocks[0]
+    assert "foreach" in blocks[0]
+
+
+def test_parser_ignores_carriage_returns():
+    blocks = _parse_command_blocks("summarize mpg\r\ntabulate foreign")
+    assert blocks == ["summarize mpg", "tabulate foreign"]
