@@ -32,8 +32,8 @@ stata-mcp/
 | 数据管理 | `stata_use_dataset`, `stata_save_dataset`, `stata_set_cwd` | — | 读写 .dta、cd |
 | 数据探索 | `stata_describe`, `stata_codebook`, `stata_summarize`, `stata_list`, `stata_tabulate`, `stata_display` | ✓ | 只读探索 |
 | 分析 | `stata_regress`, `stata_logistic`, `stata_ttest` | ✓ | OLS / Logit / t 检验 |
-| 图形 | `stata_graph` | ✓ | 执行图形命令，支持 scheme 样式和自动导出 |
-| 导出 | `stata_export_excel` | — | 数据集导出为 .xlsx；回归结果导出为 CSV |
+| 图形 | `stata_graph` | — | 执行图形命令并可选导出文件（destructiveHint=True，可覆盖文件） |
+| 导出 | `stata_export_excel` | — | 数据集导出为 .xlsx（replace 默认 False）；回归结果自动转为 CSV |
 | 包管理 | `stata_install_package`, `stata_find_package`, `stata_list_packages` | — | ssc 或完整 URL 安装 |
 | 翻页 | `stata_more` | ✓ | 大输出分页浏览（缓存 120K chars） |
 | 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + 内存 |
@@ -59,18 +59,28 @@ stata-mcp/
 每个 `StataSO_Execute` 调用必须包裹在 `RedirectOutput(StataDisplay, StataError)` 中。
 否则 Stata 输出直接写入 `sys.stdout`（即 MCP stdio 通道），污染 JSON-RPC 协议 -> 终端崩溃。
 
-### 输出收集（自适应优化）
+### 输出收集（指数退避）
 
 ```
-执行前: _drain_output(50ms)  — 短排空残留缓冲（50ms 上限 + 10ms 安静退出）
-执行中: StataSO_Execute       — 同步调用，60s 超时看门狗
-执行后: 快轮询(300×1ms)       — 收集主体输出，3次空转即退出
+执行前: _drain_output(50ms)  — 短排空残留缓冲（指数退避 1→20ms）
+执行中: StataSO_Execute       — 同步调用，30s 超时看门狗（长命令可显式传 timeout）
+执行后: 快轮询(指数退避 1→20ms) — 收集主体输出，3次空转即退出
         _drain_output()       — 智能清尾：小输出 50ms | 大输出 100ms
         截断 120K chars        — 防止 MCP 缓冲溢出
         自动分页 4K chars       — 大输出自动分页，支持 stata_more 翻页
 ```
 
-### Ping 缓存
+### 超时看门狗
+
+超时看门狗在后台线程中运行，默认 30s（通过 `timeout` 参数可覆盖，上限 1800s）。因 Stata DLL 非线程安全，看门狗调用 `StataSO_SetBreak` 存在极小并发风险；已通过二次确认、break 冷却机制降低触发概率。如需执行包安装、复杂回归或大循环，显式传入 `timeout=120` 或更高。
+
+### 安全护栏
+
+- `stata_run` 会拦截行首 `!`、`shell`、`python:`、`python (` 及裸 `python` 等可能导致主机命令执行的前缀。如确需此类操作，请通过操作系统直接执行，不要经由 Stata MCP。
+- 所有结构化参数（`varlist`、`condition`、`options`、`in_range` 等）会拒绝换行、空字节、分号、`!`、`|`、`&`、反引号、`$`。
+- 路径参数会拒绝空字节、双引号、分号、UNC 路径（默认）及越界的相对路径 `..`。安装源仅允许 `ssc` 或 `https://`。
+
+### Ping 缓存与失效
 
 每次命令执行前的 `_ping_stata()` 心跳检测有 **2 秒缓存**：同一会话的连续快速调用跳过重复 ping，实测将多步分析流程（如 `regress → estat vif → estat hettest`）的总延迟降低 30-50%。
 
@@ -78,6 +88,8 @@ stata-mcp/
 命令 1 → ping(实时) → execute → 命令 2 → ping(缓存命中) → execute → 命令 3 → ping(缓存命中) → execute
                               ↑ 2 秒内不再重复 ping
 ```
+
+**缓存失效**：当 ping 失败或崩溃恢复失败时，缓存立即清零，确保下次调用重新执行心跳而非使用过期缓存。这在 Stata DLL 崩溃后防止连续调用继续命中无响应的 DLL。
 
 ### `_parse_command_blocks` 解析器
 
@@ -91,16 +103,33 @@ stata-mcp/
 - `///` 行尾 → 续行符，合并到下一行
 - `{` 出现但 `}` 不在同行的 → 复合块开始，收集直到 `}` 闭合
 
+### 文件存在性检查
+
+`stata_use_dataset` 与 `stata_run_do_file` 在命令执行前对文件做预存在性检查：
+- 绝对路径直接检查。
+- 相对路径优先使用 **Stata 当前工作目录** 解析（与后续 Stata 执行路径一致），在 `_stata_lock` 保护内完成。
+- 若无法获取 Stata cwd，回退到 Python 进程当前目录。
+
+### 路径安全校验
+
+所有文件路径参数经过 `_validate_path`：
+- 拒绝空字节、双引号、分号、换行、回车。
+- 拒绝 UNC 网络路径（默认，可通过环境变量 `STATA_ALLOW_UNC=1` 开启）。
+- 相对路径限制不得超出当前工作目录。
+
 ## Gotchas
 
-- **第三方绘图包（binscatter 等）在 headless 环境会挂起**：Stata DLL 试图创建 GUI 窗口失败。一律使用原生命令（`twoway scatter`、`histogram`），或先用 `set graphics off`。
+- **第三方绘图包（binscatter 等）在 headless 环境会挂起**：Stata DLL 试图创建 GUI 窗口失败。服务器启动时自动执行 `set graphics off`，且在 `stata_graph` 导出复合块开头也注入 `set graphics off`。建议优先使用原生命令（`twoway scatter`、`histogram`）。
 - **`graph export` 必须和图形命令在同一个 Stata 复合块 `{ }` 内**，或使用 `stata_graph(..., export="path.png")` 一次完成。图形窗口不跨 `StataSO_Execute` 调用持久。
-- **`///` 续行符**：现在已被修复支持（版本 v2+），可在 `stata_run` 中使用 `\`\``\` 连接多行长命令。
+- **图形导出后自动清理**：`graph drop _all` 在复合块外单独执行，确保即使图形命令出错，缓存的图形对象也会被清理。
+- **`stata_graph` 与 `stata_export_excel` 的 `replace` 默认值为 `False`**（而非 True），写文件前需确保目标文件不存在或显式传入 `replace=True`。安全性优先于向后兼容。
+- **`stata_export_excel(results=True)`** 自动输出为 CSV（不支持 xlsx），若 `estout` 未安装则自动从 ssc 安装。
+- **`///` 续行符**：现在已被修复支持（版本 v2+），可在 `stata_run` 中使用 `///` 连接多行长命令。
 - **`{ }` 复合块**：用于将多条命令打包为单次执行。典型用途：`capture noisily { twoway ... \n graph export ..., replace }`。
 - **`winsor2` 的 `suffix(_w)` 不能和 `replace` 一起用**：选项冲突。要么 `suffix(_w)` 创建新变量，要么 `replace` 覆盖原变量。
 - **`stata_more` 只能翻上次命令的缓存**：之间不能插入其他命令，否则 `_last_output` 被覆盖。
 - **`.mcp.json` 有用户路径，已 gitignore**：clone 后必须运行 `setup.py` 生成。
-- **Stata display 不支持中文字符串直接传参**：使用 Stata 的 `\`"中文\"'` 引号语法替代单引号 `'中文'`。
+- **Stata display 不支持中文字符串直接传参**：使用 Stata 的 `"中文"'` 引号语法替代单引号 `'中文'`。
 
 ## 故障检测与恢复策略
 
@@ -135,22 +164,24 @@ _ping_stata()          # 预检：DLL 是否存活（2 次尝试 + SetBreak 恢�
 
 ```
 Stata 命令执行异常链:
-  input_validation (length check)
+  input_validation (length check, dangerous prefix filter)
     → _parse_command_blocks()   # 解析 /// 续行和 { } 复合块
     → _execute_single()
         → _drain_output()       # 清洁缓冲
-        → watchdog (60s)        # time-thread.Event → StataSO_SetBreak
+        → watchdog (30s)        # time-thread.Event → StataSO_SetBreak
         → RedirectOutput        # 防 stdout 污染
         → StataSO_Execute       # try/except
         → _drain_output(if break)  # break 后排空错误残渣
         → 输出收集 + 截断
     → 收集各命令结果
-    → 返回分页文本 或 原始文本
+    → 若 had_error → 返回 ToolResult(is_error=True) 告知 MCP 客户端
+    → 否则返回分页文本 或 原始文本
 ```
 
-- 命令错误（返回码非 0）→ 返回 `[返回码: N]` + 错误文本，不崩溃
+- 命令错误（返回码非 0）→ 返回 `[返回码: N]` + 错误文本，不崩溃，**已标记为 MCP isError=true**
 - DLL 崩溃（`StataSO_Execute` 异常）→ 返回 `CRASH` 消息，看门狗触发 `SetBreak`
 - MCP Server 崩溃 → Claude Code 自动重连，Stata 重启（数据丢失）
+- 输入验证失败 → 返回 `_make_error_result(...)`，同样标记为 isError=true
 
 ## 输出大小管理
 
@@ -225,4 +256,6 @@ stata_run("graph export graph.png, replace")   ← 可能失败：r(601)
 
 - **无 CI/lint 配置**：无 `mypy`、`ruff`、`pre-commit`。server.py 混合中英文标识符。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
-- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会尝试使用 `esttab` 导出估计结果；若 `esttab` 未安装则自动安装。
+- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会尝试使用 `esttab` 导出估计结果；若 `esttab` 未安装则自动从 ssc 安装。
+- **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（30s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。
+- **工具错误语义**：错误结果（Stata 返回码非 0、输入验证失败、DLL 崩溃）通过 `ToolResult(is_error=True)` 告知 MCP 客户端。成功工具结果仍以普通字符串返回。若使用 `mcp.list_tools` 或类似客户端，需注意区分返回类型。

@@ -1,5 +1,7 @@
 from unittest.mock import patch, MagicMock
 
+from fastmcp.tools.base import ToolResult
+
 from server import (
     stata_regress,
     stata_logistic,
@@ -144,8 +146,12 @@ def test_graph_rejects_unsafe_brace_in_export_mode():
             "twoway scatter price weight }",  # 字符串外的 } 会破坏复合块
             export="C:/output/fig.png",
         )
-        assert "错误" in result
-        assert "会破坏复合块的" in result
+        if isinstance(result, ToolResult):
+            assert result.is_error is True
+            assert "会破坏复合块的" in result.content[0].text
+        else:
+            assert "错误" in result
+            assert "会破坏复合块的" in result
         mock_run.assert_not_called()
 
 

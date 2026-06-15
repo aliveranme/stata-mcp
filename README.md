@@ -50,8 +50,13 @@ python setup.py
 
 ```bash
 # 设置 Stata 路径（请替换为你本机实际安装路径；setup.py 通常会自动检测）
-set STATA_HOME="C:/Program Files/StataNow/StataNow19"
-set STATA_EDITION=mp
+# Git Bash / MSYS2:
+export STATA_HOME="C:/Program Files/StataNow/StataNow19"
+export STATA_EDITION=mp
+
+# 或者 Windows CMD:
+# set STATA_HOME="C:/Program Files/StataNow/StataNow19"
+# set STATA_EDITION=mp
 
 # 创建虚拟环境
 cd mcp-stata-server
@@ -113,15 +118,15 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 ### 通用执行
 | 工具 | 说明 |
 |------|------|
-| `stata_run` | **执行任意 Stata 命令**（含分页） |
+| `stata_run` | **执行常见 Stata 命令**（含分页，自动拦截 !/shell/python: 等危险前缀） |
 | `stata_run_do_file` | 执行 .do 文件 |
-| `stata_graph` | 生成图形；推荐 `export` 参数直接导出，支持 `height`。注意：`export` 模式会自动用 `{ }` 包装命令，请勿在 `command` 中手动包含未转义的 `}`。 |
+| `stata_graph` | 生成图形（destructiveHint=True，`replace` 默认 False）；推荐 `export` 参数直接导出，支持 `height`。注意：`export` 模式会自动用 `{ }` 包装命令，请勿在 `command` 中手动包含未转义的 `}`。 |
 | `stata_more` | **翻页浏览大输出** |
 
 ### 导出
 | 工具 | 说明 |
 |------|------|
-| `stata_export_excel` | 数据集导出为 .xlsx；回归结果导出为 CSV |
+| `stata_export_excel` | 数据集导出为 .xlsx（`replace` 默认 False）；回归结果 export 自动改为 CSV，自动安装 estout |
 
 ### 包管理
 | 工具 | 说明 |

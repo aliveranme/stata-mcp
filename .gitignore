@@ -44,3 +44,6 @@ mcp-stata-server/logs/
 *.png
 *.xlsx
 temp_do/
+# Local Pi runtime state
+.atl/
+.pi/

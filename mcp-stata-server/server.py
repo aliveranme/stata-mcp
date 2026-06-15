@@ -8,12 +8,15 @@ Stata MCP Server — 通过 pystata 执行 Stata 命令。
 兼容 StataNow 19 / Stata 18（MP / SE / BE 版本）。
 
 环境变量:
-    STATA_HOME: Stata 安装目录（默认 D:\\StataNow19）
+    STATA_HOME: Stata 安装目录（默认 C:\\Program Files\\StataNow\\StataNow19）
     STATA_EDITION: Stata 版本 mp|se|be（默认 mp）
+    STATA_ALLOWED_ROOTS: 可选，分号分隔的路径沙箱白名单（例: C:/data;D:/projects）
+    STATA_ALLOW_UNC: 可选，设为 1 时允许 UNC 网络路径（默认拒绝）
 """
 
 import sys
 import os
+import io
 import re
 import time
 import threading
@@ -112,6 +115,7 @@ except Exception as e:
 # =============================================================================
 
 from fastmcp import FastMCP
+from fastmcp.tools.base import ToolResult
 from mcp.types import ToolAnnotations
 
 mcp = FastMCP(
@@ -169,6 +173,109 @@ STATA_RC_MESSAGES = {
 _STATA_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
 # 允许的包来源：ssc 或 HTTPS URL（至少限制 scheme 与基本主机格式）
 _INSTALL_SOURCE_RE = re.compile(r"^https://[a-zA-Z0-9][-a-zA-Z0-9.]*(/)?.*$", re.IGNORECASE)
+
+# =============================================================================
+# 路径沙箱 (ALLOWED_ROOTS)
+# =============================================================================
+# STATA_ALLOWED_ROOTS: 可选，分号分隔的允许根目录列表。
+#   例: "C:/data;D:/projects/stata"
+#   设置后所有文件路径（含相对路径解析后）必须落在某根之下。
+#   未设置时保持向后兼容（不限制绝对路径）。
+# STATA_ALLOW_UNC: 可选，设为 "1" 后允许 UNC 网络路径（默认拒绝，仅对沙箱模式生效）。
+
+_STATA_ALLOWED_ROOTS_ENV = os.environ.get("STATA_ALLOWED_ROOTS", "")
+_STATA_ALLOW_UNC = os.environ.get("STATA_ALLOW_UNC", "") == "1"
+
+# 字典序排列的允许根目录（realpath 解析后），缓存避免每次重新解析
+_ALLOWED_ROOTS_CACHE: tuple[str, ...] | None = None
+
+
+def _expand_win_short_path(path: str) -> str:
+    """展开 Windows 8.3 短文件名（如 PROGRA~1 → Program Files）。
+
+    仅在 Windows 平台有效，非 Windows 或失败时原样返回。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH + 1)
+        ret = ctypes.windll.kernel32.GetLongPathNameW(path, buf, wintypes.MAX_PATH)
+        if ret and ret <= wintypes.MAX_PATH:
+            return buf.value
+    except Exception:
+        pass
+    return path
+
+
+def _canonicalize_path(path: str) -> str:
+    """将路径规范化：解决相对路径、符号链接、Windows 8.3 短名、长路径前缀。
+
+    返回经过 realpath 解析的绝对路径，统一使用正斜杠。
+    对不存在的路径（如 save 新文件），回退为 normpath + abspath。
+    """
+    # 去除 Windows 长路径前缀
+    canonical = path
+    if canonical.startswith("\\\\?\\"):
+        canonical = canonical[4:]
+        if canonical.startswith("UNC\\"):
+            canonical = "\\" + canonical[3:]
+
+    # Windows 8.3 短名展开
+    canonical = _expand_win_short_path(canonical)
+
+    # 解析相对路径
+    normalized = os.path.abspath(canonical)
+
+    # 尝试 realpath 解析符号链接；若文件不存在则回退
+    try:
+        real = os.path.realpath(normalized)
+        if os.path.exists(real):
+            normalized = real
+    except (OSError, ValueError):
+        pass
+
+    # 统一正斜杠
+    return normalized.replace("\\", "/")
+
+
+def _init_allowed_roots() -> tuple[str, ...]:
+    """从环境变量解析允许的根目录列表（懒加载）。"""
+    global _ALLOWED_ROOTS_CACHE
+    if _ALLOWED_ROOTS_CACHE is not None:
+        return _ALLOWED_ROOTS_CACHE
+    raw = os.environ.get("STATA_ALLOWED_ROOTS", "")
+    if not raw.strip():
+        _ALLOWED_ROOTS_CACHE = ()
+        return _ALLOWED_ROOTS_CACHE
+    roots: list[str] = []
+    for part in raw.split(";"):
+        part = part.strip().strip("\"'").strip()
+        if not part:
+            continue
+        canonical = _canonicalize_path(part)
+        # 确保根目录以 / 结尾，便于前缀匹配
+        if not canonical.endswith("/"):
+            canonical += "/"
+        roots.append(canonical)
+    roots.sort(key=len, reverse=True)  # 长前缀优先匹配
+    _ALLOWED_ROOTS_CACHE = tuple(roots)
+    return _ALLOWED_ROOTS_CACHE
+
+
+def _is_path_allowed(path: str) -> bool:
+    """检查规范化后的绝对路径是否在允许的根目录下。
+
+    若 ALLOWED_ROOTS 未配置则默认允许（向后兼容）；
+    若已配置则路径必须落在任一允许根下。
+    """
+    roots = _init_allowed_roots()
+    if not roots:
+        return True  # 未配置沙箱
+    canonical = _canonicalize_path(path)
+    # 确保路径以 / 结尾，避免前缀误匹配（如 /data 匹配 /data2）
+    check = canonical if canonical.endswith("/") else canonical + "/"
+    return any(check.startswith(root) for root in roots)
 # 危险字符：换行、回车、空字节、分号（可能分割命令）
 _INJECTABLE_CHARS = {"\n", "\r", "\x00", ";"}
 # varlist 中额外需要注意的 shell/Stata 元字符
@@ -267,14 +374,17 @@ def _validate_install_source(source: str) -> str | None:
 
 
 def _validate_path(path: str) -> str | None:
-    """校验路径安全性：拒绝空字节、双引号、分号、换行以及越界路径穿越。"""
+    """校验路径安全性：拒绝空字节、双引号、分号、换行以及越界路径穿越。
+
+    当 STATA_ALLOWED_ROOTS 环境变量配置时，所有路径必须落在允许根目录下。
+    """
     if not path or not path.strip():
         return "错误: 路径为空"
     if "\x00" in path or '"' in path or ";" in path or "\n" in path or "\r" in path:
         return "错误: 路径包含非法字符"
     normalized = os.path.normpath(os.path.abspath(path))
-    # 拒绝 UNC 路径
-    if normalized.startswith("\\\\"):
+    # 拒绝 UNC 路径（除非 STATA_ALLOW_UNC=1）
+    if normalized.startswith("\\\\") and not _STATA_ALLOW_UNC:
         return "错误: 不允许 UNC 网络路径"
     # 相对路径限制在当前工作目录内，防止 .. 越界
     if not os.path.isabs(path):
@@ -284,6 +394,14 @@ def _validate_path(path: str) -> str | None:
                 return "错误: 相对路径不能超出当前工作目录"
         except ValueError:
             return "错误: 路径无效"
+    # ALLOWED_ROOTS 沙箱检查（仅对工具入口路径做检查，STATA_ALLOWED_ROOTS 配置后生效）
+    if not _is_path_allowed(normalized):
+        roots = _init_allowed_roots()
+        return (
+            f"错误: 路径 '{normalized}' 不在允许目录下。"
+            f"已配置的允许根目录: {'; '.join(roots)}。"
+            "如确需访问此路径，请更新 STATA_ALLOWED_ROOTS 环境变量。"
+        )
     return None
 
 
@@ -512,7 +630,7 @@ def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
 
     用于执行前清理和 SetBreak 后的错误恢复。
     """
-    parts = []
+    parts = io.StringIO()
     t_start = time.time()
     last_nonempty = time.time()
     sleep_ms = 1
@@ -520,7 +638,7 @@ def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
     while time.time() - t_start < min_wait:
         out = config.get_output()
         if out:
-            parts.append(out)
+            parts.write(out)
             last_nonempty = time.time()
             sleep_ms = 1
         if time.time() - last_nonempty > quiet_gap:
@@ -528,7 +646,7 @@ def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
         time.sleep(sleep_ms / 1000.0)
         sleep_ms = min(sleep_ms * 2, 20)
 
-    return "".join(parts)
+    return parts.getvalue()
 
 
 def _set_break():
@@ -684,7 +802,7 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
         _drain_output(min_wait=0.05)
 
     # --- 自适应输出收集 ---
-    output_parts = []
+    out_buf = io.StringIO()
     total_len = 0
     empty_count = 0
 
@@ -694,12 +812,12 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     while attempts < 300:
         out = config.get_output()
         if out:
-            output_parts.append(out)
+            out_buf.write(out)
             total_len += len(out)
             empty_count = 0
             sleep_ms = 1
             if total_len >= MAX_OUTPUT_CHARS:
-                output_parts.append("\n(输出已截断)")
+                out_buf.write("\n(输出已截断)")
                 break
         else:
             empty_count += 1
@@ -718,10 +836,10 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
             # 大输出：完整 drain（100ms 上限）
             tail = _drain_output(min_wait=0.1, quiet_gap=0.015)
         if tail:
-            output_parts.append(tail)
+            out_buf.write(tail)
             total_len += len(tail)
 
-    return rc, "".join(output_parts)
+    return rc, out_buf.getvalue()
 
 
 def _format_error(rc: int, block: str, out: str) -> str:
@@ -734,7 +852,40 @@ def _format_error(rc: int, block: str, out: str) -> str:
     return f"{prefix} — {snippet}"
 
 
-def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60, require_file: str | None = None) -> str:
+def _make_error_result(message: str, rc: int | None = None) -> ToolResult:
+    """将错误文本包装为 MCP ToolResult(is_error=True)。
+
+    FastMCP 默认将工具返回的 str 序列化为 isError=false 的成功结果。
+    本函数显式标记错误状态，使 MCP 客户端能程序化区分错误与正常输出。
+
+    Args:
+        message: 错误文本（保持与 error 相同的中文文案）。
+        rc: 可选的 Stata 返回码，附在 meta 中供调用方参考。
+
+    Returns:
+        ToolResult，FastMCP 会将其序列化为 CallToolResult(isError=true)。
+    """
+    return ToolResult(content=message, is_error=True)
+
+
+# 用于识别错误文本的通用前缀列表（由 _validate_* 及 _format_error 系列产生）
+_ERROR_PREFIXES = ("错误：", "错误:", "[错误]", "[返回码:", "(无有效命令)")
+
+
+def _result_or_error(value: str | ToolResult) -> str | ToolResult:
+    """将已知错误前缀字符串统一包装为 ToolResult(is_error=True)。
+
+    允许工具函数保留现有 return err_str 风格，仅在最后边界处
+    自动检测错误前缀并提升 MCP 错误语义。不会修改纯成功文本。
+    """
+    if isinstance(value, ToolResult):
+        return value
+    if isinstance(value, str) and any(value.startswith(p) for p in _ERROR_PREFIXES):
+        return _make_error_result(value)
+    return value
+
+
+def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60, require_file: str | None = None) -> str | ToolResult:
     """执行 Stata 命令，支持分页浏览。
 
     多行命令按 \\n 拆分后逐条执行。
@@ -754,17 +905,19 @@ def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60, require_file:
     """
     global _last_output
 
-    # 输入验证
+    # 输入验证（返回错误前已缓存的交互由调用方处理，此处直接返回错误结果）
     if not cmd or not cmd.strip():
-        return "(无有效命令)"
+        return _make_error_result("(无有效命令)")
     if len(cmd) > MAX_COMMAND_LENGTH:
-        return f"错误: 命令过长（{len(cmd)} 字符），上限 {MAX_COMMAND_LENGTH} 字符"
+        return _make_error_result(
+            f"错误: 命令过长（{len(cmd)} 字符），上限 {MAX_COMMAND_LENGTH} 字符"
+        )
 
     with _stata_lock:
         # 若调用方要求预先校验文件，在锁内使用 Stata cwd 检查
         if require_file:
             if err := _check_file_exists_locked(require_file):
-                return err
+                return _make_error_result(err)
             # 对相对路径，确保 Stata 实际执行时使用的路径与检查路径一致
             if not os.path.isabs(require_file):
                 cwd = _get_stata_cwd_locked()
@@ -777,38 +930,63 @@ def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60, require_file:
         blocks = _parse_command_blocks(cmd)
 
         if not blocks:
-            return "(无有效命令)"
+            return _make_error_result("(无有效命令)")
 
-        all_output = []
+        all_buf = io.StringIO()
+        hwritten = False
+        had_error = False
         for block in blocks:
             try:
                 rc, out = _execute_safe(block, timeout)
 
                 # RC=998: Stata DLL dead, abort chain
                 if rc == 998:
-                    all_output.append(out)
+                    if hwritten:
+                        all_buf.write("\n")
+                    all_buf.write(out)
+                    hwritten = True
+                    had_error = True
                     break
 
                 # STATA_RC_NO_OUTPUT (3000) = 无错误但无实质输出
                 if rc != 0 and rc != STATA_RC_NO_OUTPUT:
-                    all_output.append(_format_error(rc, block, out))
+                    if hwritten:
+                        all_buf.write("\n")
+                    all_buf.write(_format_error(rc, block, out))
+                    hwritten = True
+                    had_error = True
                 elif out.strip():
-                    all_output.append(out.strip())
+                    if hwritten:
+                        all_buf.write("\n")
+                    all_buf.write(out.strip())
+                    hwritten = True
 
             except SystemError as e:
-                all_output.append(f"Stata 系统错误 ({block[:40]}): {e}")
+                if hwritten:
+                    all_buf.write("\n")
+                all_buf.write(f"Stata 系统错误 ({block[:40]}): {e}")
+                hwritten = True
+                had_error = True
             except Exception:
                 logger.exception("Error executing: %s", block[:200])
-                all_output.append(f"执行错误 ({block[:40]}): {sys.exc_info()[1]}")
+                if hwritten:
+                    all_buf.write("\n")
+                all_buf.write(f"执行错误 ({block[:40]}): {sys.exc_info()[1]}")
+                hwritten = True
+                had_error = True
 
-        full = "\n".join(all_output) if all_output else "(命令执行成功，无文本输出)"
+        full = all_buf.getvalue() if hwritten else "(命令执行成功，无文本输出)"
         with _output_lock:
             _last_output = full
+
+        # 若任何 block 出错，返回 isError=true
+        if had_error:
+            return _make_error_result(full)
 
         # 自动分页：仅当是单条命令且输出超过阈值
         if len(blocks) == 1 and len(full) > PAGE_SIZE:
             return _paginate(full, page)
-        elif len(blocks) > 1 and sum(len(o) for o in all_output) > PAGE_SIZE * 3:
+        elif len(blocks) > 1 and len(full) > PAGE_SIZE * 3:
             # 多命令输出也分页
             return _paginate(full, page)
 
@@ -923,7 +1101,7 @@ def _shutdown_stata():
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_run(command: str, page: int = 1, timeout: int = 60) -> str:
+def stata_run(command: str, page: int = 1, timeout: int = 60) -> str | ToolResult:
     """执行一条或多条 Stata 命令并返回输出。
 
     这是最核心的工具，可以执行任意 Stata 命令。
@@ -952,9 +1130,9 @@ def stata_run(command: str, page: int = 1, timeout: int = 60) -> str:
     # 限定时长范围；拒绝可能破坏 MCP stdio  transport 的空字节与显著危险前缀
     safe_timeout = max(10, min(timeout, 1800))
     if "\x00" in command:
-        return "错误: command 包含空字节"
+        return _make_error_result("错误: command 包含空字节")
     if reason := _has_dangerous_command_prefix(command):
-        return reason
+        return _make_error_result(reason)
     return _run_stata_command(command, page, timeout=safe_timeout)
 
 
@@ -970,7 +1148,7 @@ def stata_run_do_file(filepath: str) -> str:
     Returns:
         do 文件执行过程中的全部 Stata 输出。
     """
-    return _run_stata_command(f'do "{_normalize_path(filepath)}"', require_file=filepath)
+    return _run_stata_command(f'do "{_normalize_path(filepath)}"', require_file=filepath, timeout=300)
 
 
 # =============================================================================
@@ -1013,7 +1191,7 @@ def stata_save_dataset(filepath: str, replace: bool = False) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_set_cwd(path: str) -> str:
+def stata_set_cwd(path: str) -> str | ToolResult:
     """更改 Stata 的工作目录。
 
     Args:
@@ -1023,7 +1201,7 @@ def stata_set_cwd(path: str) -> str:
         当前工作目录确认信息。
     """
     if err := _validate_path(path):
-        return err
+        return _result_or_error(err)
     return _run_stata_command(f'cd "{_normalize_path(path)}"')
 
 
@@ -1033,7 +1211,7 @@ def stata_set_cwd(path: str) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_describe(varlist: str = "", simple: bool = False) -> str:
+def stata_describe(varlist: str = "", simple: bool = False) -> str | ToolResult:
     """描述当前数据集的变量信息。
 
     显示变量名、存储类型、显示格式、变量标签和值标签。
@@ -1047,7 +1225,7 @@ def stata_describe(varlist: str = "", simple: bool = False) -> str:
         变量描述信息表。
     """
     if err := _validate_varlist(varlist, "varlist"):
-        return err
+        return _result_or_error(err)
     if simple:
         cmd = "describe, simple"
     elif varlist.strip():
@@ -1062,7 +1240,7 @@ def stata_summarize(
     varlist: str = "",
     detail: bool = False,
     condition: str = "",
-) -> str:
+) -> str | ToolResult:
     """计算变量的摘要统计量。
 
     包括观测数、均值、标准差、最小值、最大值。
@@ -1077,9 +1255,9 @@ def stata_summarize(
         摘要统计量表格。
     """
     if err := _validate_varlist(varlist, "varlist"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
-        return err
+        return _result_or_error(err)
     cmd = f"summarize {varlist}".strip()
     if condition.strip():
         cmd += f" if {condition.strip()}"
@@ -1094,7 +1272,7 @@ def stata_list(
     n: int = 10,
     in_range: str = "",
     condition: str = "",
-) -> str:
+) -> str | ToolResult:
     """列出当前数据集中的数据值。
 
     以表格形式展示观测数据。默认显示前 10 条。
@@ -1109,13 +1287,13 @@ def stata_list(
         数据表格。
     """
     if err := _validate_varlist(varlist, "varlist"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(in_range, "in_range"):
-        return err
+        return _result_or_error(err)
     if n < 0:
-        return "错误: n 不能为负数"
+        return _make_error_result("错误: n 不能为负数")
     cmd = "list"
     if varlist.strip():
         cmd += f" {varlist}"
@@ -1133,7 +1311,7 @@ def stata_codebook(
     varlist: str = "",
     compact: bool = False,
     condition: str = "",
-) -> str:
+) -> str | ToolResult:
     """生成数据集的 Codebook（变量字典）。
 
     显示变量标签、值标签、缺失值、分布信息等。
@@ -1148,9 +1326,9 @@ def stata_codebook(
         Codebook 报告。
     """
     if err := _validate_varlist(varlist, "varlist"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
-        return err
+        return _result_or_error(err)
     cmd = f"codebook {varlist}".strip()
     if condition.strip():
         cmd += f" if {condition.strip()}"
@@ -1165,7 +1343,7 @@ def stata_tabulate(
     byvar: str = "",
     chi2: bool = False,
     condition: str = "",
-) -> str:
+) -> str | ToolResult:
     """创建频数分布表或交叉表。
 
     单变量：频数分布表。双变量：二维交叉表，可选卡方检验。
@@ -1180,13 +1358,13 @@ def stata_tabulate(
         频数/交叉表。
     """
     if not varname.strip():
-        return "错误：请提供至少一个变量名。"
+        return _make_error_result("错误：请提供至少一个变量名。")
     if err := _validate_identifier(varname, "varname"):
-        return err
+        return _result_or_error(err)
     if err := _validate_identifier(byvar, "byvar"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
-        return err
+        return _result_or_error(err)
     cmd = f"tabulate {varname}"
     if byvar.strip():
         cmd += f" {byvar}"
@@ -1198,7 +1376,7 @@ def stata_tabulate(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_display(expression: str) -> str:
+def stata_display(expression: str) -> str | ToolResult:
     """计算并显示 Stata 表达式的结果。
 
     可用于简单计算、宏展开、返回值查看。
@@ -1211,7 +1389,7 @@ def stata_display(expression: str) -> str:
         表达式计算结果。
     """
     if err := _validate_no_injection(expression, "expression"):
-        return err
+        return _result_or_error(err)
     return _run_stata_command(f"display {expression}")
 
 
@@ -1226,7 +1404,7 @@ def stata_regress(
     indepvars: str,
     options: str = "",
     condition: str = "",
-) -> str:
+) -> str | ToolResult:
     """运行线性回归分析 (OLS)。
 
     返回系数表、标准误、t 值、p 值和模型诊断统计量。
@@ -1241,13 +1419,13 @@ def stata_regress(
         回归分析结果表。
     """
     if err := _validate_identifier(depvar, "depvar"):
-        return err
+        return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
-        return err
+        return _result_or_error(err)
     cmd = f"regress {depvar} {indepvars}"
     if condition.strip():
         cmd += f" if {condition.strip()}"
@@ -1262,7 +1440,7 @@ def stata_logistic(
     indepvars: str,
     options: str = "",
     condition: str = "",
-) -> str:
+) -> str | ToolResult:
     """运行 Logistic 回归分析。
 
     执行 Stata 原生 `logistic` 命令，默认输出优势比（OR）、标准误和模型拟合统计量。
@@ -1277,13 +1455,13 @@ def stata_logistic(
         Logistic 回归结果表。
     """
     if err := _validate_identifier(depvar, "depvar"):
-        return err
+        return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
-        return err
+        return _result_or_error(err)
     cmd = f"logistic {depvar} {indepvars}"
     if condition.strip():
         cmd += f" if {condition.strip()}"
@@ -1298,7 +1476,7 @@ def stata_ttest(
     byvar: str = "",
     options: str = "",
     condition: str = "",
-) -> str:
+) -> str | ToolResult:
     """运行 t 检验。
 
     支持单样本 t 检验、独立样本 t 检验（按分组变量）、配对 t 检验。
@@ -1313,13 +1491,13 @@ def stata_ttest(
         t 检验结果表。
     """
     if err := _validate_identifier(varname, "varname"):
-        return err
+        return _result_or_error(err)
     if err := _validate_identifier(byvar, "byvar"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
-        return err
+        return _result_or_error(err)
     if byvar.strip():
         cmd = f"ttest {varname}"
         if condition.strip():
@@ -1399,7 +1577,7 @@ def stata_graph(
     width: int = 800,
     height: int = 0,
     replace: bool = False,
-) -> str:
+) -> str | ToolResult:
     """生成 Stata 图形并可选导出为文件。
 
     自动在命令前设置图形方案（scheme）。
@@ -1425,18 +1603,18 @@ def stata_graph(
     """
     try:
         if "\x00" in command or "\n" in command or "\r" in command:
-            return "错误: command 包含非法控制字符"
+            return _make_error_result("错误: command 包含非法控制字符")
         if export:
             if err := _validate_path(export):
-                return err
+                return _result_or_error(err)
             if _has_unsafe_brace(command):
-                return (
+                return _make_error_result(
                     "错误: graph command 中包含会破坏复合块的 '}'，"
                     "请避免在 command 中使用未转义的右花括号（字符串内除外）"
                 )
 
         if not export:
-            return _run_stata_command(f"set scheme {scheme}\n{command}")
+            return _run_stata_command(f"set scheme {scheme}\n{command}", timeout=120)
 
         # 导出模式：使用 { } 复合块确保 graph + export 原子执行
         export_path = _normalize_path(export)
@@ -1455,9 +1633,13 @@ def stata_graph(
             f"capture noisily graph drop _all"
         )
 
-        result = _run_stata_command(compound)
+        result = _run_stata_command(compound, timeout=120)
 
-        # 验证文件是否生成；仅在 Stata 未报错时追加成功提示，避免 replace=False 已存在文件时给出假阳性
+        # 若 _run_stata_command 已标记错误，直接透传，不追加成功提示
+        if isinstance(result, ToolResult):
+            return result
+
+        # 验证文件是否生成
         if os.path.isfile(export_path) and "[返回码:" not in result:
             size_kb = os.path.getsize(export_path) // 1024
             result += f"\n(图形已导出: {export_path}, {size_kb}KB)"
@@ -1465,7 +1647,7 @@ def stata_graph(
         return result
 
     except Exception as e:
-        return f"图形生成失败: {type(e).__name__}: {e}"
+        return _make_error_result(f"图形生成失败: {type(e).__name__}: {e}")
 
 
 # =============================================================================
@@ -1480,7 +1662,7 @@ def stata_export_excel(
     sheet: str = "Sheet1",
     replace: bool = False,
     results: bool = False,
-) -> str:
+) -> str | ToolResult:
     """将当前数据集导出为 Excel (.xlsx) 文件，或将回归结果导出为 CSV。
 
     使用 Stata 的 export excel 命令导出数据。
@@ -1499,11 +1681,11 @@ def stata_export_excel(
         导出确认信息。
     """
     if err := _validate_path(filepath):
-        return err
+        return _result_or_error(err)
     if err := _validate_varlist(varlist, "varlist"):
-        return err
+        return _result_or_error(err)
     if err := _validate_no_injection(sheet, "sheet"):
-        return err
+        return _result_or_error(err)
 
     export_path = _normalize_path(filepath)
     replace_opt = "replace" if replace else ""
@@ -1547,7 +1729,11 @@ def stata_export_excel(
                 f"{replace_opt} {firstrow_opt} sheet({sheet})"
             )
 
-    result = _run_stata_command(cmd)
+    result = _run_stata_command(cmd, timeout=120)
+
+    # 若 _run_stata_command 已标记错误，直接透传
+    if isinstance(result, ToolResult):
+        return result
 
     # 验证文件已生成；仅在 Stata 未报错时追加成功提示，避免 replace=False 已存在文件时误判
     if os.path.isfile(export_path) and "[返回码:" not in result:
@@ -1562,7 +1748,7 @@ def stata_export_excel(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_install_package(package: str, source: str = "ssc", replace: bool = False) -> str:
+def stata_install_package(package: str, source: str = "ssc", replace: bool = False) -> str | ToolResult:
     """安装 Stata 扩展包。
 
     从 ssc 或完整 from() URL 安装 Stata 包。
@@ -1578,20 +1764,20 @@ def stata_install_package(package: str, source: str = "ssc", replace: bool = Fal
         安装过程输出。
     """
     if err := _validate_identifier(package, "package"):
-        return err
+        return _result_or_error(err)
     if err := _validate_install_source(source):
-        return err
+        return _result_or_error(err)
     replace_opt = ", replace" if replace else ""
     src_lower = source.lower().strip()
     if src_lower == "ssc":
         cmd = f"ssc install {package}{replace_opt}"
     else:
         cmd = f"net install {package}{replace_opt}, from({source.strip()})"
-    return _run_stata_command(cmd)
+    return _run_stata_command(cmd, timeout=300)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_find_package(keyword: str) -> str:
+def stata_find_package(keyword: str) -> str | ToolResult:
     """搜索 Stata 扩展包。
 
     在 ssc 存档中搜索与关键词匹配的 Stata 包。
@@ -1603,8 +1789,8 @@ def stata_find_package(keyword: str) -> str:
         匹配的包列表及简要描述。
     """
     if err := _validate_no_injection(keyword, "keyword"):
-        return err
-    return _run_stata_command(f"ssc search {keyword}")
+        return _result_or_error(err)
+    return _run_stata_command(f"ssc search {keyword}", timeout=120)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -1614,7 +1800,7 @@ def stata_list_packages() -> str:
     Returns:
         已安装包列表。
     """
-    return _run_stata_command("ado describe")
+    return _run_stata_command("ado describe", timeout=120)
 
 
 # =============================================================================
@@ -1657,7 +1843,7 @@ def stata_status() -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_ping() -> str:
+def stata_ping() -> str | ToolResult:
     """心跳检测 — 快速测试 Stata MCP Server 是否存活。
 
     执行一个极简的 Stata 命令(display 42)并返回。
@@ -1674,7 +1860,7 @@ def stata_ping() -> str:
         status = "alive" if rc in (0, STATA_RC_NO_OUTPUT) and "42" in result else "degraded"
         return f"pong | Stata {version} {edition} | {status}"
     except Exception as e:
-        return f"Stata 心跳失败: {type(e).__name__}: {e}"
+        return _make_error_result(f"Stata 心跳失败: {type(e).__name__}: {e}")
 
 
 # =============================================================================
