@@ -394,6 +394,6 @@ esttab m1 m2 using "results.csv", replace
     - `stata_graph(..., replace=False)` — 导出文件时默认不覆盖已有文件，需显式传入 `replace=True`
     - `stata_export_excel(..., replace=False)` — 导出文件时默认不覆盖已有文件
     - `stata_use_dataset(filepath, clear=True)` — 默认清除内存中已有数据
-    - `stata_run(command, timeout=30)` — 命令默认超时 30s，安装包/复杂回归可传 `timeout=120`
+    - `stata_run(command, timeout=60)` — 命令默认超时 60s，安装包/复杂回归可传 `timeout=120`
 12. **`stata_graph` 非只读**：虽然标记为只读探索，但导出文件时会写入磁盘（destructiveHint=True），Agent 应在覆盖文件前向用户确认。
 13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并自动从 ssc 安装 `estout` 包。若不需要自动安装，先手动安装后再用无 results 版本。

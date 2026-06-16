@@ -128,6 +128,7 @@ mcp = FastMCP(
 )
 
 _stata_lock = threading.Lock()
+_ping_lock = threading.Lock()  # 保护 _last_ping_time 的读写
 
 # MCP 工具结果上限（Claude Code 默认为 25K tokens ≈ 150K 字符）
 MAX_OUTPUT_CHARS = 120_000
@@ -649,7 +650,7 @@ def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
     return parts.getvalue()
 
 
-def _set_break():
+def _set_break() -> None:
     """安全调用 Stata 中断，用于超时恢复。"""
     try:
         sb = config.stlib.StataSO_SetBreak
@@ -675,7 +676,8 @@ def _ping_stata() -> bool:
         try:
             rc, out = _execute_single("display 42", timeout=10)
             if rc in (0, STATA_RC_NO_OUTPUT) and "42" in out:
-                _last_ping_time = time.time()
+                with _ping_lock:
+                    _last_ping_time = time.time()
                 return True
         except Exception:
             pass
@@ -686,7 +688,8 @@ def _ping_stata() -> bool:
             _set_break()
             time.sleep(0.1)
 
-    _last_ping_time = 0.0
+    with _ping_lock:
+        _last_ping_time = 0.0
     return False
 
 
@@ -709,7 +712,10 @@ def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
     """
     # --- 预检（带缓存）---
     now = time.time()
-    if now - _last_ping_time >= PING_CACHE_SECONDS:
+    with _ping_lock:
+        ping_age = now - _last_ping_time
+        ping_expired = ping_age >= PING_CACHE_SECONDS
+    if ping_expired:
         if not _ping_stata():
             logger.error("Stata 无响应，无法执行命令: %s", cmd[:80])
             return 998, (
@@ -720,7 +726,7 @@ def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
                 "建议: 重启 MCP Server（退出并重新打开 Claude Code）\n"
             )
     else:
-        logger.debug("Skipped ping (cached %.1fs ago)", now - _last_ping_time)
+        logger.debug("Skipped ping (cached %.1fs ago)", ping_age)
 
     # --- 执行 ---
     rc, out = _execute_single(cmd, timeout)
@@ -1061,7 +1067,7 @@ def _check_file_exists_locked(filepath: str) -> str | None:
 
 
 @atexit.register
-def _shutdown_stata():
+def _shutdown_stata() -> None:
     """优雅关闭 Stata 会话。"""
     try:
         # 尝试获取锁，避免与正在执行的命令并发访问 DLL。
@@ -1137,7 +1143,7 @@ def stata_run(command: str, page: int = 1, timeout: int = 60) -> str | ToolResul
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_run_do_file(filepath: str) -> str:
+def stata_run_do_file(filepath: str) -> str | ToolResult:
     """执行一个 Stata .do 文件并返回全部输出。
 
     .do 文件是 Stata 的批处理脚本。此工具会执行指定路径的 .do 文件。
@@ -1157,7 +1163,7 @@ def stata_run_do_file(filepath: str) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_use_dataset(filepath: str, clear: bool = True) -> str:
+def stata_use_dataset(filepath: str, clear: bool = True) -> str | ToolResult:
     """加载 Stata 数据集 (.dta 文件) 到内存中。
 
     加载后可使用 stata_describe、stata_summarize 等工具查看数据。
@@ -1175,7 +1181,7 @@ def stata_use_dataset(filepath: str, clear: bool = True) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_save_dataset(filepath: str, replace: bool = False) -> str:
+def stata_save_dataset(filepath: str, replace: bool = False) -> str | ToolResult:
     """将当前内存中的数据集保存为 .dta 文件。
 
     Args:
@@ -1531,42 +1537,12 @@ GRAPH_SCHEMES = {
 def _has_unsafe_brace(cmd: str) -> bool:
     """检查 graph command 中是否存在会破坏外层 { } 复合块的右花括号。
 
-    忽略双引号字符串内部以及 /* */ 块注释、// 行注释中的花括号；只统计
-    普通代码区域的 unmatched `}`。
+    将命令包裹在 { } 中传给 _parse_command_blocks：
+    若 cmd 包含未匹配的 }（字符串/注释外），会提前闭合外层 {，
+    产生多个 block → 不安全。反之仅产生 1 个 block → 安全。
     """
-    in_string = False
-    depth = 0
-    i = 0
-    n = len(cmd)
-    while i < n:
-        ch = cmd[i]
-        nxt = cmd[i + 1] if i + 1 < n else ""
-        if in_string:
-            if ch == '"':
-                in_string = False
-            i += 1
-            continue
-        if ch == '"':
-            in_string = True
-            i += 1
-            continue
-        if ch == "/" and nxt == "*":
-            i += 2
-            while i < n and not (cmd[i] == "*" and i + 1 < n and cmd[i + 1] == "/"):
-                i += 1
-            if i < n:
-                i += 2
-            continue
-        if ch == "/" and nxt == "/":
-            break
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            if depth == 0:
-                return True
-            depth -= 1
-        i += 1
-    return False
+    blocks = _parse_command_blocks("{\n" + cmd + "\n}")
+    return len(blocks) != 1
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
@@ -1794,7 +1770,7 @@ def stata_find_package(keyword: str) -> str | ToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_list_packages() -> str:
+def stata_list_packages() -> str | ToolResult:
     """列出当前已安装的所有 Stata 扩展包。
 
     Returns:
@@ -1809,7 +1785,7 @@ def stata_list_packages() -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_more(page: int = 0, page_size: int = 0) -> str:
+def stata_more(page: int = 0, page_size: int = 0) -> str | ToolResult:
     """翻页浏览上一条 Stata 命令的完整输出。
 
     当 stata_run 等工具返回的输出过长时，完整内容被缓存，
@@ -1831,7 +1807,7 @@ def stata_more(page: int = 0, page_size: int = 0) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_status() -> str:
+def stata_status() -> str | ToolResult:
     """获取当前 Stata 会话状态。
 
     显示当前加载的数据集、变量数量、观测数量、工作目录和内存使用情况。

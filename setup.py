@@ -278,6 +278,9 @@ def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
     print(f"  {green('✓')} .mcp.json 已生成")
     print(f"    Stata: {stata_home}")
     print(f"    Python: {python_exe}")
+    print(f"  {yellow('可选环境变量')} （可手动添加至 .mcp.json 的 stata.env 中）：")
+    print(f"    STATA_ALLOWED_ROOTS  分号分隔的路径沙箱白名单，例: C:/data;D:/projects")
+    print(f"    STATA_ALLOW_UNC      设为 1 允许 UNC 网络路径（默认禁止）")
 
     return mcp_json_path
 
@@ -447,6 +450,12 @@ def main():
     print()
     print(f"配置已保存到: {os.path.join(project_root, '.mcp.json')}")
     print(f"如需修改 Stata 路径，编辑此文件的 STATA_HOME 环境变量即可")
+    print()
+    print(f"环境变量说明：")
+    print(f"  STATA_HOME           Stata 安装目录（默认自动检测）")
+    print(f"  STATA_EDITION        Stata 版本 mp/se/be（默认 mp）")
+    print(f"  STATA_ALLOWED_ROOTS  路径沙箱白名单，分号分隔（可选，不设则无沙箱限制）")
+    print(f"  STATA_ALLOW_UNC      设为 1 允许 UNC 网络路径（可选，默认禁止）")
     print()
 
     return 0

@@ -28,6 +28,7 @@ _test_output/
 # Claude Code
 .claude/workspace/
 .claude/settings.local.json
+.claude/worktrees/
 
 # Generated MCP config (run setup.py to create)
 .mcp.json

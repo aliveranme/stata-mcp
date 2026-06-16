@@ -1,9 +1,28 @@
+"""pytest configuration for stata-mcp-server tests."""
 import os
 import sys
 import atexit
 from unittest.mock import MagicMock
 
+
+def pytest_configure(config):
+    """Register custom pytest markers."""
+    config.addinivalue_line(
+        "markers",
+        "slow: mark test as slow (skipped in default runs)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "stata: mark test that requires a real Stata installation",
+    )
+    config.addinivalue_line(
+        "markers",
+        "path_sandbox: mark test that exercises path sandbox validation",
+    )
+
+
 # Ensure server.py can be imported as a plain module.
+
 _SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)

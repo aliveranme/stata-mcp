@@ -63,7 +63,7 @@ stata-mcp/
 
 ```
 执行前: _drain_output(50ms)  — 短排空残留缓冲（指数退避 1→20ms）
-执行中: StataSO_Execute       — 同步调用，30s 超时看门狗（长命令可显式传 timeout）
+执行中: StataSO_Execute       — 同步调用，60s 超时看门狗（长命令可显式传 timeout）
 执行后: 快轮询(指数退避 1→20ms) — 收集主体输出，3次空转即退出
         _drain_output()       — 智能清尾：小输出 50ms | 大输出 100ms
         截断 120K chars        — 防止 MCP 缓冲溢出
@@ -72,7 +72,7 @@ stata-mcp/
 
 ### 超时看门狗
 
-超时看门狗在后台线程中运行，默认 30s（通过 `timeout` 参数可覆盖，上限 1800s）。因 Stata DLL 非线程安全，看门狗调用 `StataSO_SetBreak` 存在极小并发风险；已通过二次确认、break 冷却机制降低触发概率。如需执行包安装、复杂回归或大循环，显式传入 `timeout=120` 或更高。
+超时看门狗在后台线程中运行，默认 60s（通过 `timeout` 参数可覆盖，上限 1800s）。因 Stata DLL 非线程安全，看门狗调用 `StataSO_SetBreak` 存在极小并发风险；已通过二次确认、break 冷却机制降低触发概率。如需执行包安装、复杂回归或大循环，显式传入 `timeout=120` 或更高。
 
 ### 安全护栏
 
@@ -257,5 +257,5 @@ stata_run("graph export graph.png, replace")   ← 可能失败：r(601)
 - **无 CI/lint 配置**：无 `mypy`、`ruff`、`pre-commit`。server.py 混合中英文标识符。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
 - **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会尝试使用 `esttab` 导出估计结果；若 `esttab` 未安装则自动从 ssc 安装。
-- **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（30s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。
+- **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（60s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。
 - **工具错误语义**：错误结果（Stata 返回码非 0、输入验证失败、DLL 崩溃）通过 `ToolResult(is_error=True)` 告知 MCP 客户端。成功工具结果仍以普通字符串返回。若使用 `mcp.list_tools` 或类似客户端，需注意区分返回类型。
