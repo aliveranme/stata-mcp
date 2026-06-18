@@ -95,7 +95,7 @@ def test_block_comment_inside_string_is_preserved():
 
 def test_compound_string_with_embedded_quotes():
     # Stata 复合字符串 '" ... "' 允许内部包含普通双引号
-    cmd = '''display `"hello "world" end"' '''
+    cmd = """display `"hello "world" end"' """
     blocks = _parse_command_blocks(cmd)
     assert len(blocks) == 1
     assert 'hello "world" end' in blocks[0]
@@ -184,7 +184,9 @@ def test_standalone_triple_slash_ends_prior_block():
 
 
 def test_nested_compound_blocks_merge():
-    blocks = _parse_command_blocks("capture noisily {\nforeach v of varlist mpg price {\n    summarize `v'\n}\n}")
+    blocks = _parse_command_blocks(
+        "capture noisily {\nforeach v of varlist mpg price {\n    summarize `v'\n}\n}"
+    )
     assert len(blocks) == 1
     assert "capture noisily {" in blocks[0]
     assert "foreach" in blocks[0]

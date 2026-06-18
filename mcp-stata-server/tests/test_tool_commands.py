@@ -1,18 +1,27 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from fastmcp.tools.base import ToolResult
 
 from server import (
-    stata_regress,
-    stata_logistic,
-    stata_ttest,
-    stata_summarize,
-    stata_list,
     stata_codebook,
-    stata_tabulate,
-    stata_install_package,
     stata_export_excel,
+    stata_graph,
+    stata_install_package,
+    stata_list,
+    stata_logistic,
+    stata_regress,
+    stata_save_dataset,
+    stata_summarize,
+    stata_tabulate,
+    stata_ttest,
 )
+
+
+def _result_text(result):
+    """统一提取 str / ToolResult 的文本内容。"""
+    if isinstance(result, ToolResult):
+        return result.content[0].text
+    return result
 
 
 def test_regress_accepts_factor_and_timeseries_varlist():
@@ -106,9 +115,11 @@ def test_install_package_net_url():
 
 
 def test_export_excel_results_forces_csv():
-    with patch("server._run_stata_command") as mock_run, patch(
-        "server.os.path.isfile", return_value=True
-    ), patch("server.os.path.getsize", return_value=1024):
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+        patch("server.os.path.getsize", return_value=1024),
+    ):
         result = stata_export_excel("C:/output/results.xlsx", results=True)
         cmd = mock_run.call_args[0][0]
         assert 'esttab using "C:/output/results.csv"' in cmd
@@ -117,21 +128,27 @@ def test_export_excel_results_forces_csv():
 
 
 def test_export_excel_dataset_uses_excel():
-    with patch("server._run_stata_command") as mock_run, patch(
-        "server.os.path.isfile", return_value=True
-    ), patch("server.os.path.getsize", return_value=1024):
-        stata_export_excel(
-            "C:/output/data.xlsx", varlist="mpg price", sheet="Data", replace=True
-        )
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+        patch("server.os.path.getsize", return_value=1024),
+    ):
+        stata_export_excel("C:/output/data.xlsx", varlist="mpg price", sheet="Data", replace=True)
         cmd = mock_run.call_args[0][0]
-        assert cmd == 'export excel mpg price using "C:/output/data.xlsx", replace firstrow(variables) sheet(Data)'
+        assert (
+            cmd
+            == 'export excel mpg price using "C:/output/data.xlsx", replace firstrow(variables) sheet(Data)'
+        )
 
 
 def test_graph_export_includes_height_when_set():
-    with patch("server._run_stata_command") as mock_run, patch(
-        "server.os.path.isfile", return_value=True
-    ), patch("server.os.path.getsize", return_value=1024):
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+        patch("server.os.path.getsize", return_value=1024),
+    ):
         from server import stata_graph
+
         stata_graph("scatter price weight", export="C:/output/fig.png", width=1200, height=800)
         cmd = mock_run.call_args[0][0]
         assert 'graph export "C:/output/fig.png"' in cmd
@@ -142,6 +159,7 @@ def test_graph_export_includes_height_when_set():
 def test_graph_rejects_unsafe_brace_in_export_mode():
     with patch("server._run_stata_command") as mock_run:
         from server import stata_graph
+
         result = stata_graph(
             "twoway scatter price weight }",  # 字符串外的 } 会破坏复合块
             export="C:/output/fig.png",
@@ -156,10 +174,41 @@ def test_graph_rejects_unsafe_brace_in_export_mode():
 
 
 def test_graph_allows_brace_inside_string():
-    with patch("server._run_stata_command") as mock_run, patch(
-        "server.os.path.isfile", return_value=True
-    ), patch("server.os.path.getsize", return_value=1024):
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+        patch("server.os.path.getsize", return_value=1024),
+    ):
         from server import stata_graph
+
         stata_graph('twoway scatter price weight, title("a} b")', export="C:/output/fig.png")
         cmd = mock_run.call_args[0][0]
         assert "capture noisily {" in cmd
+
+
+def test_graph_rejects_injected_scheme():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_graph("scatter price weight", scheme="s2color; shell evil")
+        assert "错误" in _result_text(result)
+        mock_run.assert_not_called()
+
+
+def test_graph_accepts_valid_scheme():
+    with patch("server._run_stata_command") as mock_run:
+        stata_graph("scatter price weight", scheme="economist")
+        cmd = mock_run.call_args[0][0]
+        assert "set scheme economist" in cmd
+
+
+def test_save_dataset_rejects_path_with_illegal_chars():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_save_dataset("C:/out;evil.dta")
+        assert "错误" in _result_text(result)
+        mock_run.assert_not_called()
+
+
+def test_save_dataset_builds_command_for_valid_path():
+    with patch("server._run_stata_command") as mock_run:
+        stata_save_dataset("C:/output/data.dta", replace=True)
+        cmd = mock_run.call_args[0][0]
+        assert cmd == 'save "C:/output/data.dta", replace'

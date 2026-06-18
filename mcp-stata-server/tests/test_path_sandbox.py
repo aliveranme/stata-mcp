@@ -14,6 +14,7 @@ from server import (
 def _reset_roots_cache():
     """Clear the ALLOWED_ROOTS cache between tests."""
     import server
+
     server._ALLOWED_ROOTS_CACHE = None
     server._STATA_ALLOWED_ROOTS_ENV = os.environ.get("STATA_ALLOWED_ROOTS", "")
 

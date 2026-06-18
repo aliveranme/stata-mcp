@@ -14,16 +14,15 @@ Stata MCP Server — 通过 pystata 执行 Stata 命令。
     STATA_ALLOW_UNC: 可选，设为 1 时允许 UNC 网络路径（默认拒绝）
 """
 
-import sys
-import os
-import io
-import re
-import time
-import threading
 import atexit
+import io
 import logging
+import os
+import re
+import sys
+import threading
+import time
 from logging.handlers import RotatingFileHandler
-from functools import wraps
 
 # =============================================================================
 # 配置
@@ -33,9 +32,7 @@ STATA_HOME = os.environ.get("STATA_HOME", r"C:\Program Files\StataNow\StataNow19
 STATA_EDITION = os.environ.get("STATA_EDITION", "mp")
 
 # 日志同时写入 stderr（避免污染 MCP stdio）和日志文件，便于故障排查
-_LOG_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-)
+_LOG_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs"))
 os.makedirs(_LOG_DIR, exist_ok=True)
 _LOG_FILE = os.path.join(_LOG_DIR, "stata-mcp.log")
 
@@ -86,7 +83,7 @@ except ImportError as e:
 try:
     config.init(STATA_EDITION, splash=False)
     # 关键: 关闭流式输出，避免额外线程干扰 MCP stdio
-    config.stconfig['streamout'] = 'off'
+    config.stconfig["streamout"] = "off"
     logger.info(
         "Stata %s %s initialized at %s (streamout=off)",
         config.stversion,
@@ -99,7 +96,7 @@ except SystemError as e:
     sys.exit(1)
 
 # stout 必须在 init() 之后导入（check_initialized 检查）
-from pystata.core import stout
+from pystata.core import stout  # noqa: E402
 
 # headless 环境下主动关闭图形窗口创建，避免第三方/复杂图形挂起
 try:
@@ -114,9 +111,9 @@ except Exception as e:
 # MCP Server
 # =============================================================================
 
-from fastmcp import FastMCP
-from fastmcp.tools.base import ToolResult
-from mcp.types import ToolAnnotations
+from fastmcp import FastMCP  # noqa: E402
+from fastmcp.tools.base import ToolResult  # noqa: E402
+from mcp.types import ToolAnnotations  # noqa: E402
 
 mcp = FastMCP(
     name="StataNow 19",
@@ -277,6 +274,8 @@ def _is_path_allowed(path: str) -> bool:
     # 确保路径以 / 结尾，避免前缀误匹配（如 /data 匹配 /data2）
     check = canonical if canonical.endswith("/") else canonical + "/"
     return any(check.startswith(root) for root in roots)
+
+
 # 危险字符：换行、回车、空字节、分号（可能分割命令）
 _INJECTABLE_CHARS = {"\n", "\r", "\x00", ";"}
 # varlist 中额外需要注意的 shell/Stata 元字符
@@ -300,7 +299,7 @@ def _has_dangerous_command_prefix(cmd: str) -> str | None:
         for prefix in _DANGEROUS_COMMAND_PREFIXES:
             if lowered.startswith(prefix):
                 # shell/python: 等命令后通常跟随要执行的系统/Py 代码
-                target = line[len(prefix):].strip() or "<empty>"
+                target = line[len(prefix) :].strip() or "<empty>"
                 return (
                     f"错误: 命令 '{line[:60]}' 包含危险前缀 '{prefix}'，"
                     f"可能执行主机系统/Py 代码（目标: {target[:40]}）。"
@@ -335,8 +334,7 @@ def _validate_identifier(value: str, label: str = "变量名") -> str | None:
         return f"错误: {label} 包含非法字符"
     if not _STATA_IDENTIFIER_RE.match(value):
         return (
-            f"错误: {label} '{value}' 不符合安全格式。"
-            "只允许字母、数字、下划线，且不能以数字开头。"
+            f"错误: {label} '{value}' 不符合安全格式。只允许字母、数字、下划线，且不能以数字开头。"
         )
     return None
 
@@ -438,9 +436,9 @@ def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
     header = f"── 第 {page}/{total_pages} 页（共 {total_chars} 字符）──\n"
     footer = f"\n── 第 {page}/{total_pages} 页"
     if page < total_pages:
-        footer += f" — 使用 stata_more(page={page+1}) 翻下页"
+        footer += f" — 使用 stata_more(page={page + 1}) 翻下页"
     if page > 1:
-        footer += f" — stata_more(page={page-1}) 翻上页"
+        footer += f" — stata_more(page={page - 1}) 翻上页"
     footer += " — stata_more(page=0) 显示全部"
 
     return header + chunk + footer
@@ -572,10 +570,18 @@ def _parse_command_blocks(cmd: str) -> list[str]:
 
     for raw_line in cmd.split("\n"):
         line = raw_line.strip("\r")
-        if not line.strip() and brace_depth == 0 and not buffer and not in_block_comment and not in_continuation:
+        if (
+            not line.strip()
+            and brace_depth == 0
+            and not buffer
+            and not in_block_comment
+            and not in_continuation
+        ):
             continue
 
-        content, has_cont, delta, in_block_comment, space_before = _scan_line(line, in_block_comment)
+        content, has_cont, delta, in_block_comment, space_before = _scan_line(
+            line, in_block_comment
+        )
         brace_depth += delta
         if brace_depth < 0:
             brace_depth = 0
@@ -891,7 +897,9 @@ def _result_or_error(value: str | ToolResult) -> str | ToolResult:
     return value
 
 
-def _run_stata_command(cmd: str, page: int = 1, timeout: int = 60, require_file: str | None = None) -> str | ToolResult:
+def _run_stata_command(
+    cmd: str, page: int = 1, timeout: int = 60, require_file: str | None = None
+) -> str | ToolResult:
     """执行 Stata 命令，支持分页浏览。
 
     多行命令按 \\n 拆分后逐条执行。
@@ -1154,7 +1162,9 @@ def stata_run_do_file(filepath: str) -> str | ToolResult:
     Returns:
         do 文件执行过程中的全部 Stata 输出。
     """
-    return _run_stata_command(f'do "{_normalize_path(filepath)}"', require_file=filepath, timeout=300)
+    return _run_stata_command(
+        f'do "{_normalize_path(filepath)}"', require_file=filepath, timeout=300
+    )
 
 
 # =============================================================================
@@ -1191,6 +1201,8 @@ def stata_save_dataset(filepath: str, replace: bool = False) -> str | ToolResult
     Returns:
         保存确认信息。
     """
+    if err := _validate_path(filepath):
+        return _result_or_error(err)
     normalized = _normalize_path(filepath)
     suffix = ", replace" if replace else ""
     return _run_stata_command(f'save "{normalized}"{suffix}')
@@ -1580,6 +1592,8 @@ def stata_graph(
     try:
         if "\x00" in command or "\n" in command or "\r" in command:
             return _make_error_result("错误: command 包含非法控制字符")
+        if err := _validate_identifier(scheme, "scheme"):
+            return _result_or_error(err)
         if export:
             if err := _validate_path(export):
                 return _result_or_error(err)
@@ -1674,8 +1688,7 @@ def stata_export_excel(
             export_path = base + ".csv"
             if ext.lower() == ".xlsx":
                 changed_msg = (
-                    f"提示：回归结果导出不支持 .xlsx/sheet()，"
-                    f"已自动改用 CSV 路径：{export_path}\n"
+                    f"提示：回归结果导出不支持 .xlsx/sheet()，已自动改用 CSV 路径：{export_path}\n"
                 )
             else:
                 changed_msg = f"提示：回归结果已导出为 CSV：{export_path}\n"
@@ -1684,7 +1697,7 @@ def stata_export_excel(
 
         cmd = (
             f"capture which estout\n"
-            f'if _rc {{\n'
+            f"if _rc {{\n"
             f'    display "正在安装 estout..."\n'
             f"    ssc install estout, quiet\n"
             f"}}\n"
@@ -1696,14 +1709,11 @@ def stata_export_excel(
         # 导出数据集为 Excel
         if varlist.strip():
             cmd = (
-                f"export excel {varlist} using \"{export_path}\", "
+                f'export excel {varlist} using "{export_path}", '
                 f"{replace_opt} {firstrow_opt} sheet({sheet})"
             )
         else:
-            cmd = (
-                f"export excel using \"{export_path}\", "
-                f"{replace_opt} {firstrow_opt} sheet({sheet})"
-            )
+            cmd = f'export excel using "{export_path}", {replace_opt} {firstrow_opt} sheet({sheet})'
 
     result = _run_stata_command(cmd, timeout=120)
 
@@ -1724,7 +1734,9 @@ def stata_export_excel(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_install_package(package: str, source: str = "ssc", replace: bool = False) -> str | ToolResult:
+def stata_install_package(
+    package: str, source: str = "ssc", replace: bool = False
+) -> str | ToolResult:
     """安装 Stata 扩展包。
 
     从 ssc 或完整 from() URL 安装 Stata 包。

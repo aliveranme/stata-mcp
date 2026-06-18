@@ -55,6 +55,7 @@ def test_validate_varlist_rejects_dangerous_chars():
 
 def test_has_unsafe_brace_detects_unmatched_closing():
     from server import _has_unsafe_brace
+
     # 字符串外的 } 应检测为不安全
     assert _has_unsafe_brace("scatter price weight }") is True
     assert _has_unsafe_brace("} scatter price weight") is True
@@ -62,6 +63,7 @@ def test_has_unsafe_brace_detects_unmatched_closing():
 
 def test_has_unsafe_brace_allows_balanced_or_none():
     from server import _has_unsafe_brace
+
     # 无花括号 → 安全
     assert _has_unsafe_brace("scatter price weight") is False
     # 均衡的 { } → 安全
@@ -70,6 +72,7 @@ def test_has_unsafe_brace_allows_balanced_or_none():
 
 def test_has_unsafe_brace_allows_brace_inside_string():
     from server import _has_unsafe_brace
+
     # 字符串内的 } 应视为安全
     assert _has_unsafe_brace('scatter price weight, title("a} b")') is False
 
@@ -77,30 +80,32 @@ def test_has_unsafe_brace_allows_brace_inside_string():
 def test_return_type_str_toolresult_consistency():
     """所有 MCP 工具函数的返回类型都应为 str | ToolResult。"""
     import inspect
+
     from server import (
+        stata_codebook,
+        stata_describe,
+        stata_display,
+        stata_export_excel,
+        stata_find_package,
+        stata_graph,
+        stata_install_package,
+        stata_list,
+        stata_list_packages,
+        stata_logistic,
+        stata_more,
+        stata_ping,
+        stata_regress,
         stata_run,
         stata_run_do_file,
-        stata_use_dataset,
         stata_save_dataset,
         stata_set_cwd,
-        stata_describe,
-        stata_summarize,
-        stata_list,
-        stata_codebook,
-        stata_tabulate,
-        stata_display,
-        stata_regress,
-        stata_logistic,
-        stata_ttest,
-        stata_graph,
-        stata_export_excel,
-        stata_install_package,
-        stata_find_package,
-        stata_list_packages,
-        stata_more,
         stata_status,
-        stata_ping,
+        stata_summarize,
+        stata_tabulate,
+        stata_ttest,
+        stata_use_dataset,
     )
+
     tools_with_str_only_return = []
     for name, func in [
         ("stata_run", stata_run),

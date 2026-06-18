@@ -1,14 +1,14 @@
 """Tests for the core Stata execution engine (without a real Stata install)."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from server import (
+    STATA_RC_NO_OUTPUT,
     _execute_safe,
     _execute_single,
     _ping_stata,
-    STATA_RC_NO_OUTPUT,
 )
 
 
@@ -106,7 +106,7 @@ def test_execute_safe_upgrades_to_998_when_recovery_fails():
     # recovery ping returns output without "42" -> False.
     side_effect = [(0, "42"), (999, "boom"), (0, "pong")]
     with (
-        patch("server._execute_single", side_effect=side_effect) as execute,
+        patch("server._execute_single", side_effect=side_effect),
         patch("server._drain_output"),
         patch("server._set_break"),
     ):

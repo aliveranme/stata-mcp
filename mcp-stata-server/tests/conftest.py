@@ -1,7 +1,8 @@
 """pytest configuration for stata-mcp-server tests."""
+
+import atexit
 import os
 import sys
-import atexit
 from unittest.mock import MagicMock
 
 
