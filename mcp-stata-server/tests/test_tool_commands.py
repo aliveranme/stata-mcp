@@ -137,7 +137,7 @@ def test_export_excel_dataset_uses_excel():
         cmd = mock_run.call_args[0][0]
         assert (
             cmd
-            == 'export excel mpg price using "C:/output/data.xlsx", replace firstrow(variables) sheet(Data)'
+            == 'export excel mpg price using "C:/output/data.xlsx", replace firstrow(variables) sheet("Data")'
         )
 
 

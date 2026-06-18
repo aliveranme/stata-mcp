@@ -133,6 +133,9 @@ MAX_OUTPUT_CHARS = 120_000
 PAGE_SIZE = 4_000
 # Stata 返回码 3000 = "无错误但无实质输出"（如 r-class 命令）
 STATA_RC_NO_OUTPUT = 3000
+# 自定义返回码：StataSO_Execute 崩溃后已自动恢复，命令本身未执行，需重试。
+# 区别于 999（崩溃未恢复）与 998（DLL 无响应）。视为非致命，不标记 MCP isError。
+STATA_RC_RECOVERED = 997
 # 命令输入最大长度
 MAX_COMMAND_LENGTH = 65_536
 # 最近一次完整输出的缓存（支持翻页）
@@ -162,6 +165,7 @@ STATA_RC_MESSAGES = {
     198: "命令语法错误",
     199: "选项语法错误",
     3000: "命令执行成功，无文本输出",
+    997: "Stata 崩溃后已自动恢复（命令未执行，请重试）",
     999: "Stata DLL 内部崩溃",
     998: "Stata DLL 无响应",
 }
@@ -169,8 +173,12 @@ STATA_RC_MESSAGES = {
 # 输入安全：允许的 Stata 标识符（变量/包名）字符集合
 # Stata 变量名最大 32 字符，必须以字母或下划线开头，后续可为字母/数字/下划线
 _STATA_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
-# 允许的包来源：ssc 或 HTTPS URL（至少限制 scheme 与基本主机格式）
-_INSTALL_SOURCE_RE = re.compile(r"^https://[a-zA-Z0-9][-a-zA-Z0-9.]*(/)?.*$", re.IGNORECASE)
+# 允许的包来源：ssc 或 HTTPS URL。
+# 主机段后只允许 URL 安全字符（字母/数字/标点中不含 ) ( 空白 引号 ; ` $），
+# 防止 source 提前闭合 from() 选项注入额外 net install 参数。
+_INSTALL_SOURCE_RE = re.compile(
+    r"^https://[a-zA-Z0-9][-a-zA-Z0-9.]*(/[^\s()\";`$]*)?$", re.IGNORECASE
+)
 
 # =============================================================================
 # 路径沙箱 (ALLOWED_ROOTS)
@@ -372,8 +380,49 @@ def _validate_install_source(source: str) -> str | None:
     return "错误: source 只允许 'ssc' 或以 https:// 开头的安全 URL"
 
 
+def _validate_sheet_name(sheet: str) -> str | None:
+    """校验 Excel 工作表名。
+
+    工作表名可含空格、中文等，但必须拒绝会破坏 sheet("...") 引号语法或
+    Stata 选项语法的字符：双引号、右括号、换行、分号、空字节。
+    返回错误文本或 None。
+    """
+    if sheet is None:
+        return None
+    if any(ch in sheet for ch in ('"', ")", "\n", "\r", "\x00", ";")):
+        return "错误: sheet 包含非法字符（双引号、右括号、换行、分号）"
+    return None
+
+
+def _check_abs_path_safety(abs_path: str) -> str | None:
+    """对一个已规范化的绝对路径做权威安全校验。
+
+    校验 UNC 与 ALLOWED_ROOTS 沙箱。绝对路径已词法折叠（无残留 ..），
+    因此沙箱前缀匹配天然防止越界 —— 落在沙箱外的路径会因前缀不匹配被拒。
+    返回错误文本或 None。
+
+    该函数不依赖任何工作目录，是路径校验的权威层。
+    """
+    # 拒绝 UNC 路径（除非 STATA_ALLOW_UNC=1）
+    if abs_path.startswith("\\\\") and not _STATA_ALLOW_UNC:
+        return "错误: 不允许 UNC 网络路径"
+    # ALLOWED_ROOTS 沙箱检查
+    if not _is_path_allowed(abs_path):
+        roots = _init_allowed_roots()
+        return (
+            f"错误: 路径 '{abs_path}' 不在允许目录下。"
+            f"已配置的允许根目录: {'; '.join(roots)}。"
+            "如确需访问此路径，请更新 STATA_ALLOWED_ROOTS 环境变量。"
+        )
+    return None
+
+
 def _validate_path(path: str) -> str | None:
     """校验路径安全性：拒绝空字节、双引号、分号、换行以及越界路径穿越。
+
+    这是工具入口的快速预检（在进入 _stata_lock 之前），基于 Python 进程
+    工作目录解析相对路径。权威校验在 _resolve_stata_path_locked 中基于
+    Stata 实际工作目录进行 —— 二者可能不同，故此处仅作早期拦截。
 
     当 STATA_ALLOWED_ROOTS 环境变量配置时，所有路径必须落在允许根目录下。
     """
@@ -385,7 +434,7 @@ def _validate_path(path: str) -> str | None:
     # 拒绝 UNC 路径（除非 STATA_ALLOW_UNC=1）
     if normalized.startswith("\\\\") and not _STATA_ALLOW_UNC:
         return "错误: 不允许 UNC 网络路径"
-    # 相对路径限制在当前工作目录内，防止 .. 越界
+    # 相对路径限制在当前工作目录内，防止 .. 越界（快速预检）
     if not os.path.isabs(path):
         try:
             rel = os.path.relpath(normalized, os.getcwd())
@@ -393,14 +442,9 @@ def _validate_path(path: str) -> str | None:
                 return "错误: 相对路径不能超出当前工作目录"
         except ValueError:
             return "错误: 路径无效"
-    # ALLOWED_ROOTS 沙箱检查（仅对工具入口路径做检查，STATA_ALLOWED_ROOTS 配置后生效）
-    if not _is_path_allowed(normalized):
-        roots = _init_allowed_roots()
-        return (
-            f"错误: 路径 '{normalized}' 不在允许目录下。"
-            f"已配置的允许根目录: {'; '.join(roots)}。"
-            "如确需访问此路径，请更新 STATA_ALLOWED_ROOTS 环境变量。"
-        )
+    # ALLOWED_ROOTS 沙箱检查（基于 Python cwd 解析，权威校验在锁内补充）
+    if err := _check_abs_path_safety(normalized.replace("\\", "/")):
+        return err
     return None
 
 
@@ -747,6 +791,9 @@ def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
 
             # 再次 ping 确认恢复
             if _ping_stata():
+                # 恢复成功：Stata 存活但本命令未执行，用 997 标记「需重试」而非 999。
+                # 这样 _run_stata_command 不会将其误报为致命的「内部崩溃」错误。
+                rc = STATA_RC_RECOVERED
                 out += "\n(Stata 已自动恢复，请重试命令)"
             else:
                 rc = 998
@@ -898,7 +945,10 @@ def _result_or_error(value: str | ToolResult) -> str | ToolResult:
 
 
 def _run_stata_command(
-    cmd: str, page: int = 1, timeout: int = 60, require_file: str | None = None
+    cmd: str,
+    page: int = 1,
+    timeout: int = 60,
+    require_file: str | None = None,
 ) -> str | ToolResult:
     """执行 Stata 命令，支持分页浏览。
 
@@ -911,8 +961,11 @@ def _run_stata_command(
         cmd: Stata 命令字符串（多命令用 \\n 分隔）。
         page: 页码（1-based），0 = 全部，仅对单命令有效。
         timeout: 每条命令的超时秒数（默认 60）。
-        require_file: 若提供，在获取锁后先校验该文件是否存在；
-            不存在则直接返回错误，不会访问 Stata DLL 执行 cmd。
+        require_file: 若提供，在获取锁后用 Stata 实际工作目录解析为绝对路径，
+            经沙箱权威校验后检查文件是否存在；不存在或越界沙箱则直接返回错误，
+            不会访问 Stata DLL 执行 cmd。命令中嵌入的 Python-cwd 路径会被
+            替换为该 Stata 绝对路径，确保「校验路径 == 执行路径」，
+            消除 Python cwd vs Stata cwd 不一致导致的沙箱绕过。
 
     Returns:
         Stata 输出文本（可能包含分页导航）。
@@ -928,17 +981,20 @@ def _run_stata_command(
         )
 
     with _stata_lock:
-        # 若调用方要求预先校验文件，在锁内使用 Stata cwd 检查
+        # 锁内路径解析：用 Stata cwd 解析 require_file 为绝对路径并经沙箱权威校验，
+        # 再把命令里嵌入的 Python-cwd 路径替换为 Stata 绝对路径。
+        # 校验路径即执行路径，根除 Python cwd vs Stata cwd 不一致的沙箱绕过。
         if require_file:
-            if err := _check_file_exists_locked(require_file):
+            stata_abs, err = _resolve_stata_path_locked(require_file)
+            if err:
                 return _make_error_result(err)
-            # 对相对路径，确保 Stata 实际执行时使用的路径与检查路径一致
-            if not os.path.isabs(require_file):
-                cwd = _get_stata_cwd_locked()
-                if cwd:
-                    py_abs = _normalize_path(require_file)
-                    st_abs = os.path.normpath(os.path.join(cwd, require_file)).replace("\\", "/")
-                    cmd = cmd.replace(f'"{py_abs}"', f'"{st_abs}"')
+            # 工具构造命令时用 _normalize_path(require_file)（Python-cwd 绝对路径）嵌入，
+            # 此处替换为 Stata-cwd 绝对路径，使 Stata 实际执行用解析后的路径。
+            py_abs = _normalize_path(require_file)
+            if py_abs != stata_abs:
+                cmd = cmd.replace(py_abs, stata_abs)
+            if not os.path.isfile(stata_abs):
+                return _make_error_result(f"错误: 文件不存在 — {stata_abs}")
 
         # 使用新的解析器：正确处理 /// 续行和 { } 复合块
         blocks = _parse_command_blocks(cmd)
@@ -961,6 +1017,15 @@ def _run_stata_command(
                     hwritten = True
                     had_error = True
                     break
+
+                # STATA_RC_RECOVERED (997) = 崩溃已恢复，命令未执行需重试。
+                # 非致命：输出恢复提示但不标记 had_error / isError，不显示「内部崩溃」。
+                if rc == STATA_RC_RECOVERED:
+                    if hwritten:
+                        all_buf.write("\n")
+                    all_buf.write(out.strip())
+                    hwritten = True
+                    continue
 
                 # STATA_RC_NO_OUTPUT (3000) = 无错误但无实质输出
                 if rc != 0 and rc != STATA_RC_NO_OUTPUT:
@@ -1041,7 +1106,9 @@ def _get_stata_cwd_locked() -> str:
 def _resolve_path_for_stata(filepath: str) -> str:
     """将用户传入路径解析为 Stata 可接受的绝对路径；失败时返回错误文本。
 
-    该函数只进行纯 Python 字符串/文件系统校验，不访问 Stata DLL。
+    该函数只进行纯 Python 字符串/文件系统校验（基于 Python 进程 cwd），
+    不访问 Stata DLL。仅供无法获取锁的场景使用；锁内应调用
+    _resolve_stata_path_locked 以获得基于 Stata cwd 的权威解析。
     """
     if err := _validate_path(filepath):
         return err
@@ -1049,23 +1116,45 @@ def _resolve_path_for_stata(filepath: str) -> str:
     return normalized
 
 
+def _resolve_stata_path_locked(filepath: str) -> tuple[str, str | None]:
+    """在 _stata_lock 保护下，将路径解析为 Stata 实际访问的绝对路径。
+
+    相对路径用 **Stata 当前工作目录** 解析（与后续 Stata 执行的基目录一致），
+    若无法获取 Stata cwd 则回退到 Python 进程 cwd。对解析后的绝对路径执行
+    _check_abs_path_safety 权威沙箱校验，确保「校验路径 == 执行路径」，
+    消除 Python cwd 与 Stata cwd 不一致导致的沙箱绕过。
+
+    调用者必须已经持有 _stata_lock。
+
+    Returns:
+        (stata_abs_path, None) 或 ("", error_text)。
+    """
+    # 快速预检：字符级拦截（不依赖 cwd）
+    if err := _validate_path(filepath):
+        return "", err
+    if os.path.isabs(filepath):
+        abs_path = os.path.normpath(filepath).replace("\\", "/")
+    else:
+        cwd = _get_stata_cwd_locked()
+        base = cwd if cwd else os.getcwd()
+        abs_path = os.path.normpath(os.path.join(base, filepath)).replace("\\", "/")
+    # 对 Stata 实际访问的绝对路径做权威沙箱校验
+    if err := _check_abs_path_safety(abs_path):
+        return "", err
+    return abs_path, None
+
+
 def _check_file_exists_locked(filepath: str) -> str | None:
     """在 _stata_lock 保护下检查文件是否存在。
 
-    相对路径优先使用 Stata 当前工作目录解析（因为后续命令由 Stata 执行）。
-    若无法获取 Stata cwd，则回退到 MCP server 进程当前工作目录。
-    返回错误消息或 None。
+    使用 _resolve_stata_path_locked 解析为 Stata 实际访问的绝对路径（基于
+    Stata cwd，并经沙箱权威校验），再检查文件存在性。返回错误消息或 None。
     """
-    resolved = _resolve_path_for_stata(filepath)
-    if isinstance(resolved, str) and resolved.startswith("错误:"):
-        return resolved
-    check_path = resolved
-    if not os.path.isabs(filepath):
-        cwd = _get_stata_cwd_locked()
-        if cwd:
-            check_path = os.path.normpath(os.path.join(cwd, filepath)).replace("\\", "/")
-    if not os.path.isfile(check_path):
-        return f"错误: 文件不存在 — {check_path}"
+    abs_path, err = _resolve_stata_path_locked(filepath)
+    if err:
+        return err
+    if not os.path.isfile(abs_path):
+        return f"错误: 文件不存在 — {abs_path}"
     return None
 
 
@@ -1674,7 +1763,7 @@ def stata_export_excel(
         return _result_or_error(err)
     if err := _validate_varlist(varlist, "varlist"):
         return _result_or_error(err)
-    if err := _validate_no_injection(sheet, "sheet"):
+    if err := _validate_sheet_name(sheet):
         return _result_or_error(err)
 
     export_path = _normalize_path(filepath)
@@ -1710,10 +1799,12 @@ def stata_export_excel(
         if varlist.strip():
             cmd = (
                 f'export excel {varlist} using "{export_path}", '
-                f"{replace_opt} {firstrow_opt} sheet({sheet})"
+                f'{replace_opt} {firstrow_opt} sheet("{sheet}")'
             )
         else:
-            cmd = f'export excel using "{export_path}", {replace_opt} {firstrow_opt} sheet({sheet})'
+            cmd = (
+                f'export excel using "{export_path}", {replace_opt} {firstrow_opt} sheet("{sheet}")'
+            )
 
     result = _run_stata_command(cmd, timeout=120)
 
@@ -1845,7 +1936,12 @@ def stata_ping() -> str | ToolResult:
             rc, result = _execute_single("display 42")
         version = getattr(config, "stversion", "?")
         edition = getattr(config, "stedition", "?")
-        status = "alive" if rc in (0, STATA_RC_NO_OUTPUT) and "42" in result else "degraded"
+        ok = rc in (0, STATA_RC_NO_OUTPUT) and "42" in result
+        if ok:
+            # 回写 ping 缓存，使紧接着的 _execute_safe 跳过重复心跳
+            with _ping_lock:
+                _last_ping_time = time.time()
+        status = "alive" if ok else "degraded"
         return f"pong | Stata {version} {edition} | {status}"
     except Exception as e:
         return _make_error_result(f"Stata 心跳失败: {type(e).__name__}: {e}")
