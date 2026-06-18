@@ -122,7 +122,7 @@ stata-mcp/
 - **`graph export` 必须和图形命令在同一个 Stata 复合块 `{ }` 内**，或使用 `stata_graph(..., export="path.png")` 一次完成。图形窗口不跨 `StataSO_Execute` 调用持久。
 - **图形导出后自动清理**：`graph drop _all` 在复合块外单独执行，确保即使图形命令出错，缓存的图形对象也会被清理。
 - **`stata_graph` 与 `stata_export_excel` 的 `replace` 默认值为 `False`**（而非 True），写文件前需确保目标文件不存在或显式传入 `replace=True`。安全性优先于向后兼容。
-- **`stata_export_excel(results=True)`** 自动输出为 CSV（不支持 xlsx），若 `estout` 未安装则自动从 ssc 安装。
+- **`stata_export_excel(results=True)`** 自动输出为 CSV（不支持 xlsx），若 `estout` 未安装则返回明确错误并提示手动安装（**不自动安装**——见下）。
 - **`///` 续行符**：现在已被修复支持（版本 v2+），可在 `stata_run` 中使用 `///` 连接多行长命令。
 - **`{ }` 复合块**：用于将多条命令打包为单次执行。典型用途：`capture noisily { twoway ... \n graph export ..., replace }`。
 - **`winsor2` 的 `suffix(_w)` 不能和 `replace` 一起用**：选项冲突。要么 `suffix(_w)` 创建新变量，要么 `replace` 覆盖原变量。
@@ -257,6 +257,6 @@ stata_run("graph export graph.png, replace")   ← 可能失败：r(601)
 
 - **无 CI/lint 配置**：无 `mypy`、`ruff`、`pre-commit`。server.py 混合中英文标识符。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
-- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会尝试使用 `esttab` 导出估计结果；若 `esttab` 未安装则自动从 ssc 安装。
+- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先 `capture which estout` 探测，**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**绝不内嵌 `ssc install`** —— headless MCP 环境下 SSC 网络请求会阻塞 `StataSO_Execute`，看门狗 `SetBreak` 无法干净中断网络 I/O，会损坏 DLL 状态导致后续调用全部卡死。包安装请走专用的 `stata_install_package`（用户可控时机、可显式传 timeout）。
 - **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（60s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。
 - **工具错误语义**：错误结果（Stata 返回码非 0、输入验证失败、DLL 崩溃）通过 `ToolResult(is_error=True)` 告知 MCP 客户端。成功工具结果仍以普通字符串返回。若使用 `mcp.list_tools` 或类似客户端，需注意区分返回类型。

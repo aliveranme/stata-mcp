@@ -1810,12 +1810,21 @@ def stata_export_excel(
         else:
             changed_msg = ""
 
+        # 前置探测 estout 是否已安装：缺失则直接报错，引导用户用
+        # stata_install_package("estout") 手动安装。绝不在此内嵌 ssc install ——
+        # headless 环境下 SSC 网络请求会阻塞 StataSO_Execute，看门狗的 SetBreak
+        # 无法干净中断网络 I/O，会损坏 DLL 状态导致后续调用全部卡死。
+        # 用 rc 判断：capture which estout 成功 rc=0，失败 rc≠0（不能靠输出含
+        # "estout" 字样，因为未安装时的错误信息也含该词）。
+        probe_rc, _ = _execute_safe("capture which estout", timeout=20)
+        if probe_rc != 0:
+            return _result_or_error(
+                "错误: 未安装 estout（esttab 所依赖），无法导出回归结果。\n"
+                "请先手动安装：调用 stata_install_package(\"estout\", source=\"ssc\")，"
+                "或参考 .claude/skills/stata/SKILL.md。"
+            )
+
         cmd = (
-            f"capture which estout\n"
-            f"if _rc {{\n"
-            f'    display "正在安装 estout..."\n'
-            f"    ssc install estout, quiet\n"
-            f"}}\n"
             f'esttab using "{export_path}", csv {replace_opt} '
             f"plain nogaps nomtitles nonumber"
         )

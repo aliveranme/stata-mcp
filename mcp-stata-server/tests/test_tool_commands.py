@@ -120,6 +120,7 @@ def test_install_package_net_url():
 def test_export_excel_results_forces_csv():
     with (
         patch("server._run_stata_command") as mock_run,
+        patch("server._execute_safe", return_value=(0, "D:\\ado\\plus\\e\\estout.ado")),
         patch("server.os.path.isfile", return_value=True),
         patch("server.os.path.getsize", return_value=1024),
     ):
@@ -128,6 +129,29 @@ def test_export_excel_results_forces_csv():
         assert 'esttab using "C:/output/results.csv"' in cmd
         assert ", csv " in cmd
         assert "提示：" in result
+
+
+def test_export_excel_results_aborts_when_estout_missing():
+    """estout 未安装时，results=True 应直接报错，不内嵌 ssc install（防 headless 卡死）。"""
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server._execute_safe", return_value=(111, "command estout is unrecognized")),
+    ):
+        result = stata_export_excel("C:/output/results.csv", results=True)
+        assert "错误" in _result_text(result)
+        assert "estout" in _result_text(result)
+        mock_run.assert_not_called()
+
+
+def test_export_excel_results_aborts_on_dll_dead():
+    """DLL 无响应（rc=998）时探测应中止，不执行 esttab。"""
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server._execute_safe", return_value=(998, "[错误] Stata DLL 无响应")),
+    ):
+        result = stata_export_excel("C:/output/results.csv", results=True)
+        assert getattr(result, "is_error", False) or "错误" in _result_text(result)
+        mock_run.assert_not_called()
 
 
 def test_export_excel_dataset_uses_excel():
