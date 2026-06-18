@@ -174,10 +174,10 @@ STATA_RC_MESSAGES = {
 # Stata 变量名最大 32 字符，必须以字母或下划线开头，后续可为字母/数字/下划线
 _STATA_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
 # 允许的包来源：ssc 或 HTTPS URL。
-# 主机段后只允许 URL 安全字符（字母/数字/标点中不含 ) ( 空白 引号 ; ` $），
-# 防止 source 提前闭合 from() 选项注入额外 net install 参数。
+# 主机段允许 :port（企业内网镜像常用），主机段后只允许 URL 安全字符
+# （不含 ) ( 空白 引号 ; ` $），防止 source 提前闭合 from() 注入额外参数。
 _INSTALL_SOURCE_RE = re.compile(
-    r"^https://[a-zA-Z0-9][-a-zA-Z0-9.]*(/[^\s()\";`$]*)?$", re.IGNORECASE
+    r"^https://[a-zA-Z0-9][-a-zA-Z0-9.]*(:\d+)?(/[^\s()\";`$]*)?$", re.IGNORECASE
 )
 
 # =============================================================================
@@ -383,14 +383,31 @@ def _validate_install_source(source: str) -> str | None:
 def _validate_sheet_name(sheet: str) -> str | None:
     """校验 Excel 工作表名。
 
-    工作表名可含空格、中文等，但必须拒绝会破坏 sheet("...") 引号语法或
-    Stata 选项语法的字符：双引号、右括号、换行、分号、空字节。
-    返回错误文本或 None。
+    工作表名可含空格、中文、括号等（如 "Q1 (2024)"），因命令中以双引号包裹
+    sheet("...")，值内的 ) 对 Stata 是安全的。仅拒绝会破坏引号语法或注入
+    命令的字符：双引号、换行、分号、空字节。返回错误文本或 None。
     """
     if sheet is None:
         return None
-    if any(ch in sheet for ch in ('"', ")", "\n", "\r", "\x00", ";")):
-        return "错误: sheet 包含非法字符（双引号、右括号、换行、分号）"
+    if any(ch in sheet for ch in ('"', "\n", "\r", "\x00", ";")):
+        return "错误: sheet 包含非法字符（双引号、换行、分号）"
+    return None
+
+
+def _validate_scheme_name(scheme: str) -> str | None:
+    """校验 Stata 图形方案名（scheme）。
+
+    Stata scheme 名允许字母、数字、下划线、连字符，可数字开头（如 538、
+    s2color、s1color-asterisk、economist）。仅拒绝可能注入命令的字符：
+    换行、回车、空字节、分号、引号、空格、$、反引号、括号等。
+    返回错误文本或 None。
+    """
+    if not scheme or not scheme.strip():
+        return "错误: scheme 为空"
+    # scheme 经 set scheme {scheme} 插入，拒绝会破坏命令或注入的字符
+    forbidden = ('"', "\n", "\r", "\x00", ";", " ", "$", "`", "(", ")", "!", "|", "&")
+    if any(ch in scheme for ch in forbidden):
+        return "错误: scheme 包含非法字符"
     return None
 
 
@@ -1048,14 +1065,16 @@ def _run_stata_command(
                     had_error = True
                     break
 
-                # STATA_RC_RECOVERED (997) = 崩溃已恢复，命令未执行需重试。
+                # STATA_RC_RECOVERED (997) = 崩溃已恢复，当前命令未执行需重试。
                 # 非致命：输出恢复提示但不标记 had_error / isError，不显示「内部崩溃」。
+                # 中止后续块（break 而非 continue）：当前块未执行，后续块若依赖它会
+                # 在陈旧状态上运行；让用户整体重试整条命令链更安全。
                 if rc == STATA_RC_RECOVERED:
                     if hwritten:
                         all_buf.write("\n")
                     all_buf.write(out.strip())
                     hwritten = True
-                    continue
+                    break
 
                 # STATA_RC_NO_OUTPUT (3000) = 无错误但无实质输出
                 if rc != 0 and rc != STATA_RC_NO_OUTPUT:
@@ -1133,19 +1152,6 @@ def _get_stata_cwd_locked() -> str:
         return ""
 
 
-def _resolve_path_for_stata(filepath: str) -> str:
-    """将用户传入路径解析为 Stata 可接受的绝对路径；失败时返回错误文本。
-
-    该函数只进行纯 Python 字符串/文件系统校验（基于 Python 进程 cwd），
-    不访问 Stata DLL。仅供无法获取锁的场景使用；锁内应调用
-    _resolve_stata_path_locked 以获得基于 Stata cwd 的权威解析。
-    """
-    if err := _validate_path(filepath):
-        return err
-    normalized = os.path.normpath(os.path.abspath(filepath)).replace("\\", "/")
-    return normalized
-
-
 def _resolve_stata_path_locked(filepath: str) -> tuple[str, str | None]:
     """在 _stata_lock 保护下，将路径解析为 Stata 实际访问的绝对路径。
 
@@ -1175,18 +1181,7 @@ def _resolve_stata_path_locked(filepath: str) -> tuple[str, str | None]:
     return abs_path, None
 
 
-def _check_file_exists_locked(filepath: str) -> str | None:
-    """在 _stata_lock 保护下检查文件是否存在。
-
-    使用 _resolve_stata_path_locked 解析为 Stata 实际访问的绝对路径（基于
-    Stata cwd，并经沙箱权威校验），再检查文件存在性。返回错误消息或 None。
-    """
-    abs_path, err = _resolve_stata_path_locked(filepath)
-    if err:
-        return err
-    if not os.path.isfile(abs_path):
-        return f"错误: 文件不存在 — {abs_path}"
-    return None
+# =============================================================================
 
 
 # =============================================================================
@@ -1712,7 +1707,7 @@ def stata_graph(
     try:
         if "\x00" in command or "\n" in command or "\r" in command:
             return _make_error_result("错误: command 包含非法控制字符")
-        if err := _validate_identifier(scheme, "scheme"):
+        if err := _validate_scheme_name(scheme):
             return _result_or_error(err)
         if export:
             if err := _validate_path(export):

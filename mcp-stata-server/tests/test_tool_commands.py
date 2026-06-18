@@ -203,6 +203,15 @@ def test_graph_accepts_valid_scheme():
         assert "set scheme economist" in cmd
 
 
+def test_graph_accepts_numeric_and_hyphenated_schemes():
+    """M2: scheme 名允许数字开头（如 538）与连字符（如 s1color-asterisk）。"""
+    for ok_scheme in ["538", "s1color-asterisk", "s2color", "cleanplots"]:
+        with patch("server._run_stata_command") as mock_run:
+            stata_graph("scatter price weight", scheme=ok_scheme)
+            cmd = mock_run.call_args[0][0]
+            assert f"set scheme {ok_scheme}" in cmd, f"应放行 scheme: {ok_scheme}"
+
+
 def test_save_dataset_rejects_path_with_illegal_chars():
     with patch("server._run_stata_command") as mock_run:
         result = stata_save_dataset("C:/out;evil.dta")
@@ -248,13 +257,29 @@ def test_install_package_accepts_valid_sources():
             assert expect_cmd_part in cmd
 
 
-def test_export_excel_rejects_sheet_with_closing_paren():
-    """C5: sheet 含 ) 可提前闭合 sheet() 注入选项，应被拦截。"""
-    for injected in ["foo) badopt", 'foo"bar', "a;b"]:
+def test_export_excel_rejects_sheet_with_injection_chars():
+    """C5: sheet 含破坏引号语法/注入的字符（双引号、分号、换行）应被拦截。
+
+    注意：) 在引号包裹 sheet("...") 内是安全的，故合法工作表名如
+    "Q1 (2024)" 应放行（见 test_export_excel_allows_parens_in_sheet）。
+    """
+    for injected in ['foo"bar', "a;b", "a\nb"]:
         with patch("server._run_stata_command") as mock_run:
             result = stata_export_excel("C:/o.xlsx", sheet=injected)
             assert "错误" in _result_text(result), f"应拦截 sheet: {injected}"
             mock_run.assert_not_called()
+
+
+def test_export_excel_allows_parens_in_sheet():
+    """C5: 引号包裹后，含括号的合法工作表名应放行。"""
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+        patch("server.os.path.getsize", return_value=1024),
+    ):
+        stata_export_excel("C:/o.xlsx", sheet="Q1 (2024)")
+        cmd = mock_run.call_args[0][0]
+        assert 'sheet("Q1 (2024)")' in cmd
 
 
 def test_export_excel_wraps_sheet_in_quotes():

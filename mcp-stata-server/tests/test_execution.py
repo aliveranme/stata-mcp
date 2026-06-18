@@ -167,7 +167,12 @@ def test_run_stata_command_does_not_error_on_recovered_rc():
 
 
 def test_run_stata_command_errors_on_unrecovered_999():
-    """对比：rc=999（崩溃未恢复）仍应标记为 isError 并显示「内部崩溃」。"""
+    """rc=999（崩溃未恢复）应标记为 isError 并显示「内部崩溃」。
+
+    防御性测试：生产中 _execute_safe 总把 999 转为 997（恢复成功）或 998
+    （恢复失败），不会向上返回 999。此处直接 mock 999 以确保 _run_stata_command
+    对该码的「致命」判定不被意外削弱。
+    """
     from server import _run_stata_command
 
     with patch("server._execute_safe", return_value=(999, "StataSO_Execute 崩溃: boom")):
@@ -175,3 +180,58 @@ def test_run_stata_command_errors_on_unrecovered_999():
     text = result.content[0].text if hasattr(result, "content") else result
     assert getattr(result, "is_error", False) is True
     assert "内部崩溃" in text
+
+
+def test_run_stata_command_breaks_chain_on_recovered_rc():
+    """M1: 多命令链中某块返回 997（崩溃已恢复）应中止后续块，而非 continue。
+
+    997 表示当前块未执行，后续块若继续会在陈旧状态运行。应 break 让用户
+    整体重试整条命令链。
+    """
+    from server import STATA_RC_RECOVERED, _run_stata_command
+
+    # 3 块：第 1 块成功，第 2 块崩溃已恢复(997)，第 3 块不应被执行
+    side_effect = [
+        (0, "block1 out"),
+        (STATA_RC_RECOVERED, "(Stata 已自动恢复，请重试命令)"),
+        (0, "block3 SHOULD NOT RUN"),
+    ]
+    with patch("server._execute_safe", side_effect=side_effect) as exec_safe:
+        result = _run_stata_command("gen x=1\nuse data.dta\nsummarize x")
+    text = result.content[0].text if hasattr(result, "content") else result
+    # 第 3 块未执行
+    assert "SHOULD NOT RUN" not in text
+    # 仅调用 2 次（第 3 块未执行）
+    assert exec_safe.call_count == 2
+    # 非致命（997 不标记 isError）
+    assert getattr(result, "is_error", False) is False
+    assert "已自动恢复" in text
+
+
+def test_execute_single_collects_consecutive_chunks():
+    """L3/P1: 阶段 1 取到输出后应立即复取（continue），连续多块输出都收集。
+
+    验证 P1 优化的 continue 复取不会漏收紧随其后的第二块输出。
+    """
+    from server import _execute_single
+
+    def fake_redirect_ctx():
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=None)
+        ctx.__exit__ = MagicMock(return_value=None)
+        return ctx
+
+    # chunk1 → chunk2（紧随其后）→ 3×None(clean_exit)
+    seq = ["chunk1\n", "chunk2\n", None, None, None, None]
+    seq_iter = iter(seq)
+    with (
+        patch("server.stout.RedirectOutput", return_value=fake_redirect_ctx()),
+        patch("server.config.get_encode_str", return_value=b"x"),
+        patch("server.config.stlib.StataSO_Execute", return_value=0),
+        patch("server._drain_output", return_value=""),
+        patch("server.config.get_output", side_effect=lambda: next(seq_iter, None)),
+    ):
+        rc, out = _execute_single("display 42")
+    assert rc == 0
+    assert "chunk1" in out
+    assert "chunk2" in out, "连续的第二块输出不应因 continue 复取漏收"

@@ -71,8 +71,9 @@ class TestResolveStataPathLocked:
         with patch("server._get_stata_cwd_locked", return_value=""):
             abs_path, err = _resolve_stata_path_locked("rel.dta")
         assert err is None
-        # 回退到 Python cwd，应为绝对路径
-        assert os.path.isabs(abs_path) or len(abs_path) > 2
+        # 回退到 Python cwd，应为绝对路径且以 rel.dta 结尾
+        assert os.path.isabs(abs_path)
+        assert abs_path.replace("\\", "/").endswith("rel.dta")
 
 
 class TestRunStataCommandSandboxBypass:
