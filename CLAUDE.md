@@ -78,7 +78,7 @@ stata-mcp/
 
 - `stata_run` 会拦截行首 `!`、`shell`、`python:`、`python (` 及裸 `python` 等可能导致主机命令执行的前缀。如确需此类操作，请通过操作系统直接执行，不要经由 Stata MCP。
 - 所有结构化参数（`varlist`、`condition`、`options`、`in_range` 等）会拒绝换行、空字节、分号、`!`、`|`、`&`、反引号、`$`。
-- 路径参数会拒绝空字节、双引号、分号、UNC 路径（默认）及越界的相对路径 `..`。安装源仅允许 `ssc` 或 `https://`。
+- 路径参数会拒绝空字节、双引号、分号、UNC 路径（默认）及越界的相对路径 `..`。`use_dataset`/`run_do_file` 的相对路径在锁内用 Stata cwd 解析并经沙箱权威校验（见「路径安全校验」）。安装源仅允许 `ssc` 或字符受限的 `https://` URL（禁止 `)`、`(`、空白、引号、`;`、`` ` ``、`$`，防止提前闭合 `from()`）。`export excel` 的 `sheet` 名用双引号包裹并拒绝 `"`、`)`、换行、分号。
 
 ### Ping 缓存与失效
 
@@ -110,12 +110,11 @@ stata-mcp/
 - 相对路径优先使用 **Stata 当前工作目录** 解析（与后续 Stata 执行路径一致），在 `_stata_lock` 保护内完成。
 - 若无法获取 Stata cwd，回退到 Python 进程当前目录。
 
-### 路径安全校验
+### 路径安全校验（两层）
 
-所有文件路径参数经过 `_validate_path`：
-- 拒绝空字节、双引号、分号、换行、回车。
-- 拒绝 UNC 网络路径（默认，可通过环境变量 `STATA_ALLOW_UNC=1` 开启）。
-- 相对路径限制不得超出当前工作目录。
+文件路径参数经两层校验，确保「校验路径 == 执行路径」：
+- **入口预检 `_validate_path`**（进锁前，基于 Python cwd）：拒绝空字节、双引号、分号、换行、回车；拒绝 UNC（默认，`STATA_ALLOW_UNC=1` 开启）；相对路径不得超出 Python cwd；沙箱初筛。
+- **权威校验 `_resolve_stata_path_locked`**（锁内，基于 Stata cwd）：用 Stata 实际工作目录解析相对路径为绝对路径，再经 `_check_abs_path_safety` 做沙箱 + UNC 权威校验，并把命令中嵌入的 Python-cwd 路径替换为 Stata 绝对路径。此层消除 Python cwd 与 Stata cwd 不一致导致的沙箱绕过（`use_dataset`/`run_do_file` 的 `require_file` 路径）。
 
 ## Gotchas
 
@@ -142,6 +141,7 @@ stata-mcp/
 _ping_stata()          # 预检：DLL 是否存活（2 次尝试 + SetBreak 恢复）
   → _execute_single()  # 执行：60s 超时看门狗 + RedirectOutput
     → rc==999 检测     # 崩溃后恢复：排空缓冲 + SetBreak + 重 ping
+      → RC=997 恢复   # 恢复成功：标记非致命，提示重试（不报「内部崩溃」）
       → RC=998 终止    # 若 Stata 无响应，终止后续命令，返回错误信息
 ```
 
@@ -150,7 +150,8 @@ _ping_stata()          # 预检：DLL 是否存活（2 次尝试 + SetBreak 恢�
 | 0 | 成功 | 正常返回输出 |
 | 3000 | 无实质输出（如 r-class） | 返回 "(命令执行成功，无文本输出)" |
 | 198/其他 | Stata 命令语法错误 | 返回 `[返回码: N]` + 错误文本 |
-| 999 | StataSO_Execute 崩溃 | 自动恢复 Stata 会话 + 提示重试 |
+| 997 | 崩溃后已自动恢复 | 非致命：提示「请重试命令」，**不**标记 isError、不报「内部崩溃」 |
+| 999 | StataSO_Execute 崩溃（未恢复） | 报「内部崩溃」+ isError=true |
 | 998 | DLL 无响应 | 立即终止后续命令 + 提示重启 MCP Server |
 
 ### MCP 断线处理

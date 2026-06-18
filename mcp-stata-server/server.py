@@ -474,11 +474,13 @@ def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
     if not text:
         return "(无输出)"
 
-    total_chars = len(text)
-    total_pages = max(1, (total_chars + page_size - 1) // page_size)
-
+    # page == 0 或 page_size <= 0 均表示「返回全部，不分页」；
+    # 必须在计算 total_pages 前拦截，避免 page_size <= 0 时除零。
     if page == 0 or page_size <= 0:
         return text
+
+    total_chars = len(text)
+    total_pages = max(1, (total_chars + page_size - 1) // page_size)
 
     if page < 1:
         page = 1

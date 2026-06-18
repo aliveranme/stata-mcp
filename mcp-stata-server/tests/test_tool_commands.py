@@ -9,11 +9,14 @@ from server import (
     stata_install_package,
     stata_list,
     stata_logistic,
+    stata_ping,
     stata_regress,
+    stata_run,
     stata_save_dataset,
     stata_summarize,
     stata_tabulate,
     stata_ttest,
+    stata_use_dataset,
 )
 
 
@@ -264,3 +267,53 @@ def test_export_excel_wraps_sheet_in_quotes():
         stata_export_excel("C:/o.xlsx", sheet="My Sheet")
         cmd = mock_run.call_args[0][0]
         assert 'sheet("My Sheet")' in cmd
+
+
+def test_stata_run_clamps_timeout_to_range():
+    """safe_timeout 应钳位到 [10, 1800]。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_run("summarize mpg", timeout=5)
+        assert mock_run.call_args.kwargs["timeout"] == 10
+    with patch("server._run_stata_command") as mock_run:
+        stata_run("summarize mpg", timeout=9999)
+        assert mock_run.call_args.kwargs["timeout"] == 1800
+
+
+def test_stata_run_rejects_null_byte():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run("ok\x00bad")
+        assert getattr(result, "is_error", False) or "错误" in _result_text(result)
+        mock_run.assert_not_called()
+
+
+def test_stata_use_dataset_builds_command_with_clear():
+    with patch("server._run_stata_command") as mock_run:
+        stata_use_dataset("C:/data/auto.dta", clear=True)
+        cmd = mock_run.call_args[0][0]
+        assert 'use "C:/data/auto.dta", clear' == cmd
+        assert mock_run.call_args.kwargs["require_file"] == "C:/data/auto.dta"
+
+
+def test_stata_use_dataset_without_clear():
+    with patch("server._run_stata_command") as mock_run:
+        stata_use_dataset("C:/data/auto.dta", clear=False)
+        cmd = mock_run.call_args[0][0]
+        assert cmd == 'use "C:/data/auto.dta"'
+
+
+def test_stata_ping_alive_when_42_in_output():
+    with patch("server._execute_single", return_value=(0, "42")):
+        result = stata_ping()
+    assert "alive" in result
+
+
+def test_stata_ping_degraded_when_no_42():
+    with patch("server._execute_single", return_value=(0, "")):
+        result = stata_ping()
+    assert "degraded" in result
+
+
+def test_stata_ping_returns_error_on_exception():
+    with patch("server._execute_single", side_effect=RuntimeError("boom")):
+        result = stata_ping()
+    assert getattr(result, "is_error", False)
