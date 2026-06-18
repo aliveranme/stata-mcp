@@ -212,3 +212,55 @@ def test_save_dataset_builds_command_for_valid_path():
         stata_save_dataset("C:/output/data.dta", replace=True)
         cmd = mock_run.call_args[0][0]
         assert cmd == 'save "C:/output/data.dta", replace'
+
+
+def test_install_package_rejects_source_with_closing_paren():
+    """C4: source 含 ) 可提前闭合 from() 注入 net install 参数，应被拦截。"""
+    from server import stata_install_package
+
+    for injected in [
+        "https://evil.com) net install bad",
+        "https://evil.com/, from(bad)",
+        'https://evil.com"',
+        "https://x.com/path;more",
+        "https://x.com/path with space",
+    ]:
+        with patch("server._run_stata_command") as mock_run:
+            result = stata_install_package("pkg", source=injected)
+            assert "错误" in _result_text(result), f"应拦截 source: {injected}"
+            mock_run.assert_not_called()
+
+
+def test_install_package_accepts_valid_sources():
+    """C4: 合法 ssc 与 HTTPS URL 仍应放行。"""
+    from server import stata_install_package
+
+    for ok_source, expect_cmd_part in [
+        ("ssc", "ssc install outreg2"),
+        ("https://fmwww.bc.edu/RePEc/bocode/o", "net install outreg2, from("),
+    ]:
+        with patch("server._run_stata_command") as mock_run:
+            stata_install_package("outreg2", source=ok_source)
+            cmd = mock_run.call_args[0][0]
+            assert expect_cmd_part in cmd
+
+
+def test_export_excel_rejects_sheet_with_closing_paren():
+    """C5: sheet 含 ) 可提前闭合 sheet() 注入选项，应被拦截。"""
+    for injected in ["foo) badopt", 'foo"bar', "a;b"]:
+        with patch("server._run_stata_command") as mock_run:
+            result = stata_export_excel("C:/o.xlsx", sheet=injected)
+            assert "错误" in _result_text(result), f"应拦截 sheet: {injected}"
+            mock_run.assert_not_called()
+
+
+def test_export_excel_wraps_sheet_in_quotes():
+    """C5: sheet 名应用双引号包裹，允许含空格/中文的合法名。"""
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+        patch("server.os.path.getsize", return_value=1024),
+    ):
+        stata_export_excel("C:/o.xlsx", sheet="My Sheet")
+        cmd = mock_run.call_args[0][0]
+        assert 'sheet("My Sheet")' in cmd

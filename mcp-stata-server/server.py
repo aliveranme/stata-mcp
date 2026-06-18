@@ -403,8 +403,9 @@ def _check_abs_path_safety(abs_path: str) -> str | None:
 
     该函数不依赖任何工作目录，是路径校验的权威层。
     """
-    # 拒绝 UNC 路径（除非 STATA_ALLOW_UNC=1）
-    if abs_path.startswith("\\\\") and not _STATA_ALLOW_UNC:
+    # 拒绝 UNC 路径（除非 STATA_ALLOW_UNC=1）。兼顾 \\ 与 // 两种形式。
+    norm = abs_path.replace("/", "\\")
+    if norm.startswith("\\\\") and not _STATA_ALLOW_UNC:
         return "错误: 不允许 UNC 网络路径"
     # ALLOWED_ROOTS 沙箱检查
     if not _is_path_allowed(abs_path):
@@ -417,6 +418,19 @@ def _check_abs_path_safety(abs_path: str) -> str | None:
     return None
 
 
+def _check_path_chars(path: str) -> str | None:
+    """路径字符级预检：拒绝空路径与非法控制/分隔字符。
+
+    不依赖任何工作目录，不解析相对路径，是 _validate_path（Python-cwd 预检）
+    与 _resolve_stata_path_locked（Stata-cwd 权威校验）共用的第一道字符关口。
+    """
+    if not path or not path.strip():
+        return "错误: 路径为空"
+    if "\x00" in path or '"' in path or ";" in path or "\n" in path or "\r" in path:
+        return "错误: 路径包含非法字符"
+    return None
+
+
 def _validate_path(path: str) -> str | None:
     """校验路径安全性：拒绝空字节、双引号、分号、换行以及越界路径穿越。
 
@@ -426,10 +440,8 @@ def _validate_path(path: str) -> str | None:
 
     当 STATA_ALLOWED_ROOTS 环境变量配置时，所有路径必须落在允许根目录下。
     """
-    if not path or not path.strip():
-        return "错误: 路径为空"
-    if "\x00" in path or '"' in path or ";" in path or "\n" in path or "\r" in path:
-        return "错误: 路径包含非法字符"
+    if err := _check_path_chars(path):
+        return err
     normalized = os.path.normpath(os.path.abspath(path))
     # 拒绝 UNC 路径（除非 STATA_ALLOW_UNC=1）
     if normalized.startswith("\\\\") and not _STATA_ALLOW_UNC:
@@ -677,6 +689,10 @@ def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
     使用指数退避轮询：初始 1ms，最大 20ms；在检测到输出后重置回 1ms。
     安静窗口用于确认输出已结束，避免固定高频轮询浪费 CPU。
 
+    优化：若轮询期间从未见过任何输出（缓冲本就为空），3ms 后即快速退出，
+    无需等满 min_wait/quiet_gap。常见的小输出场景下省去 ~12ms 空转。
+    有残留时行为不变（仍走 quiet_gap 确认输出已结束）。
+
     参数可调：min_wait=最小等待秒，quiet_gap=安静判定秒。
 
     用于执行前清理和 SetBreak 后的错误恢复。
@@ -684,15 +700,21 @@ def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
     parts = io.StringIO()
     t_start = time.time()
     last_nonempty = time.time()
+    seen_output = False
     sleep_ms = 1
 
     while time.time() - t_start < min_wait:
         out = config.get_output()
         if out:
             parts.write(out)
+            seen_output = True
             last_nonempty = time.time()
             sleep_ms = 1
-        if time.time() - last_nonempty > quiet_gap:
+        if seen_output:
+            if time.time() - last_nonempty > quiet_gap:
+                break
+        elif time.time() - t_start > 0.003:
+            # 从未见过输出：缓冲本就为空，无需继续等待
             break
         time.sleep(sleep_ms / 1000.0)
         sleep_ms = min(sleep_ms * 2, 20)
@@ -864,12 +886,15 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     out_buf = io.StringIO()
     total_len = 0
     empty_count = 0
+    clean_exit = False  # 阶段 1 是否以「连续 3 次空转」正常退出
 
     # 阶段 1: 快轮询（最多 300 次，连续 3 次空转退出，指数退避）
+    # 优化：取到输出时立即复取（不 sleep），仅空转时退避等待。
     sleep_ms = 1
     attempts = 0
     while attempts < 300:
         out = config.get_output()
+        attempts += 1
         if out:
             out_buf.write(out)
             total_len += len(out)
@@ -878,21 +903,24 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
             if total_len >= MAX_OUTPUT_CHARS:
                 out_buf.write("\n(输出已截断)")
                 break
-        else:
-            empty_count += 1
-            if empty_count >= 3:
-                break
+            continue  # 立即复取，不 sleep
+        empty_count += 1
+        if empty_count >= 3:
+            clean_exit = True
+            break
         time.sleep(sleep_ms / 1000.0)
         sleep_ms = min(sleep_ms * 2, 20)
-        attempts += 1
 
-    # 阶段 2: 智能清尾 — 仅在输出较小时做短 drain
+    # 阶段 2: 智能清尾
+    # - clean_exit 的小输出：阶段 1 已确认输出结束，仅做超短 drain（5ms）兜底
+    #   延迟二次输出，省去原 50ms 空转。
+    # - 未干净退出或大输出：保留原 drain 策略确保完整收集。
     if total_len < MAX_OUTPUT_CHARS:
-        if total_len < 10_000:
-            # 小输出：短 drain（50ms 上限）
+        if clean_exit and total_len < 10_000:
+            tail = _drain_output(min_wait=0.005, quiet_gap=0.002)
+        elif total_len < 10_000:
             tail = _drain_output(min_wait=0.05, quiet_gap=0.01)
         else:
-            # 大输出：完整 drain（100ms 上限）
             tail = _drain_output(min_wait=0.1, quiet_gap=0.015)
         if tail:
             out_buf.write(tail)
@@ -1129,8 +1157,9 @@ def _resolve_stata_path_locked(filepath: str) -> tuple[str, str | None]:
     Returns:
         (stata_abs_path, None) 或 ("", error_text)。
     """
-    # 快速预检：字符级拦截（不依赖 cwd）
-    if err := _validate_path(filepath):
+    # 字符级预检：仅拦截非法字符，不做沙箱/相对路径检查（沙箱权威校验
+    # 在下方对 Stata-cwd 解析后的绝对路径执行，避免 Python cwd 预检误拦）。
+    if err := _check_path_chars(filepath):
         return "", err
     if os.path.isabs(filepath):
         abs_path = os.path.normpath(filepath).replace("\\", "/")

@@ -116,6 +116,28 @@ def test_execute_safe_upgrades_to_998_when_recovery_fails():
     assert "无法自动恢复" in out
 
 
+def test_execute_safe_marks_recovered_when_recovery_succeeds():
+    """After a DLL crash (rc=999) if recovery ping succeeds, rc becomes 997 (recovered).
+
+    C3 修复：恢复成功不应保留 999（会被误报为致命「内部崩溃」），而应标记
+    为 STATA_RC_RECOVERED(997)，使 _run_stata_command 视为非致命。
+    """
+    from server import STATA_RC_RECOVERED
+
+    # Sequence: initial ping succeeds, main command crashes (999),
+    # recovery ping succeeds with "42" -> True.
+    side_effect = [(0, "42"), (999, "boom"), (0, "42")]
+    with (
+        patch("server._execute_single", side_effect=side_effect),
+        patch("server._drain_output"),
+        patch("server._set_break"),
+        patch("time.sleep"),
+    ):
+        rc, out = _execute_safe(" dangerous ")
+    assert rc == STATA_RC_RECOVERED
+    assert "已自动恢复" in out
+
+
 def test_ping_stata_uses_execute_single_and_checks_output():
     """_ping_stata should run through _execute_single and look for '42'."""
     with patch("server._execute_single", return_value=(0, "42")) as execute:
@@ -128,3 +150,28 @@ def test_ping_stata_uses_execute_single_and_checks_output():
 def test_ping_stata_returns_false_when_no_output():
     with patch("server._execute_single", return_value=(0, "")), patch("server._drain_output"):
         assert _ping_stata() is False
+
+
+def test_run_stata_command_does_not_error_on_recovered_rc():
+    """C3: rc=997（崩溃已恢复）不应被 _run_stata_command 标记为 isError 或显示「内部崩溃」。"""
+    from server import STATA_RC_RECOVERED, _run_stata_command
+
+    with patch(
+        "server._execute_safe", return_value=(STATA_RC_RECOVERED, "(Stata 已自动恢复，请重试命令)")
+    ):
+        result = _run_stata_command("summarize mpg")
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert getattr(result, "is_error", False) is False
+    assert "内部崩溃" not in text
+    assert "已自动恢复" in text
+
+
+def test_run_stata_command_errors_on_unrecovered_999():
+    """对比：rc=999（崩溃未恢复）仍应标记为 isError 并显示「内部崩溃」。"""
+    from server import _run_stata_command
+
+    with patch("server._execute_safe", return_value=(999, "StataSO_Execute 崩溃: boom")):
+        result = _run_stata_command("summarize mpg")
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert getattr(result, "is_error", False) is True
+    assert "内部崩溃" in text
