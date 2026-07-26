@@ -411,6 +411,12 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | `stata_import` 的 sheet/cellrange/encoding/varnames 可逃逸括号 | 与 `stata_export_excel` 的 `sheet`（走 `_validate_sheet_name` 明确拒 `"`）不对称，import 侧混在 `_validate_no_injection` 里，`S1") cellrange(A1:A1) //` 可注入任意选项 | sheet 改走 `_validate_sheet_name`；cellrange/varnames 用正向白名单；encoding 拒引号与括号 |
 | `stata_install_package` 的 timeout 无钳制 | docstring 与 CLAUDE.md 都称 10–1800s，代码却直接透传：`timeout=1` 会架起 1 秒看门狗（安装实测需 3–13s，必然被 break） | 与 `stata_run` 一致钳制为 `max(10, min(timeout, 1800))` |
 | `{ }` 块内的 `ssc install` 被无条件预装 | docstring 与 CLAUDE.md 都声称块内不匹配，代码却无块跟踪。`if _rc != 0 { ssc install foo }` 被提到脚本之前变成无条件安装 | `_extract_ssc_installs` 维护花括号深度，深度 >0 时不匹配（数错则退回内联，安全兜底） |
+| 重跑 `setup.py` 抹掉 stata 条目上的自定义键 | 上一轮只搬运了 `env`，`servers["stata"] = {...}` 仍整条重建，用户为适配 MCP 客户端手加的 `type`/`cwd` 每次重跑都消失且无提示 | 改为在既有条目上就地更新本脚本负责的 `command`/`args`/`env` |
+| 写 `.mcp.json` 中途失败会毁掉用户配置 | 唯一写入路径是 `open(path, "w")` 截断后 `json.dump`，磁盘满/Ctrl-C 会留下空文件或半截 JSON；而下次重跑时读取侧的备份逻辑会把残骸备份走并只重建 stata 条目 —— 原始数据永久丢失，备份反而误导 | 改为同目录临时文件 + `os.replace` 原子替换；失败时删临时文件、报「原文件未改动」并让 `main()` 返回 1 |
+| 合法 JSON 但顶层非 dict 时静默丢弃用户数据 | 备份保护只挂在 `except (OSError, JSONDecodeError)` 上；`json.load` 成功而 `isinstance(loaded, dict)` 为假（`[]`/`null`/字符串）时既不备份也不提示 | 抽出 `_backup_mcp_json`，非 dict 顶层与非 dict `mcpServers` 都走同一备份路径 |
+| 安装的是裸 `fastmcp`，绕开 `>=3.2.0` 下界 | `server.py` 从 `fastmcp.tools.base` 导入 `ToolResult`（3.2.0 才有），而唯一的自动安装路径不引用 requirements.txt：venv 里若已有更低版本，uv/pip 报 already-satisfied rc=0，安装步骤打印 ✓ 成功，直到 Step 4 才以截尾 stderr 暴露 ModuleNotFoundError | 提取 `FASTMCP_SPEC = "fastmcp>=3.2.0"` 供两条安装路径共用，并加测试守住它与 requirements/pyproject 一致 |
+| 慢网络下 `setup.py` 裸 traceback 退出 | 五处 `subprocess.run` 都传了 timeout 却无一捕获 `TimeoutExpired`（它继承自 Exception 而非 OSError） | `install_deps` 捕获并给出重试与手动安装命令；uv 路径超时改走 pip 回退 |
+| `STATA_HOME` 无效时被静默忽略 | 环境变量是文档声明的最高优先级，目录不存在（外置卷未挂载、路径笔误）时直接落入自动检测，可能把**另一套** Stata 写进 `.mcp.json` | 加黄色警告指明被忽略的路径，再继续自动检测 |
 
 ## 权限配置
 
@@ -447,7 +453,8 @@ server 选择「始终允许」）。
   - E2E 只放**单元测试无法证伪**的断言（即代码对 Stata 实际行为的假设）；命令拼接与参数校验留在 `tests/`。
 - **无类型检查**：无 `mypy`、`pre-commit`。server.py 混合中英文标识符。
 - **`setup.py` 自动检测只覆盖标准安装位置**：macOS 扫 `/Applications` 与 `~/Applications`，Windows 扫 `ProgramFiles`/`ProgramFiles(x86)`/`D:`/`E:`，Linux 扫 `/usr/local`、`/opt`。装在其他位置（实测外置卷 `/Volumes/ccc/Applications/StataNow` 即检测不到）时 `find_stata_installation()` 返回 `(None, None)` —— 需先设 `STATA_HOME` 环境变量再跑。这不是缺陷，但文档要说清，否则用户会以为「不支持我的系统」。
-- **`setup.py` 无自动化测试**：它是每个新用户第一个运行的脚本（565 行，含跨平台检测、venv 创建、`.mcp.json` 合并写入），目前只有 `ruff` lint，没有单元测试。`generate_mcp_json` 的「保留其他 server 与自定义 env」逻辑尤其值得补测 —— 它写的是用户的真实配置文件。
+- **`setup.py` 的测试覆盖仅限纯函数部分**：`tests/test_setup_script.py` 按路径加载仓库根的 `setup.py`（顶层只有定义，入口在 `if __name__ == "__main__"` 之下，可安全导入），覆盖 `generate_mcp_json` 的合并语义与失败路径、`install_deps` 的版本下界与超时、`find_stata_installation` 的 `STATA_HOME` 分支。**未覆盖**：`create_venv`（真建 venv）、`test_server`（真起进程）、`main()` 的交互式输入分支 —— 这些需要真实子进程或 stdin，留给手工验证。
+  - `FASTMCP_SPEC` 在 `setup.py`、`requirements.txt`、`pyproject.toml` 三处各有声明，但只有 `setup.py` 那处会被新用户实际执行；`test_fastmcp_spec_matches_requirements_and_pyproject` 守住三者一致，防止再次出现「元数据写 `>=3.2.0`、安装的却是裸 `fastmcp`」。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
 - **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**不要内嵌 `ssc install`** —— 但原因不是「损坏 DLL」。实测（Stata 19.5 MP，macOS）：`ssc install` 是网络阻塞调用，同一个包耗时在 **3–13s 间波动**，慢/不可达网络下更久；它整段独占 `_stata_lock` 阻塞整个 server。**看门狗超时对它是生效的**：装超过 timeout 时 `SetBreak` 会**干净中断**（实测 rdrobust 在 10s 下限被 break，返回超时提示，会话健康、包不残留半装状态；`timeout=1/2` 的 fre/mdesc 没被 break 只是它们在 10s 下限前就装完了）。**全程无 DLL 损坏**——多场景复现，break 后 `display`/`summarize`/`regress` 全正常。真正的问题只是：内嵌进分析步骤时，一个几秒到十几秒的网络阻塞会意外冻结整个流程。故包安装走专用的 `stata_install_package`（用户可控时机、`timeout` 参数真实兜底）。
 - **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前的缓解是串行锁、较低的默认超时（60s）与一次二次确认；本条此前还写有「连续 break 熔断」，代码中并不存在，已删除。**二次确认的窗口并未完全闭合**：主线程在 `StataSO_Execute` 返回后还要走完 `RedirectOutput.__exit__` 与临时文件清理才 `set()` 事件，看门狗恰在这段间隙做确认时仍读到未完成，于是 break 可能落在命令结束之后并被下一条命令消费（表现为无关的 rc=1）。建议长命令显式拆分或使用更大的 timeout 参数。

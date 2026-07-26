@@ -156,6 +156,16 @@ def find_stata_installation():
     if env_home and os.path.isdir(env_home):
         edition = _edition_with_warning(env_home)
         return env_home, edition
+    if env_home:
+        # 环境变量是文档声明的最高优先级，被静默降级会让用户以为配置的是自己
+        # 指定的那套 Stata。外置卷未挂载、路径笔误都会走到这里，而下面的自动
+        # 检测可能恰好扫到**另一套** Stata 并写进 .mcp.json。
+        print(
+            yellow(
+                f"⚠ 环境变量 STATA_HOME 指向的目录不存在，已忽略：{env_home}\n"
+                "  （外置卷未挂载？路径笔误？）将改用自动检测。"
+            )
+        )
 
     # 2. 检查常见路径
     for path in STATA_COMMON_PATHS:
@@ -270,38 +280,58 @@ def get_python_exe(venv_dir):
     return os.path.join(venv_dir, "bin", "python")
 
 
+# server.py 从 fastmcp.tools.base 导入 ToolResult，该模块 3.2.0 才出现 ——
+# 低版本 import 即崩。安装命令必须自带下界：venv 里若已有更低版本，uv/pip 会报
+# already-satisfied rc=0，install_deps 打印 ✓ 成功，直到 Step 4 才以截尾 stderr
+# 暴露 ModuleNotFoundError，诊断远离根因。requirements.txt 与 pyproject.toml
+# 里的同一下界没有任何自动路径会消费，故在此显式重复（有测试守住二者一致）。
+FASTMCP_SPEC = "fastmcp>=3.2.0"
+
+
 def install_deps(venv_dir, project_root):
     """安装 FastMCP。使用 uv 或 pip。"""
     server_dir = os.path.join(project_root, "mcp-stata-server")
 
     # 先尝试 uv（更可靠）
     if shutil.which("uv"):
-        print("  使用 uv 安装 fastmcp...")
+        print(f"  使用 uv 安装 {FASTMCP_SPEC}...")
+        try:
+            result = subprocess.run(
+                ["uv", "pip", "install", FASTMCP_SPEC, "--python", get_python_exe(venv_dir)],
+                cwd=server_dir,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"  {yellow('⚠')} uv 安装超时（180 秒），尝试 pip...")
+        else:
+            if result.returncode == 0:
+                print(f"  {green('✓')} fastmcp 已安装")
+                return True
+            print(f"  {yellow('⚠')} uv 安装失败，尝试 pip...")
+
+    # 回退到 pip（需先 ensurepip）
+    python_exe = get_python_exe(venv_dir)
+    try:
+        subprocess.run(
+            [python_exe, "-m", "ensurepip", "--default-pip"],
+            capture_output=True, text=True, timeout=60,
+        )
         result = subprocess.run(
-            ["uv", "pip", "install", "fastmcp", "--python", get_python_exe(venv_dir)],
+            [python_exe, "-m", "pip", "install", FASTMCP_SPEC, "--quiet"],
             cwd=server_dir,
             capture_output=True,
             text=True,
             timeout=180,
         )
-        if result.returncode == 0:
-            print(f"  {green('✓')} fastmcp 已安装")
-            return True
-        print(f"  {yellow('⚠')} uv 安装失败，尝试 pip...")
-
-    # 回退到 pip（需先 ensurepip）
-    python_exe = get_python_exe(venv_dir)
-    result = subprocess.run(
-        [python_exe, "-m", "ensurepip", "--default-pip"],
-        capture_output=True, text=True, timeout=60,
-    )
-    result = subprocess.run(
-        [python_exe, "-m", "pip", "install", "fastmcp", "--quiet"],
-        cwd=server_dir,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
+    except subprocess.TimeoutExpired as e:
+        # TimeoutExpired 不是 OSError，不捕获会以裸 traceback 退出，而 pip 要拉
+        # pydantic/uvicorn/starlette 一串依赖，慢网络超时完全现实。
+        print(f"  {red('✗')} 安装超时（{e.timeout} 秒）—— 网络可能较慢")
+        print("    请检查网络后重跑 setup.py，或手动执行："
+              f"\n      {python_exe} -m pip install {FASTMCP_SPEC}")
+        return False
     if result.returncode != 0:
         print(f"  {red('✗')} 安装失败:\n{result.stderr}")
         return False
@@ -314,12 +344,28 @@ def install_deps(venv_dir, project_root):
 # Step 3: 生成 .mcp.json
 # =============================================================================
 
-def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
-    """写入 .mcp.json 中的 stata 条目，保留文件里的其他内容。
+def _backup_mcp_json(path, reason):
+    """把无法使用的 .mcp.json 备份为 .bak 并说明原因。"""
+    backup = path + ".bak"
+    try:
+        shutil.copy2(path, backup)
+        print(f"  {yellow('⚠')} 现有 .mcp.json {reason}，已备份为 {backup}")
+    except OSError:
+        print(f"  {yellow('⚠')} 现有 .mcp.json {reason}，将被覆盖")
 
-    不能整文件覆盖：同一个 .mcp.json 里可能还配置了别的 MCP Server，而
-    stata.env 里也可能有用户按本函数末尾提示手动添加的
-    STATA_ALLOWED_ROOTS / STATA_ALLOW_UNC —— 重跑 setup.py 会把它们一起抹掉。
+
+def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
+    """写入 .mcp.json 中的 stata 条目，保留文件里的其他内容。返回是否写入成功。
+
+    不能整文件覆盖：同一个 .mcp.json 里可能还配置了别的 MCP Server，
+    stata 条目上可能有用户为适配客户端手加的键（type / cwd / disabled），
+    而 stata.env 里也可能有按本函数末尾提示添加的 STATA_ALLOWED_ROOTS /
+    STATA_ALLOW_UNC —— 重跑 setup.py 不能把它们抹掉。
+
+    写入走「同目录临时文件 + os.replace 原子替换」：截断直写在中途失败
+    （磁盘满、Ctrl-C、进程被杀）会留下空文件或半截 JSON，而下次重跑时下面的
+    备份逻辑会把残骸备份走并只重建 stata 条目 —— 原始数据永久丢失，备份反而
+    误导。原子替换保证用户看到的要么是旧文件、要么是完整的新文件。
     """
     import json
 
@@ -333,39 +379,53 @@ def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
         try:
             with open(mcp_json_path, encoding="utf-8") as f:
                 loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            _backup_mcp_json(mcp_json_path, f"无法解析（{e}）")
+        else:
             if isinstance(loaded, dict):
                 existing = loaded
-        except (OSError, json.JSONDecodeError) as e:
-            # 文件损坏时不静默丢弃用户数据，先备份再重建
-            backup = mcp_json_path + ".bak"
-            try:
-                shutil.copy2(mcp_json_path, backup)
-                print(f"  {yellow('⚠')} 现有 .mcp.json 无法解析（{e}），已备份为 {backup}")
-            except OSError:
-                print(f"  {yellow('⚠')} 现有 .mcp.json 无法解析（{e}），将被覆盖")
+            else:
+                # 合法 JSON 但顶层不是对象（[]、null、字符串…）—— 同样是「用不了
+                # 的既有内容」，必须走与解析失败相同的备份路径，不能静默覆盖。
+                _backup_mcp_json(
+                    mcp_json_path, f"顶层不是 JSON 对象（{type(loaded).__name__}）"
+                )
 
     servers = existing.get("mcpServers")
     if not isinstance(servers, dict):
+        if "mcpServers" in existing:
+            _backup_mcp_json(mcp_json_path, "的 mcpServers 不是 JSON 对象")
         servers = {}
 
-    prev_env = {}
+    # 保留 stata 条目上用户自加的键（type/cwd/…）与环境变量（如沙箱白名单），
+    # 只更新本脚本负责的那几项。
     prev_stata = servers.get("stata")
-    if isinstance(prev_stata, dict) and isinstance(prev_stata.get("env"), dict):
-        prev_env = dict(prev_stata["env"])
-    # 保留用户自行添加的环境变量（如沙箱白名单），只更新本脚本负责的两项
-    prev_env["STATA_HOME"] = stata_home.replace("\\", "/")
-    prev_env["STATA_EDITION"] = stata_edition
+    entry = dict(prev_stata) if isinstance(prev_stata, dict) else {}
+    env = entry.get("env")
+    env = dict(env) if isinstance(env, dict) else {}
+    env["STATA_HOME"] = stata_home.replace("\\", "/")
+    env["STATA_EDITION"] = stata_edition
 
-    servers["stata"] = {
-        "command": python_exe.replace("\\", "/"),
-        "args": [server_script],
-        "env": prev_env,
-    }
+    entry["command"] = python_exe.replace("\\", "/")
+    entry["args"] = [server_script]
+    entry["env"] = env
+    servers["stata"] = entry
     existing["mcpServers"] = servers
 
-    with open(mcp_json_path, "w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    tmp_path = mcp_json_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp_path, mcp_json_path)
+    except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        print(f"  {red('✗')} 写入 .mcp.json 失败（{e}）—— 原文件未改动")
+        print(f"    请检查磁盘空间与 {mcp_json_path} 的写权限后重试。")
+        return False
 
     others = [k for k in servers if k != "stata"]
     print(f"  {green('✓')} .mcp.json 已更新")
@@ -373,7 +433,8 @@ def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
     print(f"    Python: {python_exe}")
     if others:
         print(f"    已保留其他 MCP Server: {', '.join(others)}")
-    extra_env = [k for k in prev_env if k not in ("STATA_HOME", "STATA_EDITION")]
+
+    extra_env = [k for k in env if k not in ("STATA_HOME", "STATA_EDITION")]
     if extra_env:
         print(f"    已保留自定义环境变量: {', '.join(extra_env)}")
     else:
@@ -381,7 +442,7 @@ def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
         print("    STATA_ALLOWED_ROOTS  分号分隔的路径沙箱白名单，例: C:/data;D:/projects")
         print("    STATA_ALLOW_UNC      设为 1 允许 UNC 网络路径（默认禁止）")
 
-    return mcp_json_path
+    return True
 
 
 # =============================================================================
@@ -530,7 +591,8 @@ def main():
 
     # ---- Step 3: 生成配置 ----
     print(bold("Step 3: 生成 .mcp.json"))
-    generate_mcp_json(project_root, python_exe, stata_home, stata_edition)
+    if not generate_mcp_json(project_root, python_exe, stata_home, stata_edition):
+        return 1
     print()
 
     # ---- Step 4: 验证 ----
