@@ -1972,14 +1972,23 @@ def _prepare_ssc_installs(installs: list[tuple[str, bool]], timeout: int) -> lis
     return report
 
 
-def _result_text_inline(value) -> str:
-    """提取 str / ToolResult 的文本（单行化，用于并入报告）。"""
+def _result_text(value) -> str:
+    """提取 str / ToolResult 的文本，保留换行。"""
     if isinstance(value, ToolResult):
         try:
-            return value.content[0].text.strip().replace("\n", " | ")
+            return value.content[0].text.strip()
         except (AttributeError, IndexError):
             return str(value)
-    return str(value).strip().replace("\n", " | ")
+    return str(value).strip()
+
+
+def _result_text_inline(value) -> str:
+    """提取 str / ToolResult 的文本并单行化，**仅**用于并入单行的报告条目。
+
+    不要用它包装完整的命令输出：换行变 " | " 会把 Stata 的错误上下文、表格与
+    行号提示压成一条巨型单行。需要保留格式时用 ``_result_text``。
+    """
+    return _result_text(value).replace("\n", " | ")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
@@ -2050,7 +2059,11 @@ def stata_run_do_file(filepath: str, timeout: int = 300) -> str | ToolResult:
 
     header = "已在执行前处理 do 文件中的 ssc install：\n" + "\n".join(report) + "\n" + "-" * 40 + "\n"
     if isinstance(result, ToolResult):
-        return _make_error_result(header + _result_text_inline(result))
+        # 保留原始换行：_result_text_inline 是为并入安装**报告行**设计的，套在
+        # 可达 120K 字符的 do 文件完整输出上会把 Stata 的错误上下文、表格、行号
+        # 提示压成一条巨型单行 —— 同一个 do 文件只要不含 ssc install 就走原路径、
+        # 格式完好，一行 ssc install 不该改变错误报告的可读性。
+        return _make_error_result(header + _result_text(result))
     return header + result
 
 
@@ -3282,7 +3295,13 @@ def stata_graph(
             f"    {command}\n"
             f'    graph export "{export_path}", {export_opts}\n'
             f"}}\n"
-            f"capture noisily graph drop _all"
+            # 只清匿名图，不能 `graph drop _all`：具名图正是「我要在后续命令里
+            # 引用它」的显式表达，而 _all 会把它们一起摧毁 —— combine 出一张图
+            # 导出后，再换个布局导出第二张就会发现源图已经没了。
+            # 真机确认（Stata 19.5 MP）：匿名图名为 `Graph`（`graph combine` 的
+            # 结果同样叫 `Graph`），`graph drop Graph` 只删它、具名图存活。
+            # 匿名图不会累积 —— 每次绘图都覆盖同名的那一个。
+            f"capture noisily graph drop Graph"
         )
 
         result = _run_stata_command(compound, timeout=120)

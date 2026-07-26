@@ -219,7 +219,14 @@ do 文件常在开头写 `ssc install foo`，内联执行会让整段脚本卡�
 
 - **`export delimited` 的 `delimiter(tab)` 与 `delimiter("tab")` 等价**：实测都产出制表符，Stata 不会把 `"tab"` 当三字符分隔符。代码取官方文档的无引号写法。
 - **图形导出成功与否以文件为准，不看返回码**：复合块用 `capture noisily` 包裹，rc 恒为 0。`stata_graph` 比对导出前后的 `st_mtime_ns` 判定是否真的写入 —— 只看「文件存在」会把「replace=False 且文件已存在」误判为成功。
-- **图形导出后自动清理**：`graph drop _all` 在复合块外单独执行，确保即使图形命令出错，缓存的图形对象也会被清理。
+- **图形导出后只清匿名图**：`graph drop Graph` 在复合块外单独执行（放块外是为了即使绘图命令出错也能清理）。**不能用 `_all`** —— 具名图正是「我要在后续命令里引用它」的显式表达，`_all` 会把它们一起摧毁，于是多面板工作流第二次导出必然失败：
+  ```
+  stata_graph("scatter price weight, name(g1)")
+  stata_graph("scatter price mpg, name(g2)")
+  stata_graph("graph combine g1 g2", export="a.png")        # _all 时此处清空 g1/g2
+  stata_graph("graph combine g1 g2, cols(1)", export="b.png")  # 源图已不存在
+  ```
+  真机确认（Stata 19.5 MP）：匿名图名为 `Graph`（`graph combine` 的结果同样叫 `Graph`），`graph drop Graph` 只删它、具名图存活且 rc=0；修复后上面四步全部成功，`graph dir` 仍列出 `g1 g2`。匿名图不会累积 —— 每次绘图都覆盖同名的那一个。具名图需要手动清理时用 `stata_run("graph drop _all")`。
 - **`stata_graph` 与 `stata_export_excel` 的 `replace` 默认值为 `False`**（而非 True），写文件前需确保目标文件不存在或显式传入 `replace=True`。安全性优先于向后兼容。
 - **`stata_export_excel(results=True)`** 自动输出为 CSV（不支持 xlsx），若 `estout` 未安装则返回明确错误并提示手动安装（**不自动安装**——见下）。
 - **`///` 续行符**：现在已被修复支持（版本 v2+），可在 `stata_run` 中使用 `///` 连接多行长命令。
@@ -417,6 +424,8 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | 安装的是裸 `fastmcp`，绕开 `>=3.2.0` 下界 | `server.py` 从 `fastmcp.tools.base` 导入 `ToolResult`（3.2.0 才有），而唯一的自动安装路径不引用 requirements.txt：venv 里若已有更低版本，uv/pip 报 already-satisfied rc=0，安装步骤打印 ✓ 成功，直到 Step 4 才以截尾 stderr 暴露 ModuleNotFoundError | 提取 `FASTMCP_SPEC = "fastmcp>=3.2.0"` 供两条安装路径共用，并加测试守住它与 requirements/pyproject 一致 |
 | 慢网络下 `setup.py` 裸 traceback 退出 | 五处 `subprocess.run` 都传了 timeout 却无一捕获 `TimeoutExpired`（它继承自 Exception 而非 OSError） | `install_deps` 捕获并给出重试与手动安装命令；uv 路径超时改走 pip 回退 |
 | `STATA_HOME` 无效时被静默忽略 | 环境变量是文档声明的最高优先级，目录不存在（外置卷未挂载、路径笔误）时直接落入自动检测，可能把**另一套** Stata 写进 `.mcp.json` | 加黄色警告指明被忽略的路径，再继续自动检测 |
+| 导出图形会摧毁多面板工作流 | 复合块后无条件 `graph drop _all`。具名图正是「后续要引用它」的显式表达，于是 `graph combine g1 g2` 导出一张后，换个布局导出第二张时源图已不存在。真机确认匿名图名为 `Graph`，`graph drop Graph` 只删它、具名图存活 | 改 drop 目标为 `Graph`；真机复验四步工作流全部成功且 `graph dir` 仍列出 g1 g2 |
+| 一行 `ssc install` 让 do 文件的错误报告不可读 | 失败时走 `_result_text_inline`（换行变 `" | "`），而该函数是为并入单行**报告条目**设计的，套在可达 120K 的完整输出上会把错误上下文、表格、行号压成一条巨型单行；同一 do 文件不含 `ssc install` 时走原路径、格式完好 | 抽出保留换行的 `_result_text`，失败路径改用它；`_result_text_inline` 的 docstring 写明只可用于单行条目 |
 
 ## 权限配置
 

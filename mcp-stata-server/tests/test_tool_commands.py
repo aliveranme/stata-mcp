@@ -1245,12 +1245,16 @@ def test_graph_export_block_disables_graphics_for_headless():
 
 
 def test_graph_export_drops_cached_graphs_outside_the_block():
-    """graph drop 必须在复合块外：块内命令出错时它会被一起跳过，图形对象泄漏。"""
+    """graph drop 必须在复合块外：块内命令出错时它会被一起跳过，图形对象泄漏。
+
+    drop 的目标是匿名图 `Graph` 而非 `_all` —— 后者会连用户具名的图一起摧毁，
+    多面板工作流因此不可用（见 test_graph_export_preserves_named_graphs）。
+    """
     with patch("server._run_stata_command", return_value="ok") as mock_run:
         stata_graph("scatter price weight", export=abs_path("out", "fig.png"))
     cmd = mock_run.call_args[0][0]
-    assert cmd.rstrip().endswith("capture noisily graph drop _all")
-    assert cmd.index("}") < cmd.index("graph drop _all")
+    assert cmd.rstrip().endswith("capture noisily graph drop Graph")
+    assert cmd.index("}") < cmd.index("graph drop Graph")
 
 
 def test_graph_export_omits_replace_by_default():
@@ -2728,3 +2732,46 @@ def test_install_package_clamps_timeout():
         with patch("server._run_stata_command") as mock_run:
             stata_install_package("estout", timeout=given)
         assert mock_run.call_args.kwargs["timeout"] == expected
+
+
+def test_graph_export_preserves_named_graphs(tmp_path):
+    """导出后只清匿名图，不能连用户具名的图一起 drop。
+
+    `graph drop _all` 会摧毁多面板工作流：具名图正是「我要在后续命令里引用它」
+    的显式表达，而 combine 之后再换个布局导出第二张就会发现图已经没了。
+    真机确认（Stata 19.5 MP）：匿名图名为 `Graph`，`graph drop Graph` 只删它、
+    具名图 `g2` 存活且 rc=0。
+    """
+    from server import stata_graph
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph(command="graph combine g1 g2", export=str(tmp_path / "c.png"))
+    cmd = mock_run.call_args[0][0]
+    assert "graph drop Graph" in cmd
+    assert "graph drop _all" not in cmd
+
+
+def test_run_do_file_keeps_error_output_multiline(tmp_path):
+    """含 ssc install 的 do 文件执行失败时，错误输出不得被压成单行。
+
+    _result_text_inline 是为并入**安装报告行**设计的（换行变 " | "），却被套在
+    可达 120K 字符的 do 文件完整输出上：Stata 的错误上下文、表格、行号提示全被
+    压成一条巨型单行。同一个 do 文件只要不含 ssc install 就走原路径、格式完好
+    —— 一行 ssc install 的存在改变了错误报告的可读性。
+    """
+    from server import ToolResult, stata_run_do_file
+
+    target = tmp_path / "s.do"
+    target.write_text("ssc install estout\nregress bad\n", encoding="utf-8")
+
+    failure = ToolResult(content="[返回码: 111]\nvariable bad not found\nr(111);")
+    with (
+        patch("server._prepare_ssc_installs", return_value=["  · estout: 已安装，跳过"]),
+        patch("server._run_stata_command", return_value=failure),
+    ):
+        result = stata_run_do_file(str(target))
+
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert "variable bad not found" in text
+    assert " | " not in text
+    assert text.count("\n") >= 3
