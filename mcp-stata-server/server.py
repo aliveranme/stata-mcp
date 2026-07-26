@@ -149,6 +149,14 @@ _output_lock = threading.Lock()
 _last_ping_time = 0.0
 PING_CACHE_SECONDS = 2.0  # 2 秒内跳过重复 ping
 
+# 输出被上限裁剪时追加的说明。带上可操作建议 —— 单纯说「已截断」会让调用方
+# 反复翻页去找不存在的后半段。
+_TRUNCATION_NOTICE = (
+    f"\n(输出已截断：超过 {MAX_OUTPUT_CHARS} 字符上限，后续内容已丢弃。"
+    "请缩小范围后重试，例如用 in_range 限定观测、改用 summarize/tabulate 汇总，"
+    "或先导出到文件再查看。)"
+)
+
 # estout 依赖探测命令。提为常量以便测试断言命令串本身。
 # 不能加 capture —— 那会吞掉错误使 rc 恒为 0，见 stata_export_excel 中的说明。
 _ESTOUT_PROBE_CMD = "which estout"
@@ -296,7 +304,7 @@ _INJECTABLE_CHARS = {"\n", "\r", "\x00", ";"}
 # varlist 中额外需要注意的 shell/Stata 元字符
 _VARLIST_FORBIDDEN_CHARS = {"\n", "\r", "\x00", ";", "!", "|", "&", "`", "$"}
 # 危险：stata_run 中可能导致主机命令执行或 Python 代码执行的显著前缀
-_DANGEROUS_COMMAND_PREFIXES = ("!", "shell", "python:", "python(")
+_DANGEROUS_COMMAND_PREFIXES = ("!", "shell", "winexec", "python:", "python(")
 
 
 def _has_dangerous_command_prefix(cmd: str) -> str | None:
@@ -323,6 +331,48 @@ def _has_dangerous_command_prefix(cmd: str) -> str | None:
         # 检测 python 主机命令（部分 Stata 版本使用 python 子命令）
         if lowered == "python" or lowered.startswith("python "):
             return f"错误: 命令 '{line[:60]}' 尝试调用 Stata 内嵌 Python，已被禁止"
+        # Mata 与内嵌 Python 同属「可执行任意代码的子语言」，须同等禁止：
+        # 块内 _stata("...") 可调用任意 Stata 命令（包括 ! shell out），
+        # unlink() / fopen() 可直接读写文件，而本函数是逐行**行首**匹配，
+        # 对 mata 块内的代码完全无效 —— 实测 `mata:` + `_stata("display 12345")`
+        # 可原样穿过本护栏并成功执行。
+        if lowered == "mata" or lowered.startswith("mata ") or lowered.startswith("mata:"):
+            return (
+                f"错误: 命令 '{line[:60]}' 尝试进入 Mata，已被禁止 —— "
+                "Mata 可经 _stata() 执行任意 Stata 命令并直接读写文件。"
+                "如确需 Mata 编程，请在 Stata 中直接操作。"
+            )
+    return None
+
+
+def _validate_command_blocks(command: str) -> str | None:
+    """对**解析之后**的执行块逐块做危险前缀检查；返回原因或 None。
+
+    必须校验解析器的输出而非它的输入。``_has_dangerous_command_prefix`` 做的是
+    逐行**行首**匹配，而 ``_parse_command_blocks`` 在送执行前还会剥掉 ``/* */``
+    块注释、按 ``///`` 拼接续行 —— 于是「原始文本的行首」与「真正交给
+    ``StataSO_Execute`` 的行首」并不是同一个东西。实测（Stata 19.5 MP）全部绕过：
+
+    ==============================  ==========================
+    输入                            解析后真正执行的块
+    ==============================  ==========================
+    ``/*c*/shell echo hi``          ``shell echo hi``
+    ``/**/python: import os``       ``python: import os``
+    ``/* a */ mata: 1``             `` mata: 1``
+    ``sh/*x*/ell echo hi``          ``shell echo hi``
+    ``sh///\\nell echo hi``          ``shell echo hi``
+    ==============================  ==========================
+
+    最后两例尤其说明问题：原始文本里根本不存在 ``shell`` 这个词，是解析器把被
+    注释/续行符劈开的 token 重新拼了回来，任何基于原始文本的模式匹配都无解。
+
+    这与路径侧「校验路径 == 执行路径」（``_resolve_stata_path_locked``）是同一
+    条原则。检查解析后的块还有个附带好处：真正被注释掉的内容不会产生执行块，
+    因此注释里出现危险词也不会误伤。
+    """
+    for block in _parse_command_blocks(command):
+        if reason := _has_dangerous_command_prefix(block):
+            return reason
     return None
 
 
@@ -359,11 +409,24 @@ def _validate_varlist(value: str, label: str = "varlist") -> str | None:
 
     允许因子变量（i.var）、时间序列算子（L.var）、交互项（c.x##i.g）、
     权重子句（[aw=...]）、范围（x1-x10）、通配符（mpg*）等。
+
+    额外拒绝 ``/``、``,`` 与独立的 ``using``：varlist 会被拼进
+    ``export excel <varlist> using "<已校验路径>"`` 这类命令，含这些记号即可
+    改写命令语义。实测 ``varlist='mpg using /evil/out.xlsx, replace //'``
+    能构造出 ``export excel mpg using /evil/out.xlsx, replace // using "<安全路径>"``
+    —— ``//`` 把经过 ``_validate_path`` 校验的路径整段注释掉，数据落到攻击者
+    指定的位置，路径沙箱被完全绕过。这三种记号在合法 varlist 中都无用途。
     """
     if not value or not value.strip():
         return None
     if any(ch in value for ch in _VARLIST_FORBIDDEN_CHARS):
         return f"错误: {label} 包含非法字符（换行、回车、空字节、分号、!、|、&、反引号或 $）"
+    if "/" in value:
+        return f"错误: {label} 不能包含 '/'（可构成注释 // 或文件路径，会改写命令语义）"
+    if "," in value:
+        return f"错误: {label} 不能包含 ','（会被 Stata 解析为选项分隔符）"
+    if any(tok.lower() == "using" for tok in value.replace("(", " ").replace(")", " ").split()):
+        return f"错误: {label} 不能包含 'using'（会改写命令的目标文件）"
     # 基本的引号成对检查（未转义的双引号需成对）
     quotes = 0
     i = 0
@@ -691,10 +754,21 @@ def _parse_command_blocks(cmd: str) -> list[str]:
 
         if has_cont:
             if content.strip():
-                # 与 buffer 中当前行合并：/// 所在行与下一行属于同一条命令
-                if buffer:
+                # 只有当上一行也以 /// 结尾（续行链中间）时，才接到 buffer[-1]；
+                # 否则本行是续行链的**第一行**，必须作为新行加入。
+                #
+                # 原实现无条件并入 buffer[-1]，在块内部会把块的上一行和本行拼成
+                # 一行。实测后果：
+                #   forvalues i=1/3 {        →  "forvalues i=1/3 {     display `i'"
+                #       display ///             即 { 之后同行有代码，r(198)
+                #           `i'
+                #   program define hi        →  "program define hi     display ..."
+                #       display ///             end 被甩到另一个块，配对失效，
+                #           "hi"                Stata 进入定义模式**挂死会话**
+                #   end
+                if in_continuation and buffer:
                     last = buffer[-1]
-                    sep = " " if space_before else ""
+                    sep = " " if cont_space_before else ""
                     buffer[-1] = last.rstrip() + sep + content.rstrip()
                 else:
                     buffer.append(content.rstrip())
@@ -704,7 +778,7 @@ def _parse_command_blocks(cmd: str) -> list[str]:
                 # /// 行无实质内容（如 /// comment 或行首 ///）时中断当前续行链，
                 # 并把已累积的 buffer 作为一个 block 发出，避免后续行被错误拼接。
                 in_continuation = False
-                if brace_depth == 0 and not in_block_comment:
+                if brace_depth == 0 and not in_block_comment and not in_end_block:
                     _flush_block(buffer, blocks)
             continue
 
@@ -714,8 +788,11 @@ def _parse_command_blocks(cmd: str) -> list[str]:
                 sep = " " if cont_space_before else ""
                 buffer[-1] = last.rstrip() + sep + content.lstrip()
             in_continuation = False
-            # 若续行被空行（或仅注释行）结束，直接尝试发出当前 block
-            if brace_depth == 0 and not in_block_comment:
+            # 若续行被空行（或仅注释行）结束，直接尝试发出当前 block。
+            # 必须同时确认不在 end 配对块内 —— 否则 `program define ... ///` 这类
+            # 写法会在续行结束处把块劈开，`end` 落到下一个块，配对失效后
+            # Stata 进入定义模式挂死会话。
+            if brace_depth == 0 and not in_block_comment and not in_end_block:
                 _flush_block(buffer, blocks)
                 continue
         else:
@@ -929,17 +1006,33 @@ def _materialize_block(cmd: str) -> str:
         cmd: 单个命令块（可能多行）。
 
     Returns:
-        可直接交给 StataSO_Execute 的单条命令。
+        ``(要执行的单条命令, 执行后需删除的临时文件路径或 None)``。
 
     Raises:
         OSError: 临时文件创建或写入失败。
     """
     if "\n" not in cmd.strip():
-        return cmd
+        return cmd, None
     tmpf = sfi.SFIToolkit.getTempFile()
     with open(tmpf, "w", encoding="utf-8") as f:
         f.write(cmd if cmd.endswith("\n") else cmd + "\n")
-    return f'include "{tmpf}"'
+    return f'include "{tmpf}"', tmpf
+
+
+def _cleanup_temp_block(path: str | None) -> None:
+    """删除 ``_materialize_block`` 写出的临时 do 文件。
+
+    sfi 的临时文件本会在 Stata 会话结束时统一清理，但 MCP server 是长驻进程：
+    一个活跃分析会话每执行一个多行块就留下一个文件（实测 50 个块 → 50 个文件），
+    进程崩溃重启时还会残留。命令执行完文件已被 ``include`` 读完，立即删除即可，
+    残留数恒为 0。
+    """
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        logger.debug("临时 do 文件已不存在或无法删除: %s", path)
 
 
 def _execute_single(cmd: str, timeout: int = 60) -> tuple:
@@ -962,7 +1055,7 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     """
     # 多行块无法直接喂给单命令接口，先落到临时 do 文件（详见 _materialize_block）
     try:
-        exec_cmd = _materialize_block(cmd)
+        exec_cmd, tmp_block = _materialize_block(cmd)
     except OSError as e:
         logger.exception("无法为多行命令块创建临时 do 文件: %s", cmd[:80])
         return 1, f"错误: 无法创建临时 do 文件执行多行命令块: {e}"
@@ -995,6 +1088,9 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
         logger.exception("StataSO_Execute crashed on: %s", cmd[:80])
         exec_done.set()
         return 999, f"StataSO_Execute 崩溃: {e}"
+    finally:
+        # include 已把文件读完，此处删除；放 finally 保证崩溃路径也不残留。
+        _cleanup_temp_block(tmp_block)
 
     exec_done.set()
 
@@ -1017,13 +1113,19 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
         out = config.get_output()
         attempts += 1
         if out:
+            # 必须在写入时按剩余空间裁剪：Stata 可能一次性吐出远超上限的文本
+            # （实测 19980 obs 的 list 单次返回 1,270,888 字符）。先整块写入再
+            # 判断总长，只能停止继续收集，拦不住已经进入缓冲的部分，上限形同虚设。
+            room = MAX_OUTPUT_CHARS - total_len
+            if len(out) >= room:
+                out_buf.write(out[:room])
+                out_buf.write(_TRUNCATION_NOTICE)
+                total_len = MAX_OUTPUT_CHARS
+                break
             out_buf.write(out)
             total_len += len(out)
             empty_count = 0
             sleep_ms = 1
-            if total_len >= MAX_OUTPUT_CHARS:
-                out_buf.write("\n(输出已截断)")
-                break
             continue  # 立即复取，不 sleep
         empty_count += 1
         if empty_count >= 3:
@@ -1044,8 +1146,23 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
         else:
             tail = _drain_output(min_wait=0.1, quiet_gap=0.015)
         if tail:
-            out_buf.write(tail)
-            total_len += len(tail)
+            room = MAX_OUTPUT_CHARS - total_len
+            if len(tail) >= room:
+                out_buf.write(tail[:room])
+                out_buf.write(_TRUNCATION_NOTICE)
+                total_len = MAX_OUTPUT_CHARS
+            else:
+                out_buf.write(tail)
+                total_len += len(tail)
+
+    # 看门狗中断后 Stata 返回的是通用错误码（实测 rc=1「未指定的错误」），
+    # 单看返回码会让调用方去排查命令语法，故显式点明超时与可行的下一步。
+    if did_break:
+        out_buf.write(
+            f"\n(命令执行超过 {timeout}s 上限已被中断。"
+            "如属正常的长耗时任务，请显式传入更大的 timeout；"
+            "若命令可能在 headless 环境挂起，请改用更轻量的写法。)"
+        )
 
     return rc, out_buf.getvalue()
 
@@ -1206,6 +1323,13 @@ def _run_stata_command(
                 had_error = True
 
         full = all_buf.getvalue() if hwritten else _describe_empty_result()
+        # 聚合层同样要收口：_execute_single 的上限只作用于**单个块**，N 个大输出
+        # 块拼起来就是 N × 120K（实测 3 条 list 拼出 360,263 字符）。这里截断后
+        # _last_output 缓存、错误分支与 stata_more(page=0) 才真正受 120K 约束。
+        # 仍先执行完所有块再截断：块的副作用（如 save/export）必须照常发生，
+        # 不能因为输出超限就跳过后续命令。
+        if len(full) > MAX_OUTPUT_CHARS:
+            full = full[:MAX_OUTPUT_CHARS] + _TRUNCATION_NOTICE
         with _output_lock:
             _last_output = full
 
@@ -1362,25 +1486,32 @@ def stata_run(command: str, page: int = 1, timeout: int = 60) -> str | ToolResul
     safe_timeout = max(10, min(timeout, 1800))
     if "\x00" in command:
         return _make_error_result("错误: command 包含空字节")
-    if reason := _has_dangerous_command_prefix(command):
+    # 校验解析后的执行块，而非原始文本 —— 详见 _validate_command_blocks
+    if reason := _validate_command_blocks(command):
         return _make_error_result(reason)
     return _run_stata_command(command, page, timeout=safe_timeout)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_run_do_file(filepath: str) -> str | ToolResult:
+def stata_run_do_file(filepath: str, timeout: int = 300) -> str | ToolResult:
     """执行一个 Stata .do 文件并返回全部输出。
 
     .do 文件是 Stata 的批处理脚本。此工具会执行指定路径的 .do 文件。
 
+    注意：do 文件由 Stata 自行解析，**不经过** ``stata_run`` 的危险命令前缀
+    护栏。只执行你信任的 do 文件。
+
     Args:
         filepath: .do 文件的绝对路径。
+        timeout: 超时秒数（默认 300，范围 10–1800）。do 文件往往是最长跑的
+            任务，跑批量建模或大数据清洗时请显式调大。
 
     Returns:
         do 文件执行过程中的全部 Stata 输出。
     """
+    safe_timeout = max(10, min(timeout, 1800))
     return _run_stata_command(
-        f'do "{_normalize_path(filepath)}"', require_file=filepath, timeout=300
+        f'do "{_normalize_path(filepath)}"', require_file=filepath, timeout=safe_timeout
     )
 
 
@@ -1512,10 +1643,17 @@ def stata_list(
 
     以表格形式展示观测数据。默认显示前 10 条。
 
+    **``n`` 与 ``condition`` 同时给出时要小心**：二者拼成
+    ``list … if <condition> in 1/<n>``，Stata 的语义是「**前 n 条观测里**满足
+    条件的」，而不是「满足条件的前 n 条」。若筛选结果稀疏，很容易得到空表并
+    误以为没有匹配数据。想看「满足条件的前 n 条」，请传 ``n=0`` 取全部后翻页，
+    或先用 ``stata_tabulate`` / ``stata_summarize`` 确认规模。
+
     Args:
         varlist: 要列出的变量（空格分隔），留空 = 全部。
-        n: 显示前 n 条观测（默认 10，设为 0 显示全部，慎用）。
-        in_range: 观测范围如 "1/20" 或 "1/l"。
+        n: 显示前 n 条观测（默认 10，设为 0 显示全部，慎用）。与 condition
+            叠加时的语义见上。
+        in_range: 观测范围如 "1/20" 或 "1/l"。给出时优先于 n。
         condition: if 条件子句（可选）。
 
     Returns:
@@ -1712,14 +1850,16 @@ def stata_ttest(
     options: str = "",
     condition: str = "",
 ) -> str | ToolResult:
-    """运行 t 检验。
+    """运行单样本或独立样本 t 检验。
 
-    支持单样本 t 检验、独立样本 t 检验（按分组变量）、配对 t 检验。
+    ``varname`` 只接受单个变量名，因此**不支持配对 t 检验**（其语法为
+    ``ttest var1 == var2``）。需要配对检验时请直接用
+    ``stata_run("ttest before == after")``。
 
     Args:
-        varname: 要检验的变量名。
-        byvar: 分组变量（可选，用于独立样本 t 检验）。
-        options: 额外选项，如 "unequal"。
+        varname: 要检验的变量名（单个）。
+        byvar: 分组变量（可选）。给出时做独立样本 t 检验，否则做单样本检验。
+        options: 额外选项，如 "unequal"、"level(90)"。
         condition: if 条件子句（可选）。例："!missing(price)".
 
     Returns:
@@ -1893,6 +2033,12 @@ def stata_graph(
     try:
         if "\x00" in command or "\n" in command or "\r" in command:
             return _make_error_result("错误: command 包含非法控制字符")
+        # command 是自由文本，会被原样拼进要执行的命令串（导出模式下还会进入
+        # 临时 do 文件），因此必须与 stata_run 走同一层护栏 —— 实测
+        # stata_graph(command='!touch /tmp/x') 曾能真实创建文件。
+        # 同样要校验解析后的块：`sh/*x*/ell …` 在原始文本里不含 shell 一词。
+        if reason := _validate_command_blocks(command):
+            return _make_error_result(reason)
         if err := _validate_scheme_name(scheme):
             return _result_or_error(err)
         if export:
@@ -2053,16 +2199,26 @@ def stata_export_excel(
                 f'export excel using "{export_path}", {replace_opt} {firstrow_opt} sheet("{sheet}")'
             )
 
+    # 导出成败以「文件是否被这次调用写入」为准，不能只看文件是否存在：
+    # 上次运行留下的同名文件会把失败伪装成成功。实测 rc=997（崩溃已恢复、
+    # 命令未执行）时，旧文件仍在，原实现回报「已导出 28 B」。
+    before_ns = _mtime_ns(export_path) if os.path.isfile(export_path) else None
+
     result = _run_stata_command(cmd, timeout=120)
 
     # 若 _run_stata_command 已标记错误，直接透传
     if isinstance(result, ToolResult):
         return result
 
-    # 验证文件已生成；仅在 Stata 未报错时追加成功提示，避免 replace=False 已存在文件时误判
-    if os.path.isfile(export_path) and "[返回码:" not in result:
-        return f"{changed_msg}已导出 {_format_size(export_path)} -> {export_path}\n{result}"
-    return changed_msg + result
+    if not _file_written_since(export_path, before_ns):
+        hint = ""
+        if before_ns is not None and not replace:
+            hint = "\n提示：目标文件已存在且 replace=False，如需覆盖请传 replace=True。"
+        return _make_error_result(
+            f"错误: 导出失败，未写入文件 {export_path}{hint}\n{changed_msg}{result.strip()}"
+        )
+
+    return f"{changed_msg}已导出 {_format_size(export_path)} -> {export_path}\n{result}"
 
 
 # =============================================================================
@@ -2188,24 +2344,36 @@ def stata_ping() -> str | ToolResult:
     """心跳检测 — 快速测试 Stata MCP Server 是否存活。
 
     执行一个极简的 Stata 命令(display 42)并返回。
-    如果 Stata DLL 已崩溃或 MCP 连接已断开，此工具会报错。
+    DLL 已崩溃或无响应时返回 MCP 错误结果（isError=true）并附带诊断输出。
 
     Returns:
-        "pong" + 当前 Stata 版本信息。
+        存活时返回 "pong | Stata <版本> | alive"；异常时返回错误结果。
     """
+    global _last_ping_time
     try:
         with _stata_lock:
             rc, result = _execute_single("display 42")
         version = getattr(config, "stversion", "?")
         edition = getattr(config, "stedition", "?")
-        ok = rc in (0, STATA_RC_NO_OUTPUT) and "42" in result
-        if ok:
-            # 回写 ping 缓存，使紧接着的 _execute_safe 跳过重复心跳
+        if rc in (0, STATA_RC_NO_OUTPUT) and "42" in result:
+            # 回写 ping 缓存，使紧接着的 _execute_safe 跳过重复心跳。
+            # 必须有上面的 global 声明，否则赋的是函数局部变量，这项优化从未生效。
             with _ping_lock:
                 _last_ping_time = time.time()
-        status = "alive" if ok else "degraded"
-        return f"pong | Stata {version} {edition} | {status}"
+            return f"pong | Stata {version} {edition} | alive"
+        # 探测失败即 DLL 不可用：必须标记 isError，否则调用方看到以 "pong" 开头的
+        # 普通字符串会以为一切正常，而 degraded 只藏在末尾。同时把 _execute_single
+        # 的原始输出带出去 —— 那里才有崩溃/超时的线索。
+        with _ping_lock:
+            _last_ping_time = 0.0
+        return _make_error_result(
+            f"Stata 心跳失败（degraded）| Stata {version} {edition} | 返回码 {rc}\n"
+            f"探测输出: {result.strip()[:300] or '(无输出)'}\n"
+            "建议: 若持续失败请重启 MCP Server。"
+        )
     except Exception as e:
+        with _ping_lock:
+            _last_ping_time = 0.0
         return _make_error_result(f"Stata 心跳失败: {type(e).__name__}: {e}")
 
 

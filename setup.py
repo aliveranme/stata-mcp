@@ -10,12 +10,11 @@ Stata MCP Server — 一键安装配置脚本
   5. 验证服务器可正常启动
 """
 
-import sys
 import os
-import subprocess
 import shutil
+import subprocess
+import sys
 import tempfile
-from pathlib import Path
 
 # Python 版本要求，需与 pyproject.toml 中的 requires-python 保持一致
 MIN_PYTHON_VERSION = (3, 10)
@@ -43,6 +42,10 @@ if sys.platform == "win32":
         "C:/Program Files (x86)/StataNow19.5",
         "C:/Program Files (x86)/StataNow19",
         "C:/Program Files/StataNow",
+        # 嵌套一层的安装布局 —— 正是 CLAUDE.md / README 里写的 STATA_HOME 默认值
+        "C:/Program Files/StataNow/StataNow19",
+        "C:/Program Files/StataNow/StataNow19.5",
+        "C:/Program Files/StataNow/StataNow18",
         "D:/StataNow19.5",
         "D:/StataNow19",
         "D:/StataNow",
@@ -73,34 +76,61 @@ if sys.platform == "win32":
         "D:/StataBE17",
     ]
 elif sys.platform == "darwin":
+    # 必须是含 utilities/pystata 的**安装根目录**，不是 .app bundle 内部 ——
+    # StataMP.app/Contents/MacOS 下只有可执行文件与 dylib，没有 utilities。
     STATA_COMMON_PATHS = [
-        "/Applications/Stata/StataNow.app/Contents/MacOS",
-        "/Applications/Stata/StataNow19.app/Contents/MacOS",
-        "/Applications/Stata/StataNow19.5.app/Contents/MacOS",
-        "/Applications/Stata/Stata18.app/Contents/MacOS",
-        "/Applications/Stata/Stata17.app/Contents/MacOS",
-        "/Applications/Stata/StataMP18.app/Contents/MacOS",
-        "/Applications/Stata/StataSE18.app/Contents/MacOS",
-        "/Applications/Stata/StataBE18.app/Contents/MacOS",
+        "/Applications/Stata",
+        "/Applications/StataNow",
+        "/Applications/Stata19",
+        "/Applications/Stata18",
+        "/Applications/Stata17",
+        os.path.expanduser("~/Applications/Stata"),
+        os.path.expanduser("~/Applications/StataNow"),
     ]
 else:
     STATA_COMMON_PATHS = [
         "/usr/local/stata",
-        "/usr/local/stata17",
+        "/usr/local/stata19",
         "/usr/local/stata18",
+        "/usr/local/stata17",
         "/opt/stata",
-        "/opt/stata17",
+        "/opt/stata19",
         "/opt/stata18",
+        "/opt/stata17",
     ]
 
 STATA_EDITIONS = ["mp", "se", "be"]
 
 
+def _edition_artifacts(root, edition):
+    """返回该 edition 在当前平台上的特征文件候选（存在任一即视为该版本可用）。
+
+    Stata 的运行时文件命名随平台而变，只查 ``{edition}-64.dll`` 会让检测在
+    macOS 与 Linux 上永远失败（实测 macOS 上 ``find_stata_installation``
+    因此返回 ``(None, None)``，手动指定根目录也会被 ``verify_stata`` 拒绝）：
+
+    - Windows: ``<root>/mp-64.dll``
+    - macOS:   ``<root>/StataMP.app/Contents/MacOS/libstata-mp.dylib``
+    - Linux:   ``<root>/libstata-mp.so`` 或可执行文件 ``<root>/stata-mp``
+    """
+    if sys.platform == "win32":
+        return [os.path.join(root, f"{edition}-64.dll")]
+    if sys.platform == "darwin":
+        app = os.path.join(root, f"Stata{edition.upper()}.app")
+        return [
+            os.path.join(app, "Contents", "MacOS", f"libstata-{edition}.dylib"),
+            app,
+        ]
+    return [
+        os.path.join(root, f"libstata-{edition}.so"),
+        os.path.join(root, f"stata-{edition}"),
+    ]
+
+
 def _detect_edition(path):
     """检测路径中可用的 Stata 版本（mp/se/be），优先 mp。"""
     for edition in STATA_EDITIONS:
-        dll = os.path.join(path, f"{edition}-64.dll")
-        if os.path.isfile(dll):
+        if any(os.path.exists(p) for p in _edition_artifacts(path, edition)):
             return edition
     return None
 
@@ -110,16 +140,12 @@ def _edition_with_warning(path):
     edition = _detect_edition(path)
     if edition is not None:
         return edition
-    has_any_dll = any(
-        os.path.isfile(os.path.join(path, f"{e}-64.dll")) for e in STATA_EDITIONS
-    )
-    if not has_any_dll:
-        print(
-            yellow(
-                f"⚠ 无法从 {path} 检测 Stata 版本（未找到 mp/se/be-64.dll），"
-                f"将默认使用 mp。若启动失败请手动设置 STATA_EDITION 环境变量。"
-            )
+    print(
+        yellow(
+            f"⚠ 无法从 {path} 检测 Stata 版本（mp/se/be 的运行时文件均未找到），"
+            f"将默认使用 mp。若启动失败请手动设置 STATA_EDITION 环境变量。"
         )
+    )
     return "mp"
 
 
@@ -139,22 +165,44 @@ def find_stata_installation():
             if edition and os.path.isdir(utilities):
                 return path, edition
 
-    # 3. 搜索 Program Files 及常见根目录（只进入以 "Stata" 开头的目录）
-    prog = os.environ.get("ProgramFiles", "C:/Program Files")
-    prog_x86 = os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")
-    for base in [prog, prog_x86, "D:/", "E:/"]:
+    # 3. 扫描当前平台的应用基目录（只进入以 "Stata" 开头的目录）
+    if sys.platform == "win32":
+        prog = os.environ.get("ProgramFiles", "C:/Program Files")
+        prog_x86 = os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")
+        search_bases = [prog, prog_x86, "D:/", "E:/"]
+    elif sys.platform == "darwin":
+        search_bases = ["/Applications", os.path.expanduser("~/Applications")]
+    else:
+        search_bases = ["/usr/local", "/opt"]
+    def _looks_like_stata_root(candidate):
+        edition = _detect_edition(candidate)
+        utilities = os.path.join(candidate, "utilities", "pystata")
+        return edition if (edition and os.path.isdir(utilities)) else None
+
+    for base in search_bases:
         if not os.path.isdir(base):
             continue
         try:
             for entry in os.listdir(base):
                 # 限定只扫描名称以 Stata 开头的目录，避免遍历无关文件夹
-                if entry.lower().startswith("stata"):
-                    full = os.path.join(base, entry)
-                    if os.path.isdir(full):
-                        edition = _detect_edition(full)
-                        utilities = os.path.join(full, "utilities", "pystata")
-                        if edition and os.path.isdir(utilities):
-                            return full, edition
+                if not entry.lower().startswith("stata"):
+                    continue
+                full = os.path.join(base, entry)
+                if not os.path.isdir(full):
+                    continue
+                if edition := _looks_like_stata_root(full):
+                    return full, edition
+                # 再下探一层：常见的嵌套布局如
+                # C:/Program Files/StataNow/StataNow19（也是文档给出的默认值）
+                try:
+                    for sub in os.listdir(full):
+                        if not sub.lower().startswith("stata"):
+                            continue
+                        nested = os.path.join(full, sub)
+                        if os.path.isdir(nested) and (edition := _looks_like_stata_root(nested)):
+                            return nested, edition
+                except (PermissionError, OSError):
+                    continue
         except PermissionError:
             continue
 
@@ -163,11 +211,11 @@ def find_stata_installation():
 
 def verify_stata(path, edition="mp"):
     """验证 Stata 安装是否包含必要组件。"""
-    dll = os.path.join(path, f"{edition}-64.dll")
+    artifacts = _edition_artifacts(path, edition)
     pystata = os.path.join(path, "utilities", "pystata")
     errors = []
-    if not os.path.isfile(dll):
-        errors.append(f"缺少 {edition}-64.dll: {dll}")
+    if not any(os.path.exists(p) for p in artifacts):
+        errors.append(f"缺少 {edition} 版运行时（已查找：{'、'.join(artifacts)}）")
     if not os.path.isdir(pystata):
         errors.append(f"缺少 pystata: {pystata}")
     return errors
@@ -182,10 +230,25 @@ def setup_venv(project_root):
     venv_dir = os.path.join(project_root, "mcp-stata-server", ".venv")
 
     if os.path.isdir(venv_dir):
-        print(f"  {green('✓')} 虚拟环境已存在: {venv_dir}")
-        return venv_dir
+        # 只看目录存在不够：中断的创建、或用已删除的 Python 建的 venv 都会留下
+        # 一个没有可用解释器的空壳，后续 install_deps 会以未捕获的
+        # FileNotFoundError 抛栈退出，而不是给出可操作提示。
+        existing_python = get_python_exe(venv_dir)
+        if os.path.isfile(existing_python):
+            print(f"  {green('✓')} 虚拟环境已存在: {venv_dir}")
+            return venv_dir
+        print(
+            f"  {yellow('⚠')} {venv_dir} 存在但缺少解释器 "
+            f"（{existing_python}），判定为残缺环境，正在重建..."
+        )
+        try:
+            shutil.rmtree(venv_dir)
+        except OSError as e:
+            print(f"  {red('✗')} 无法删除残缺的虚拟环境: {e}")
+            print(f"    请手动删除 {venv_dir} 后重新运行 setup.py")
+            return None
 
-    print(f"  正在创建虚拟环境...")
+    print("  正在创建虚拟环境...")
     result = subprocess.run(
         [sys.executable, "-m", "venv", venv_dir],
         capture_output=True,
@@ -213,7 +276,7 @@ def install_deps(venv_dir, project_root):
 
     # 先尝试 uv（更可靠）
     if shutil.which("uv"):
-        print(f"  使用 uv 安装 fastmcp...")
+        print("  使用 uv 安装 fastmcp...")
         result = subprocess.run(
             ["uv", "pip", "install", "fastmcp", "--python", get_python_exe(venv_dir)],
             cwd=server_dir,
@@ -252,35 +315,71 @@ def install_deps(venv_dir, project_root):
 # =============================================================================
 
 def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
-    """生成 .mcp.json 配置文件。"""
+    """写入 .mcp.json 中的 stata 条目，保留文件里的其他内容。
+
+    不能整文件覆盖：同一个 .mcp.json 里可能还配置了别的 MCP Server，而
+    stata.env 里也可能有用户按本函数末尾提示手动添加的
+    STATA_ALLOWED_ROOTS / STATA_ALLOW_UNC —— 重跑 setup.py 会把它们一起抹掉。
+    """
+    import json
+
     server_script = os.path.join(project_root, "mcp-stata-server", "server.py")
     server_script = os.path.normpath(server_script).replace("\\", "/")
 
-    mcp_config = {
-        "mcpServers": {
-            "stata": {
-                "command": python_exe.replace("\\", "/"),
-                "args": [server_script],
-                "env": {
-                    "STATA_HOME": stata_home.replace("\\", "/"),
-                    "STATA_EDITION": stata_edition
-                }
-            }
-        }
-    }
-
-    import json
     mcp_json_path = os.path.join(project_root, ".mcp.json")
+
+    existing = {}
+    if os.path.isfile(mcp_json_path):
+        try:
+            with open(mcp_json_path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (OSError, json.JSONDecodeError) as e:
+            # 文件损坏时不静默丢弃用户数据，先备份再重建
+            backup = mcp_json_path + ".bak"
+            try:
+                shutil.copy2(mcp_json_path, backup)
+                print(f"  {yellow('⚠')} 现有 .mcp.json 无法解析（{e}），已备份为 {backup}")
+            except OSError:
+                print(f"  {yellow('⚠')} 现有 .mcp.json 无法解析（{e}），将被覆盖")
+
+    servers = existing.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+
+    prev_env = {}
+    prev_stata = servers.get("stata")
+    if isinstance(prev_stata, dict) and isinstance(prev_stata.get("env"), dict):
+        prev_env = dict(prev_stata["env"])
+    # 保留用户自行添加的环境变量（如沙箱白名单），只更新本脚本负责的两项
+    prev_env["STATA_HOME"] = stata_home.replace("\\", "/")
+    prev_env["STATA_EDITION"] = stata_edition
+
+    servers["stata"] = {
+        "command": python_exe.replace("\\", "/"),
+        "args": [server_script],
+        "env": prev_env,
+    }
+    existing["mcpServers"] = servers
+
     with open(mcp_json_path, "w", encoding="utf-8") as f:
-        json.dump(mcp_config, f, indent=2, ensure_ascii=False)
+        json.dump(existing, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    print(f"  {green('✓')} .mcp.json 已生成")
+    others = [k for k in servers if k != "stata"]
+    print(f"  {green('✓')} .mcp.json 已更新")
     print(f"    Stata: {stata_home}")
     print(f"    Python: {python_exe}")
-    print(f"  {yellow('可选环境变量')} （可手动添加至 .mcp.json 的 stata.env 中）：")
-    print(f"    STATA_ALLOWED_ROOTS  分号分隔的路径沙箱白名单，例: C:/data;D:/projects")
-    print(f"    STATA_ALLOW_UNC      设为 1 允许 UNC 网络路径（默认禁止）")
+    if others:
+        print(f"    已保留其他 MCP Server: {', '.join(others)}")
+    extra_env = [k for k in prev_env if k not in ("STATA_HOME", "STATA_EDITION")]
+    if extra_env:
+        print(f"    已保留自定义环境变量: {', '.join(extra_env)}")
+    else:
+        print(f"  {yellow('可选环境变量')} （可手动添加至 .mcp.json 的 stata.env 中）：")
+        print("    STATA_ALLOWED_ROOTS  分号分隔的路径沙箱白名单，例: C:/data;D:/projects")
+        print("    STATA_ALLOW_UNC      设为 1 允许 UNC 网络路径（默认禁止）")
 
     return mcp_json_path
 
@@ -296,13 +395,12 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
     在子进程中执行以避免污染主进程状态。
     临时脚本写入系统临时目录，避免在项目目录中残留。
     """
-    import json
     server_script = os.path.join(project_root, "mcp-stata-server", "server.py")
     env = os.environ.copy()
     env["STATA_HOME"] = stata_home
     env["STATA_EDITION"] = stata_edition
 
-    print(f"  正在测试服务器...")
+    print("  正在测试服务器...")
 
     # 写入系统临时目录，测试结束后显式删除
     test_script = None
@@ -348,9 +446,11 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
         else:
             print(f"  {red('✗')} 服务器测试失败")
             if result.stderr.strip():
-                lines = [l for l in result.stderr.strip().split("\n") if "TOOLS:" not in l]
-                for l in lines[-3:]:
-                    print(f"    {l[:200]}")
+                lines = [
+                    ln for ln in result.stderr.strip().split("\n") if "TOOLS:" not in ln
+                ]
+                for ln in lines[-3:]:
+                    print(f"    {ln[:200]}")
             return False
     finally:
         if test_script and os.path.isfile(test_script):
@@ -449,13 +549,13 @@ def main():
     print("  2. 测试：输入 '帮我加载 auto.dta 数据并做描述统计'")
     print()
     print(f"配置已保存到: {os.path.join(project_root, '.mcp.json')}")
-    print(f"如需修改 Stata 路径，编辑此文件的 STATA_HOME 环境变量即可")
+    print("如需修改 Stata 路径，编辑此文件的 STATA_HOME 环境变量即可")
     print()
-    print(f"环境变量说明：")
-    print(f"  STATA_HOME           Stata 安装目录（默认自动检测）")
-    print(f"  STATA_EDITION        Stata 版本 mp/se/be（默认 mp）")
-    print(f"  STATA_ALLOWED_ROOTS  路径沙箱白名单，分号分隔（可选，不设则无沙箱限制）")
-    print(f"  STATA_ALLOW_UNC      设为 1 允许 UNC 网络路径（可选，默认禁止）")
+    print("环境变量说明：")
+    print("  STATA_HOME           Stata 安装目录（默认自动检测）")
+    print("  STATA_EDITION        Stata 版本 mp/se/be（默认 mp）")
+    print("  STATA_ALLOWED_ROOTS  路径沙箱白名单，分号分隔（可选，不设则无沙箱限制）")
+    print("  STATA_ALLOW_UNC      设为 1 允许 UNC 网络路径（可选，默认禁止）")
     print()
 
     return 0

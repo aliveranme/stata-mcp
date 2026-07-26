@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from server import (
+    _TRUNCATION_NOTICE,
+    MAX_OUTPUT_CHARS,
     STATA_RC_NO_OUTPUT,
     _describe_empty_result,
     _execute_safe,
@@ -270,3 +272,70 @@ def test_describe_empty_result_survives_probe_failure():
 def test_describe_empty_result_ignores_probe_error_rc():
     with patch("server._execute_single", return_value=(198, "")):
         assert _describe_empty_result() == "(命令执行成功，无文本输出)"
+
+
+# --- 输出硬上限 --------------------------------------------------------------
+# 上限一度形同虚设：旧实现先整块 write 再判断总长，只能停止继续收集，拦不住
+# 已进入缓冲的部分。实测 19980 obs 的 list 单次返回 1,270,888 字符（超限 10.6 倍），
+# 而 _last_output / stata_more(page=0) 会把这一整坨原样交给 MCP 客户端。
+
+
+def test_execute_single_truncates_single_oversized_chunk(exec_mocks):
+    """单次 get_output 就超上限时，必须在写入时裁剪，而不是只停止收集。"""
+    huge = "x" * (MAX_OUTPUT_CHARS * 3)
+    exec_mocks["execute"].return_value = 0
+    exec_mocks["get_output"].side_effect = [huge, None, None, None]
+    _rc, out = _execute_single("list")
+    assert len(out) <= MAX_OUTPUT_CHARS + len(_TRUNCATION_NOTICE)
+    assert "输出已截断" in out
+    assert out.count("x") == MAX_OUTPUT_CHARS
+
+
+def test_execute_single_truncates_accumulated_chunks(exec_mocks):
+    """多次小块累积到上限时同样在边界处裁剪。"""
+    chunk = "y" * (MAX_OUTPUT_CHARS // 2)
+    exec_mocks["execute"].return_value = 0
+    exec_mocks["get_output"].side_effect = [chunk, chunk, chunk, None, None, None]
+    _rc, out = _execute_single("list")
+    assert out.count("y") == MAX_OUTPUT_CHARS
+    assert "输出已截断" in out
+
+
+def test_execute_single_truncates_drain_tail(exec_mocks):
+    """阶段 2 清尾拿回的残留同样受上限约束。"""
+    exec_mocks["execute"].return_value = 0
+    exec_mocks["get_output"].side_effect = ["head\n", None, None, None]
+    exec_mocks["drain"].return_value = "z" * (MAX_OUTPUT_CHARS * 2)
+    _rc, out = _execute_single("list")
+    assert len(out) <= MAX_OUTPUT_CHARS + len(_TRUNCATION_NOTICE)
+    assert "输出已截断" in out
+
+
+def test_truncation_notice_is_actionable():
+    """只说「已截断」会让调用方反复翻页找不存在的后半段。"""
+    assert "缩小范围" in _TRUNCATION_NOTICE
+    assert str(MAX_OUTPUT_CHARS) in _TRUNCATION_NOTICE
+
+
+def test_execute_single_under_limit_has_no_notice(exec_mocks):
+    exec_mocks["execute"].return_value = 0
+    exec_mocks["get_output"].side_effect = ["short output", None, None, None]
+    _rc, out = _execute_single("display 1")
+    assert "输出已截断" not in out
+
+
+# --- 超时提示 ----------------------------------------------------------------
+
+
+def test_execute_single_timeout_message_names_the_timeout(exec_mocks):
+    """看门狗 break 后 Stata 只给通用 rc=1，单看返回码会让人去查语法。"""
+    import time
+
+    def slow(*_a, **_kw):
+        time.sleep(0.3)
+        return 1
+
+    exec_mocks["execute"].side_effect = slow
+    _rc, out = _execute_single("forvalues i=1/1e9 {", timeout=0)
+    assert "超过 0s 上限已被中断" in out
+    assert "timeout" in out

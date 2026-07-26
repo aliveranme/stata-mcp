@@ -428,12 +428,37 @@ def test_stata_ping_alive_when_42_in_output():
     with patch("server._execute_single", return_value=(0, "42")):
         result = stata_ping()
     assert "alive" in result
+    assert not getattr(result, "is_error", False)
 
 
-def test_stata_ping_degraded_when_no_42():
-    with patch("server._execute_single", return_value=(0, "")):
+def test_stata_ping_writes_cache_on_success():
+    """回写 ping 缓存曾因漏写 global 而写进函数局部变量，优化从未生效。"""
+    import server
+
+    server._last_ping_time = 0.0
+    with patch("server._execute_single", return_value=(0, "42")):
+        stata_ping()
+    assert server._last_ping_time > 0, "成功心跳必须回写模块级缓存"
+
+
+def test_stata_ping_reports_error_when_dll_unresponsive():
+    """DLL 不可用时必须标 isError：以 'pong' 开头的普通串会让调用方以为一切正常。"""
+    with patch("server._execute_single", return_value=(999, "StataSO_Execute 崩溃: boom")):
         result = stata_ping()
-    assert "degraded" in result
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert not text.startswith("pong")
+    assert "崩溃" in text, "必须带出探测的原始诊断，而不是丢弃"
+
+
+def test_stata_ping_clears_cache_on_failure():
+    """失败时必须清空缓存，否则后续 _execute_safe 会跳过心跳继续打死掉的 DLL。"""
+    import server
+
+    server._last_ping_time = 1.0
+    with patch("server._execute_single", return_value=(0, "")):
+        stata_ping()
+    assert server._last_ping_time == 0.0
 
 
 def test_stata_ping_returns_error_on_exception():
@@ -556,3 +581,105 @@ def test_list_packages_uses_ado_dir():
     with patch("server._run_stata_command") as mock_run:
         stata_list_packages()
         assert mock_run.call_args[0][0] == "ado dir"
+
+
+# --- stata_graph 的 command 是自由文本，须与 stata_run 同层护栏 -----------------
+# 实测 stata_graph(command='!touch /tmp/x') 曾真实创建文件：该参数被原样拼进
+# 执行串（导出模式下还进入临时 do 文件），而危险前缀检查此前只在 stata_run 里做。
+
+
+def test_graph_rejects_shell_out_in_command():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_graph("!touch /tmp/pwned")
+    assert getattr(result, "is_error", False)
+    assert "危险前缀" in _result_text(result)
+    mock_run.assert_not_called()
+
+
+def test_graph_rejects_shell_out_in_export_mode():
+    """导出模式会把 command 放进复合块 → 临时 do 文件，同样必须拦。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_graph("!touch /tmp/pwned", export=abs_path("out", "f.png"), replace=True)
+    assert getattr(result, "is_error", False)
+    assert "危险前缀" in _result_text(result)
+    mock_run.assert_not_called()
+
+
+def test_graph_rejects_mata_in_command():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_graph('mata: _stata("!rm -rf /")')
+    assert getattr(result, "is_error", False)
+    assert "Mata" in _result_text(result)
+    mock_run.assert_not_called()
+
+
+def test_graph_still_accepts_normal_plot_command():
+    with patch("server._run_stata_command") as mock_run:
+        stata_graph("twoway scatter price weight")
+        assert "twoway scatter price weight" in mock_run.call_args[0][0]
+
+
+# --- 导出成败以文件是否被写入为准 ---------------------------------------------
+
+
+def test_export_excel_detects_stale_file_on_recovered_crash(tmp_path):
+    """rc=997（崩溃已恢复、命令未执行）时，上次留下的同名文件不能算成功。"""
+    target = tmp_path / "out.xlsx"
+    target.write_text("STALE DATA FROM PREVIOUS RUN")
+    crash_out = "StataSO_Execute 崩溃: boom\n(Stata 已自动恢复，请重试命令)"
+    with patch("server._run_stata_command", return_value=crash_out):
+        result = stata_export_excel(str(target), replace=True)
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "未写入文件" in text
+    assert "已导出" not in text
+    assert target.read_text() == "STALE DATA FROM PREVIOUS RUN"
+
+
+def test_export_excel_detects_refused_overwrite(tmp_path):
+    target = tmp_path / "out.xlsx"
+    target.write_text("existing")
+    with patch("server._run_stata_command", return_value="file already exists\nr(602);"):
+        result = stata_export_excel(str(target), replace=False)
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "replace=True" in text
+
+
+def test_export_excel_succeeds_when_file_freshly_written(tmp_path):
+    target = tmp_path / "out.xlsx"
+
+    def _write(*_a, **_kw):
+        target.write_bytes(b"x" * 2048)
+        return "file saved"
+
+    with patch("server._run_stata_command", side_effect=_write):
+        result = stata_export_excel(str(target), replace=True)
+    assert not getattr(result, "is_error", False)
+    assert "已导出 2.0 KB" in _result_text(result)
+
+
+def test_export_excel_rejects_varlist_path_injection(tmp_path):
+    """varlist 注入应在拼命令之前就被拦下。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_export_excel(
+            str(tmp_path / "safe.xlsx"),
+            varlist="mpg using /tmp/evil/out.xlsx, replace //",
+        )
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_run_blocks_comment_masked_shell_out():
+    """stata_run 必须按解析后的块校验：sh/*x*/ell 在原文里不含 shell 一词。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run("sh/*x*/ell echo pwned")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_graph_blocks_comment_masked_shell_out():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_graph("/* x */ !touch /tmp/pwned")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()

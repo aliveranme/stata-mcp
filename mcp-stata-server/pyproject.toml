@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "MCP server that drives Stata via the pystata DLL bridge"
 requires-python = ">=3.10"
 dependencies = [
-    "fastmcp>=3.0.0",
+    # server.py 从 fastmcp.tools.base 导入 ToolResult，该模块在 3.2.0 才出现。
+    # 实测 3.0.0 / 3.1.0 均 ModuleNotFoundError，import 阶段即崩，不能放宽下界。
+    "fastmcp>=3.2.0",
 ]
 
 [project.optional-dependencies]

@@ -118,7 +118,7 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 ### 通用执行
 | 工具 | 说明 |
 |------|------|
-| `stata_run` | **执行常见 Stata 命令**（含分页，自动拦截 !/shell/python: 等危险前缀） |
+| `stata_run` | **执行常见 Stata 命令**（含分页，自动拦截 `!`/`shell`/`winexec`/`python:`/`mata` 等危险前缀） |
 | `stata_run_do_file` | 执行 .do 文件 |
 | `stata_graph` | 生成图形（destructiveHint=True，`replace` 默认 False）；推荐 `export` 参数直接导出，支持 `height`。注意：`export` 模式会自动用 `{ }` 包装命令，请勿在 `command` 中手动包含未转义的 `}`。 |
 | `stata_more` | **翻页浏览大输出** |
@@ -199,6 +199,8 @@ stata-mcp/
 |------|--------|------|
 | `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。环境变量优先级最高；未设置时由 `setup.py` 自动检测，手动安装可覆盖。 |
 | `STATA_EDITION` | `mp` | Stata 版本（mp/se/be） |
+| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。未设置时不限制绝对路径。 |
+| `STATA_ALLOW_UNC` | 未设置 | 设为 `1` 允许 UNC 网络路径，默认拒绝。 |
 
 ## 开发
 

@@ -25,6 +25,10 @@ Thumbs.db
 
 # Test output
 _test_output/
+# CI 覆盖率产物（.coverage 是二进制 SQLite）
+.coverage
+coverage.xml
+htmlcov/
 
 # Claude Code
 .claude/workspace/

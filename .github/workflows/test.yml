@@ -33,6 +33,9 @@ jobs:
       - name: Lint with ruff
         run: |
           ruff check .
+          # setup.py 在仓库根，不在本 job 的 working-directory 下；
+          # 它是每个新用户第一个运行的脚本，必须一并检查
+          ruff check --config pyproject.toml ../setup.py
 
       - name: Test with pytest
         run: |

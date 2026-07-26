@@ -45,6 +45,8 @@ stata-mcp/
 |------|------|------|
 | `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。优先级：环境变量 > `setup.py` 自动检测 > 该默认值；手动安装时可在 `.mcp.json` 中覆盖。 |
 | `STATA_EDITION` | `mp` | 版本 (mp/se/be) |
+| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。**未设置时不限制任何绝对路径**，`_is_path_allowed` 直接放行 —— 文档中「沙箱校验」的说法只在配置了此变量时才有实际约束力。 |
+| `STATA_ALLOW_UNC` | 未设置（=拒绝） | 设为 `1` 时允许 UNC 网络路径（`\\server\share`），默认拒绝。 |
 
 ## 关键设计决策
 
@@ -77,8 +79,12 @@ stata-mcp/
 
 ### 安全护栏
 
-- `stata_run` 会拦截行首 `!`、`shell`、`python:`、`python (` 及裸 `python` 等可能导致主机命令执行的前缀。如确需此类操作，请通过操作系统直接执行，不要经由 Stata MCP。
-- 所有结构化参数（`varlist`、`condition`、`options`、`in_range` 等）会拒绝换行、空字节、分号、`!`、`|`、`&`、反引号、`$`。
+- `_has_dangerous_command_prefix` 逐行做**行首**匹配，拦截 `!`、`shell`、`winexec`、`python:`、`python (`、裸 `python`，以及一切 `mata` 开头的命令。如确需此类操作，请通过操作系统或 Stata 界面直接执行，不要经由 Stata MCP。
+- **接受自由文本命令的工具都必须过这层护栏**：目前是 `stata_run` 与 `stata_graph(command=)`。`stata_graph` 曾遗漏该检查，实测 `stata_graph(command='!touch /tmp/x')` 能真实创建文件 —— 该参数会被原样拼进执行串，导出模式下还会进入临时 do 文件。新增此类参数时务必同步加检查。
+- **Mata 与内嵌 Python 同等禁止**：Mata 是可执行任意代码的子语言，块内 `_stata("...")` 能调用任意 Stata 命令（含 `!` shell out），`unlink()` / `fopen()` 能直接读写文件，而行首前缀匹配对块内代码完全无效。为策略一致，`mata describe` 这类只读子命令也一并拒绝。
+- 结构化参数的校验强度**不一致，且必须如此**：`condition` / `options` 只拒绝换行、回车、空字节、分号（要留出表达式与宏展开的空间）；`varlist` 另外拒绝 `!`、`|`、`&`、反引号、`$`、`/`、`,` 和独立的 `using`。
+- **`varlist` 的额外三条不是洁癖，是路径沙箱的一部分**：varlist 会被拼进 `export excel <varlist> using "<已校验路径>"`。实测 `varlist='mpg using /evil/out.xlsx, replace //'` 可构造出 `export excel mpg using /evil/out.xlsx, replace // using "<安全路径>"` —— `//` 把经 `_validate_path` 校验的路径整段注释掉，数据落到攻击者指定位置。`/`、`,`、`using` 在合法 varlist 里都没有用途，直接拒绝。
+- `condition` 不需要这层限制：它总是拼在命令中部（`summarize price if <condition>`），而 `!` 只有出现在**行首**才 shell out；实测 `condition='price > 0 | !touch /tmp/x'` 会被 Stata 当变量名解析失败（r(111)），不会执行命令。
 - 路径参数会拒绝空字节、双引号、分号、UNC 路径（默认）及越界的相对路径 `..`。`use_dataset`/`run_do_file` 的相对路径在锁内用 Stata cwd 解析并经沙箱权威校验（见「路径安全校验」）。安装源仅允许 `ssc` 或字符受限的 `https://` URL（禁止 `)`、`(`、空白、引号、`;`、`` ` ``、`$`，防止提前闭合 `from()`）。`export excel` 的 `sheet` 名用双引号包裹并拒绝 `"`、`)`、换行、分号。
 
 ### Ping 缓存与失效
@@ -199,7 +205,7 @@ Stata 命令执行异常链:
     → _parse_command_blocks()   # 解析 /// 续行和 { } 复合块
     → _execute_single()
         → _drain_output()       # 清洁缓冲
-        → watchdog (30s)        # time-thread.Event → StataSO_SetBreak
+        → watchdog (默认 60s)   # threading.Event → StataSO_SetBreak
         → RedirectOutput        # 防 stdout 污染
         → StataSO_Execute       # try/except
         → _drain_output(if break)  # break 后排空错误残渣
@@ -219,7 +225,9 @@ Stata 命令执行异常链:
 - `stata_list` 默认仅显示前 10 条
 - `stata_list(n=0)` 显示全部（>4K 字符自动分页）
 - `stata_more(page=N)` 翻页，`page=0` 显示全部
-- 输出上限 120K 字符（Claude Code 约束）
+- **输出硬上限 120K 字符**（Claude Code 约束）：超出部分在**收集时**即被裁掉并附可操作提示，`_last_output` 缓存与 `stata_more(page=0)` 同样受此上限约束 —— 超限的后半段是真的丢了，翻页也找不回来。
+  这条上限一度形同虚设：旧实现先整块写入缓冲再判断总长，只能停止继续收集，拦不住已进入缓冲的部分。实测 19980 obs 的 `list` 单次返回 1,270,888 字符，超上限 10.6 倍。
+- 大数据集上**不要**用 `stata_list(n=0)`，先 `in_range` 限定观测或改用汇总命令
 - 任何时候优先 `summarize` / `tabulate` / `codebook` 而非 `list`
 
 ## 工具调用效率
@@ -239,7 +247,9 @@ Stata 命令执行异常链:
 
 ### 图形导出最佳实践
 ```stata
-* ✅ 推荐：使用 stata_graph 的 export 参数（自动用 { } 复合块，无临时文件）
+* ✅ 推荐：使用 stata_graph 的 export 参数（自动包成 { } 复合块，原子执行）
+*    注：复合块本身是多行，同样经 _materialize_block 落临时 do 文件后 include，
+*    文件在命令执行完立即删除
 stata_graph(command="twoway scatter price weight", export="graph.png", scheme="economist")
 
 * ✅ 也支持：在 stata_run 中用 { } 复合块（整块写入临时 do 文件执行）
@@ -282,6 +292,20 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | `stata_export_excel(results=True)` 探测失效 | `capture which estout` 装与不装都返回 rc=0 | 改用裸 `which estout`（装=0，未装=111） |
 | `stata_status` 悄悄重置工作目录 | 裸 `cd` 会切到 home，却被当成查询命令使用 | 改用 `display c(pwd)` |
 | 无数据时回「执行成功，无文本输出」 | Stata 对空数据集的 summarize 既不报错也无输出 | `_describe_empty_result` 用 `c(N)` 判定并给出载入指引 |
+| `stata_graph(command='!…')` 可执行主机命令 | 危险前缀检查只在 `stata_run` 做，`stata_graph` 的自由文本 command 漏检 | `stata_graph` 接入同一护栏 |
+| `mata:` 块可绕过全部前缀检查 | 行首匹配对块内 `_stata("!…")` 无效；多行块修复后 mata 从「挂死」变为「可用」 | 与 `python` 同等禁止一切 `mata` 开头命令 |
+| 多行块的临时 do 文件累积 | sfi 临时文件仅在会话结束时清理，而 MCP server 长驻（实测 50 块 → 50 文件） | `_cleanup_temp_block` 在 `finally` 中即用即删 |
+| `varlist` 可改写导出路径绕过沙箱 | varlist 允许 `/`、`,`、`using`，`//` 能注释掉已校验的目标路径 | `_validate_varlist` 拒绝这三种记号 |
+| 导出把上次的陈旧文件报成功 | rc=997 命令未执行，旧文件仍在，仅判断「文件存在」 | `stata_export_excel` 改用 `_file_written_since` 比对 mtime（与 `stata_graph` 一致） |
+| 输出上限 120K 形同虚设 | 先整块 `write` 再判断总长，只能停止继续收集（实测单次返回 1,270,888 字符） | 按剩余空间裁剪后再写入，并给出可操作的截断提示 |
+| 超时被报成「未指定的错误」 | 看门狗 break 后 Stata 返回通用 rc=1 | 输出末尾显式点明超时秒数与调大 `timeout` 的建议 |
+| 注释/续行可绕过全部危险前缀护栏 | 护栏在**原始文本**行首匹配，而执行的是 `_parse_command_blocks` 剥掉 `/* */`、拼接 `///` 之后的文本。实测 `sh/*x*/ell …` 与 `sh///\n ell …` 原文中根本不含 `shell` 一词 | `_validate_command_blocks` 改为对**解析后的执行块**逐块检查 |
+| 多块聚合输出无上限 | `MAX_OUTPUT_CHARS` 只作用于单个块，N 个大块 = N×120K（实测 3 条 list → 360,263 字符） | `_run_stata_command` 在聚合后再截断一次 |
+| 块内 `///` 破坏块结构 | 续行合并无条件写入 `buffer[-1]`，在块内会把块的上一行与本行拼成一行；`forvalues {` 因此 r(198)，`program define` 更让 `end` 配对失效而**挂死会话** | 仅在 `in_continuation` 为真时才并入上一行；`end` 块内不提前 flush |
+| `stata_ping` 崩溃时回「pong」 | 失败路径返回普通字符串且丢弃诊断，`degraded` 只藏在末尾 | 失败改 `isError=true` 并带出原始诊断；同时补上漏写的 `global _last_ping_time`（缓存回写此前是死代码） |
+| `fastmcp>=3.0.0` 是假下界 | `fastmcp.tools.base` 在 3.2.0 才出现，实测 3.0.0/3.1.0 均 `ModuleNotFoundError` | 提升到 `>=3.2.0`（pyproject 与 requirements 同步） |
+| `setup.py` 在 macOS/Linux 完全不可用 | edition 检测只查 Windows 的 `{edition}-64.dll`，macOS 候选路径还指向 app bundle 内部 | `_edition_artifacts` 按平台给出特征文件；候选路径改为含 `utilities/pystata` 的安装根目录 |
+| 重跑 `setup.py` 抹掉其他 MCP 配置 | `generate_mcp_json` 无条件整文件覆盖 | 改为读取后只更新 `stata` 条目，保留其他 server 与自定义 env |
 
 ## 权限配置
 
@@ -298,8 +322,9 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 
 ## 已知局限
 
-- **无 CI/lint 配置**：无 `mypy`、`ruff`、`pre-commit`。server.py 混合中英文标识符。
+- **CI 只覆盖 Linux**：`.github/workflows/test.yml` 在 ubuntu-latest 上跑 py3.10/3.11/3.12 的 `ruff check` + `pytest --cov`（ruff 规则见 `pyproject.toml` 的 `[tool.ruff]`）。但本项目主要面向 Windows（`STATA_HOME` 默认即 Windows 路径），Windows 与 macOS 均无 CI 覆盖。测试用 `conftest.abs_path()` 构造平台原生绝对路径，不要在测试里硬编码 `C:/` —— POSIX 下 `os.path.isabs("C:/x")` 为假，路径会被当相对路径拼上 cwd（CI 曾因此长期失败）。
+- **无类型检查**：无 `mypy`、`pre-commit`。server.py 混合中英文标识符。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
-- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先 `capture which estout` 探测，**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**绝不内嵌 `ssc install`** —— headless MCP 环境下 SSC 网络请求会阻塞 `StataSO_Execute`，看门狗 `SetBreak` 无法干净中断网络 I/O，会损坏 DLL 状态导致后续调用全部卡死。包安装请走专用的 `stata_install_package`（用户可控时机、可显式传 timeout）。
+- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**绝不内嵌 `ssc install`** —— headless MCP 环境下 SSC 网络请求会阻塞 `StataSO_Execute`，看门狗 `SetBreak` 无法干净中断网络 I/O，会损坏 DLL 状态导致后续调用全部卡死。包安装请走专用的 `stata_install_package`（用户可控时机、可显式传 timeout）。
 - **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（60s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。
 - **工具错误语义**：错误结果（Stata 返回码非 0、输入验证失败、DLL 崩溃）通过 `ToolResult(is_error=True)` 告知 MCP 客户端。成功工具结果仍以普通字符串返回。若使用 `mcp.list_tools` 或类似客户端，需注意区分返回类型。

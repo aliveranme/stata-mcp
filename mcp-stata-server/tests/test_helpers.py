@@ -1,6 +1,7 @@
 import os
 
 from server import (
+    _cleanup_temp_block,
     _file_written_since,
     _format_size,
     _graph_size_options,
@@ -140,15 +141,14 @@ def test_result_or_error_passes_through_toolresult():
 
 
 def test_materialize_block_passes_single_line_through():
-    """单行走 StataSO_Execute 快路径（实测 12ms vs include 257ms）。"""
-    assert _materialize_block("summarize price") == "summarize price"
+    """单行走 StataSO_Execute 快路径（实测 12ms vs include 257ms），不落盘。"""
+    assert _materialize_block("summarize price") == ("summarize price", None)
 
 
 def test_materialize_block_writes_multiline_to_temp_do():
     block = 'forvalues i = 1/3 {\n    display `i\'\n}'
-    cmd = _materialize_block(block)
-    assert cmd.startswith('include "')
-    path = cmd[len('include "') : -1]
+    cmd, path = _materialize_block(block)
+    assert cmd == f'include "{path}"'
     with open(path, encoding="utf-8") as f:
         written = f.read()
     assert written.startswith("forvalues i = 1/3 {")
@@ -157,11 +157,24 @@ def test_materialize_block_writes_multiline_to_temp_do():
 
 
 def test_materialize_block_trailing_newline_not_doubled():
-    cmd = _materialize_block("display 1\ndisplay 2\n")
-    path = cmd[len('include "') : -1]
+    _cmd, path = _materialize_block("display 1\ndisplay 2\n")
     with open(path, encoding="utf-8") as f:
         assert f.read() == "display 1\ndisplay 2\n"
     os.unlink(path)
+
+
+def test_cleanup_temp_block_removes_file():
+    """长驻进程里每个多行块留一个文件会累积（实测 50 块 → 50 文件），须即用即删。"""
+    _cmd, path = _materialize_block("display 1\ndisplay 2")
+    assert os.path.exists(path)
+    _cleanup_temp_block(path)
+    assert not os.path.exists(path)
+
+
+def test_cleanup_temp_block_tolerates_none_and_missing(tmp_path):
+    """单行路径传入 None；文件已被清掉时也不能抛。"""
+    _cleanup_temp_block(None)
+    _cleanup_temp_block(str(tmp_path / "never_existed.do"))
 
 
 # --- 图形导出尺寸单位 --------------------------------------------------------

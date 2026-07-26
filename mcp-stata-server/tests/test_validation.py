@@ -4,6 +4,7 @@ import pytest
 
 from server import (
     _has_dangerous_command_prefix,
+    _validate_command_blocks,
     _validate_no_injection,
     _validate_varlist,
 )
@@ -19,6 +20,17 @@ from server import (
         "python: __import__('os').popen('whoami')",
         "python (print(1))",
         " summarize mpg\n!dir",
+        # winexec 在 Windows 上直接启动程序，与 shell 等价
+        "winexec notepad.exe",
+        # Mata 是可执行任意代码的子语言：_stata() 能调用任意 Stata 命令（含 !），
+        # unlink()/fopen() 能直接读写文件。行首前缀检查对块内代码无效，
+        # 实测 `mata:` + `_stata("display 12345")` 曾原样穿过并执行成功。
+        "mata:",
+        "mata: 6*7",
+        "mata",
+        'mata:\n_stata("!rm -rf /")\nend',
+        "mata drop _all",
+        "summarize mpg\nmata:\n_stata(\"display 1\")\nend",
     ],
 )
 def test_dangerous_command_prefix_blocks(cmd):
@@ -31,6 +43,9 @@ def test_dangerous_command_prefix_blocks(cmd):
         "summarize mpg",
         "regress price mpg weight",
         "capture noisily { twoway scatter price weight }",
+        # 以 mata 起头的普通字符串不应误伤
+        'display "matador"',
+        "generate matador = 1",
     ],
 )
 def test_dangerous_command_prefix_allows_safe(cmd):
@@ -139,3 +154,88 @@ def test_return_type_str_toolresult_consistency():
     assert not tools_with_str_only_return, (
         f"以下工具返回类型应为 str | ToolResult，但缺少 ToolResult: {tools_with_str_only_return}"
     )
+
+
+# --- varlist 注入：路径沙箱绕过 -----------------------------------------------
+# varlist 被拼进 `export excel <varlist> using "<已校验路径>"`。实测
+# varlist='mpg using /evil/out.xlsx, replace //' 可构造出
+# `export excel mpg using /evil/out.xlsx, replace // using "<安全路径>"`
+# —— `//` 把经 _validate_path 校验的路径整段注释掉，数据落到攻击者指定位置。
+
+
+@pytest.mark.parametrize(
+    "varlist",
+    [
+        "mpg using /tmp/evil/out.xlsx, replace //",  # 完整的沙箱绕过载荷
+        "mpg using /tmp/evil.xlsx",
+        "mpg //",
+        "mpg /* comment */",
+        "mpg, replace",
+        "mpg USING /tmp/x.xlsx",  # 大小写不敏感
+    ],
+)
+def test_validate_varlist_rejects_command_rewriting(varlist):
+    assert _validate_varlist(varlist, "varlist") is not None
+
+
+@pytest.mark.parametrize(
+    "varlist",
+    [
+        "mpg price weight",
+        "i.group x1 L.x2 c.price##i.foreign [aw=weight]",
+        "x1-x10",
+        "mpg*",
+        "price if_flag",  # 变量名里含 using/if 子串不应误伤
+        "housing_use",
+    ],
+)
+def test_validate_varlist_allows_legitimate_syntax(varlist):
+    assert _validate_varlist(varlist, "varlist") is None
+
+
+# --- 护栏必须校验「真正执行的文本」---------------------------------------------
+# _has_dangerous_command_prefix 做的是逐行行首匹配，而 _parse_command_blocks 在
+# 送执行前还会剥掉 /* */ 块注释、按 /// 拼接续行。在原始文本上匹配等于校验了一份
+# 和执行内容不同的东西。实测（Stata 19.5 MP）全部绕过成功。
+
+
+@pytest.mark.parametrize(
+    ("payload", "why"),
+    [
+        ("/* x */ !whoami", "块注释前缀掩盖 !"),
+        ("/*c*/shell echo hi", "块注释前缀掩盖 shell"),
+        ("/**/python: import os", "块注释前缀掩盖 python:"),
+        ("/* a */ mata: 1", "块注释前缀掩盖 mata"),
+        ("summarize price\n/*z*/winexec calc.exe", "多行中的某一行被掩盖"),
+        # 下面两条最难防：原始文本里根本不存在 "shell" 这个词，
+        # 是解析器把被劈开的 token 重新拼回来的。
+        ("sh/*x*/ell echo hi", "块注释从中间劈开 token 后重组"),
+        ("sh///\nell echo hi", "续行符从中间劈开 token 后重组"),
+        ("capture noisily {\n/* c */ !whoami\n}", "复合块内（会落临时 do 文件）"),
+    ],
+)
+def test_validate_command_blocks_blocks_comment_bypass(payload, why):
+    assert _validate_command_blocks(payload) is not None, f"未拦截：{why}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "summarize price",
+        "regress price weight mpg",
+        "regress price ///\n    weight mpg",
+        "forvalues i = 1/3 {\n    display `i'\n}",
+        'label variable price `"价格（美元）"\'',
+        # 注释里出现危险词不应误伤：被注释掉的内容根本不会产生执行块
+        "* 这行注释提到 shell 和 !ls\nsummarize price",
+        "/* 块注释提到 python: 与 mata */ summarize price",
+    ],
+)
+def test_validate_command_blocks_allows_legitimate(cmd):
+    assert _validate_command_blocks(cmd) is None
+
+
+def test_validate_command_blocks_still_catches_plain_payloads():
+    """不带注释的直白载荷当然也要拦。"""
+    for cmd in ("!whoami", "shell ls", "python: import os", "mata:", "winexec notepad.exe"):
+        assert _validate_command_blocks(cmd) is not None

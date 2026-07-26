@@ -282,13 +282,16 @@ xtset id year                                  // 声明面板结构
 xtdescribe                                     // 面板描述
 xtsum y x1 x2                                  // 面板摘要统计
 xtreg y x1 x2, fe                              // 固定效应
+estimates store fe                             // 必须存储，hausman 靠名字引用
 xtreg y x1 x2, re                              // 随机效应
+estimates store re
 hausman fe re                                  // Hausman 检验
 ```
 
 ### 7：工具变量（ivreg2）
 ```stata
-ssc install ivreg2                             // 先安装
+// 需要 ivreg2：先用 stata_install_package("ivreg2", source="ssc") 安装，
+// 切勿把 ssc install 写进 stata_run —— headless 下网络请求会卡死 DLL
 use "data.dta", clear
 ivreg2 y (x = z1 z2), robust first            // 2SLS + 第一阶段
 estat firststage                               // 第一阶段 F 统计量
@@ -300,8 +303,7 @@ estat overid                                   // 过度识别检验
 use "did_data.dta", clear
 generate treat_post = treat * post
 regress y treat post treat_post, robust       // 经典 2x2 DID
-// 事件研究（需安装 eventdd）
-ssc install eventdd
+// 事件研究：需 eventdd，先用 stata_install_package("eventdd", source="ssc") 安装
 eventdd y, hdfe absorb(id year) timevar(year) method(fe)
 ```
 
@@ -419,7 +421,7 @@ esttab m1 m2 using "results.csv", replace
 7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway scatter mpg weight", export="output/scatter.png", scheme="s2color")`。它把 graph 与 export 放进同一复合块，少一次往返；导出成败以文件是否真被写入为准，失败会明确报错。分两步调用（先 `scatter` 再 `graph export`）实测也能成功，但错误定位更分散。
 8. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
 9. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
-10. **危险命令避免**：`stata_run` 已经主动拦截行首 `!`、`shell`、`python:`、`python (` 及裸 `python` 等可能导致主机命令执行的前缀。不要尝试构造这些命令绕过过滤，也不要在未明确告知用户风险前构造删除、修改系统文件的操作。如确有系统级操作需求，请在操作系统命令行直接执行，不要通过 Stata 中转。
+10. **危险命令避免**：`stata_run` 与 `stata_graph(command=)` 都会拦截行首 `!`、`shell`、`winexec`、`python:`、`python (`、裸 `python`，以及一切 `mata` 开头的命令（Mata 可经 `_stata()` 执行任意命令并直接读写文件，与内嵌 Python 同等对待）。不要尝试构造这些命令绕过过滤，也不要在未明确告知用户风险前构造删除、修改系统文件的操作。如确有系统级操作需求，请在操作系统命令行直接执行，不要通过 Stata 中转；确需 Mata 编程请在 Stata 界面里做。
 11. **默认值注意**：
     - `stata_graph(..., replace=False)` — 导出文件时默认不覆盖已有文件，需显式传入 `replace=True`
     - `stata_export_excel(..., replace=False)` — 导出文件时默认不覆盖已有文件

@@ -5,6 +5,8 @@ import os
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def abs_path(*parts: str) -> str:
     """构造平台原生的绝对路径（Windows: ``C:/a/b``，POSIX: ``/a/b``）。
@@ -90,3 +92,20 @@ if "sfi" not in sys.modules:
 
     _mock_sfi.SFIToolkit.getTempFile = _fake_get_temp_file
     sys.modules["sfi"] = _mock_sfi
+
+
+@pytest.fixture(autouse=True)
+def _reset_server_globals():
+    """重置 server 的模块级可变状态，消除测试顺序相关性。
+
+    _last_ping_time 会被多个用例真实写入（stata_ping 成功路径、_ping_stata），
+    残留值会让后续用例在 2 秒缓存窗口内跳过心跳，走上与单独运行时不同的分支；
+    _last_output 同理会让 stata_more 的用例读到上一个用例的输出。
+    """
+    import server
+
+    server._last_ping_time = 0.0
+    with server._output_lock:
+        server._last_output = ""
+    yield
+    server._last_ping_time = 0.0
