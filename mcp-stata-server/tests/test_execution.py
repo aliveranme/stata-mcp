@@ -6,6 +6,7 @@ import pytest
 
 from server import (
     STATA_RC_NO_OUTPUT,
+    _describe_empty_result,
     _execute_safe,
     _execute_single,
     _ping_stata,
@@ -235,3 +236,37 @@ def test_execute_single_collects_consecutive_chunks():
     assert rc == 0
     assert "chunk1" in out
     assert "chunk2" in out, "连续的第二块输出不应因 continue 复取漏收"
+
+
+# --- 空输出的原因解释 --------------------------------------------------------
+# 内存中没有数据集时，summarize / tabulate 既不报错也不输出；
+# 笼统回「执行成功，无文本输出」会让调用方去排查命令本身，而真因是没载入数据。
+
+
+def test_describe_empty_result_explains_missing_dataset():
+    with patch("server._execute_single", return_value=(0, "0")):
+        msg = _describe_empty_result()
+    assert "没有数据集" in msg
+    assert "stata_use_dataset" in msg, "应给出可直接执行的下一步"
+
+
+def test_describe_empty_result_stays_generic_when_data_loaded():
+    """有数据却无输出（如 quietly 命令）时不应误报没有数据。"""
+    with patch("server._execute_single", return_value=(0, "74")):
+        assert _describe_empty_result() == "(命令执行成功，无文本输出)"
+
+
+def test_describe_empty_result_accepts_no_output_rc():
+    with patch("server._execute_single", return_value=(STATA_RC_NO_OUTPUT, "0")):
+        assert "没有数据集" in _describe_empty_result()
+
+
+def test_describe_empty_result_survives_probe_failure():
+    """探测本身失败时退回通用文案，不能让辅助逻辑吃掉主命令的结果。"""
+    with patch("server._execute_single", side_effect=RuntimeError("boom")):
+        assert _describe_empty_result() == "(命令执行成功，无文本输出)"
+
+
+def test_describe_empty_result_ignores_probe_error_rc():
+    with patch("server._execute_single", return_value=(198, "")):
+        assert _describe_empty_result() == "(命令执行成功，无文本输出)"

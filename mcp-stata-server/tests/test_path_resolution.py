@@ -8,6 +8,7 @@ import os
 from unittest.mock import patch
 
 import pytest
+from conftest import abs_path
 
 import server
 from server import _check_abs_path_safety, _resolve_stata_path_locked, _run_stata_command
@@ -57,12 +58,13 @@ class TestResolveStataPathLocked:
         assert abs_path == ""
 
     def test_absolute_path_unaffected_by_stata_cwd(self, monkeypatch):
-        monkeypatch.setenv("STATA_ALLOWED_ROOTS", "C:/sandbox")
+        monkeypatch.setenv("STATA_ALLOWED_ROOTS", abs_path("sandbox"))
         server._ALLOWED_ROOTS_CACHE = None
-        with patch("server._get_stata_cwd_locked", return_value="C:/other"):
-            abs_path, err = _resolve_stata_path_locked("C:/sandbox/file.dta")
+        target = abs_path("sandbox", "file.dta")
+        with patch("server._get_stata_cwd_locked", return_value=abs_path("other")):
+            resolved, err = _resolve_stata_path_locked(target)
         assert err is None
-        assert abs_path.replace("\\", "/") == "C:/sandbox/file.dta"
+        assert resolved.replace("\\", "/") == target
 
     def test_falls_back_to_python_cwd_when_stata_cwd_unavailable(self, monkeypatch):
         """无法获取 Stata cwd 时回退到 Python cwd（向后兼容）。"""

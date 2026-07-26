@@ -195,3 +195,47 @@ def test_nested_compound_blocks_merge():
 def test_parser_ignores_carriage_returns():
     blocks = _parse_command_blocks("summarize mpg\r\ntabulate foreign")
     assert blocks == ["summarize mpg", "tabulate foreign"]
+
+
+# --- end 配对块（program / input / mata）------------------------------------
+# 这类块若被拆成单行分别执行，首行会让 Stata 进入等待输入状态并挂死会话
+# （实测 Stata 19.5 MP，看门狗 SetBreak 也无法恢复），故必须整块收集。
+
+
+def test_program_define_collected_as_single_block():
+    blocks = _parse_command_blocks(
+        'program define hi\n    display "hi"\nend'
+    )
+    assert blocks == ['program define hi\n    display "hi"\nend']
+
+
+def test_program_without_define_keyword_also_collected():
+    """program name 省略 define 时同样进入定义模式。"""
+    blocks = _parse_command_blocks('program hi\n    display "hi"\nend')
+    assert len(blocks) == 1
+    assert blocks[0].endswith("end")
+
+
+def test_program_drop_is_not_a_definition_block():
+    """drop/dir/list 子命令不进入定义模式，不应吞掉后续命令。"""
+    blocks = _parse_command_blocks("program drop _all\nsummarize price")
+    assert blocks == ["program drop _all", "summarize price"]
+
+
+def test_input_block_collected_with_data_rows():
+    blocks = _parse_command_blocks("clear\ninput x y\n1 2\n3 4\nend\nlist")
+    assert blocks == ["clear", "input x y\n1 2\n3 4\nend", "list"]
+
+
+def test_mata_block_collected():
+    blocks = _parse_command_blocks("mata:\n  1+1\nend")
+    assert blocks == ["mata:\n  1+1\nend"]
+
+
+def test_command_after_end_block_is_separate():
+    blocks = _parse_command_blocks(
+        'program define hi\n    display "hi"\nend\nhi\nsummarize price'
+    )
+    assert len(blocks) == 3
+    assert blocks[1] == "hi"
+    assert blocks[2] == "summarize price"

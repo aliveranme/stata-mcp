@@ -192,6 +192,36 @@ regress wage c.age##c.age                    // 二次项
 
 `i.` 前缀自动创建虚拟变量并处理共线性，优于手动 `tabulate, gen()`。
 
+### 循环与条件块
+
+`forvalues` / `foreach` / `if` 块、`program define ... end` 都可以直接写进
+`stata_run`，整块会被原子执行：
+
+```stata
+foreach v in price weight mpg {
+    summarize `v'
+}
+
+forvalues i = 1/5 {
+    display "第 `i' 次"
+}
+
+if _N > 100 {
+    regress price weight
+}
+```
+
+**`{` 之后必须换行**，这是 Stata 本身的语法规则：
+
+```stata
+forvalues i = 1/3 { display `i' }     // ❌ r(198)
+forvalues i = 1/3 {                   // ✅
+    display `i'
+}
+```
+
+批量处理变量时，循环比逐条调用工具高效得多 —— 一次往返完成全部迭代。
+
 ---
 
 ## 数据分析模板
@@ -352,8 +382,8 @@ regress y x1 x2 x3, robust
 estimates store m2
 estimates table m1 m2, star stats(N r2 r2_a)
 
-// 导出（需安装 estout）
-ssc install estout
+// 导出（需 estout；缺失时先用 stata_install_package("estout", source="ssc") 装，
+//       切勿把 ssc install 混进 stata_run —— headless 下网络请求会卡死 DLL）
 esttab m1 m2 using "results.csv", replace
 ```
 
@@ -385,8 +415,8 @@ esttab m1 m2 using "results.csv", replace
    - 优先用 `summarize`、`tabulate`、`codebook` 而非 `list`
    - 确实需要全量数据时利用自动分页：先看首页，需要时再 `stata_more`
 5. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装
-6. **图形需导出**：`graph export "output/fig1.png", replace width(1200)`
-7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway scatter mpg weight", export="output/scatter.png", scheme="s2color")`。也可以在 `stata_run` 中用 `{ }` 复合块原子执行。不要分两步单独调用（先 `scatter` 再 `graph export`），否则图窗可能丢失。
+6. **图形需导出**：`graph export "output/fig1.png", replace width(1200)`。`width()`/`height()` 单位随格式而变：png 等位图是**像素**，pdf/eps/svg 等矢量是**英寸（0.5–20）**——对 pdf 传 800 会报 r(198)。
+7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway scatter mpg weight", export="output/scatter.png", scheme="s2color")`。它把 graph 与 export 放进同一复合块，少一次往返；导出成败以文件是否真被写入为准，失败会明确报错。分两步调用（先 `scatter` 再 `graph export`）实测也能成功，但错误定位更分散。
 8. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
 9. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
 10. **危险命令避免**：`stata_run` 已经主动拦截行首 `!`、`shell`、`python:`、`python (` 及裸 `python` 等可能导致主机命令执行的前缀。不要尝试构造这些命令绕过过滤，也不要在未明确告知用户风险前构造删除、修改系统文件的操作。如确有系统级操作需求，请在操作系统命令行直接执行，不要通过 Stata 中转。
@@ -396,4 +426,4 @@ esttab m1 m2 using "results.csv", replace
     - `stata_use_dataset(filepath, clear=True)` — 默认清除内存中已有数据
     - `stata_run(command, timeout=60)` — 命令默认超时 60s，安装包/复杂回归可传 `timeout=120`
 12. **`stata_graph` 非只读**：虽然标记为只读探索，但导出文件时会写入磁盘（destructiveHint=True），Agent 应在覆盖文件前向用户确认。
-13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并自动从 ssc 安装 `estout` 包。若不需要自动安装，先手动安装后再用无 results 版本。
+13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并**不会**自动安装 `estout`：执行前先探测，缺失则直接报错。此时改用 `stata_install_package("estout", source="ssc")` 手动安装后重试。绝不要在 `stata_run` 里内嵌 `ssc install` —— headless 环境下 SSC 网络请求会阻塞 `StataSO_Execute`，看门狗无法干净中断，会导致后续调用全部卡死。

@@ -1,6 +1,13 @@
 import os
 
-from server import _normalize_path, _paginate
+from server import (
+    _file_written_since,
+    _format_size,
+    _graph_size_options,
+    _materialize_block,
+    _normalize_path,
+    _paginate,
+)
 
 
 def test_normalize_path_converts_backslashes_to_slashes():
@@ -124,3 +131,114 @@ def test_result_or_error_passes_through_toolresult():
     existing = ToolResult(content="已有错误", is_error=True)
     # 已是 ToolResult 应原样透传同一对象
     assert _result_or_error(existing) is existing
+
+
+# --- 多行块落盘 --------------------------------------------------------------
+# StataSO_Execute 是单命令接口：多行输入会被当成同一条命令的续写，
+# 含 { } 时报 "code follows on the same line as open brace"，
+# if{} / program define 更会挂死会话。故多行块须写入临时 do 文件后 include。
+
+
+def test_materialize_block_passes_single_line_through():
+    """单行走 StataSO_Execute 快路径（实测 12ms vs include 257ms）。"""
+    assert _materialize_block("summarize price") == "summarize price"
+
+
+def test_materialize_block_writes_multiline_to_temp_do():
+    block = 'forvalues i = 1/3 {\n    display `i\'\n}'
+    cmd = _materialize_block(block)
+    assert cmd.startswith('include "')
+    path = cmd[len('include "') : -1]
+    with open(path, encoding="utf-8") as f:
+        written = f.read()
+    assert written.startswith("forvalues i = 1/3 {")
+    assert written.endswith("\n"), "do 文件须以换行结尾，否则 Stata 会漏掉末行"
+    os.unlink(path)
+
+
+def test_materialize_block_trailing_newline_not_doubled():
+    cmd = _materialize_block("display 1\ndisplay 2\n")
+    path = cmd[len('include "') : -1]
+    with open(path, encoding="utf-8") as f:
+        assert f.read() == "display 1\ndisplay 2\n"
+    os.unlink(path)
+
+
+# --- 图形导出尺寸单位 --------------------------------------------------------
+# 位图的 width()/height() 以像素计，矢量格式以英寸计（0.5–20）；
+# 对 .pdf 传 width(800) 会 r(198) "must be a number between 0.5 and 20"。
+
+
+def test_graph_size_bitmap_uses_pixels():
+    opts, note = _graph_size_options("/tmp/a.png", 800, 600)
+    assert opts == "width(800) height(600)"
+    assert note == ""
+
+
+def test_graph_size_bitmap_omits_unset_height():
+    opts, _ = _graph_size_options("/tmp/a.png", 800, 0)
+    assert opts == "width(800)"
+
+
+def test_graph_size_vector_drops_pixel_values_and_explains():
+    opts, note = _graph_size_options("/tmp/a.pdf", 800, 0)
+    assert opts == ""
+    assert "英寸" in note and "width=800" in note
+
+
+def test_graph_size_vector_keeps_inch_values():
+    opts, note = _graph_size_options("/tmp/a.pdf", 6, 4)
+    assert opts == "width(6) height(4)"
+    assert note == ""
+
+
+def test_graph_size_vector_covers_common_extensions():
+    for ext in (".pdf", ".eps", ".ps", ".svg", ".emf", ".wmf"):
+        opts, _ = _graph_size_options(f"/tmp/a{ext}", 800, 0)
+        assert opts == "", f"{ext} 应按矢量格式忽略像素宽度"
+
+
+# --- 写入判定与大小格式 ------------------------------------------------------
+
+
+def test_file_written_since_detects_new_file(tmp_path):
+    p = tmp_path / "new.png"
+    p.write_bytes(b"x")
+    assert _file_written_since(str(p), None) is True
+
+
+def test_file_written_since_false_when_missing(tmp_path):
+    assert _file_written_since(str(tmp_path / "nope.png"), None) is False
+
+
+def test_file_written_since_false_when_untouched(tmp_path):
+    """replace=False 且目标已存在时 Stata 拒绝写入，文件仍在——不能算成功。"""
+    p = tmp_path / "old.png"
+    p.write_bytes(b"x")
+    before = os.stat(p).st_mtime_ns
+    assert _file_written_since(str(p), before) is False
+
+
+def test_file_written_since_true_when_overwritten(tmp_path):
+    p = tmp_path / "old.png"
+    p.write_bytes(b"x")
+    before = os.stat(p).st_mtime_ns
+    os.utime(p, ns=(before + 1_000_000, before + 1_000_000))
+    assert _file_written_since(str(p), before) is True
+
+
+def test_format_size_small_file_uses_bytes(tmp_path):
+    """117 字节的回归结果表按整数 KB 会显示成 0 KB，看着像导出失败。"""
+    p = tmp_path / "small.csv"
+    p.write_bytes(b"x" * 117)
+    assert _format_size(str(p)) == "117 B"
+
+
+def test_format_size_kilobytes(tmp_path):
+    p = tmp_path / "mid.png"
+    p.write_bytes(b"x" * 2048)
+    assert _format_size(str(p)) == "2.0 KB"
+
+
+def test_format_size_missing_file_is_graceful(tmp_path):
+    assert _format_size(str(tmp_path / "gone.png")) == "大小未知"

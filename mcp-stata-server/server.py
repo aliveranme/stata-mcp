@@ -95,7 +95,10 @@ except SystemError as e:
     print(f"FATAL: Failed to initialize Stata: {e}", file=sys.stderr)
     sys.exit(1)
 
-# stout 必须在 init() 之后导入（check_initialized 检查）
+# 二者都必须在 config.init() 之后导入（check_initialized 检查）。
+# sfi 由 Stata 随 utilities 提供，用于申请 Stata 托管的临时文件（会话结束自动
+# 清理），多行命令块经临时 do 文件执行时需要，见 _materialize_block。
+import sfi  # noqa: E402
 from pystata.core import stout  # noqa: E402
 
 # headless 环境下主动关闭图形窗口创建，避免第三方/复杂图形挂起
@@ -146,6 +149,10 @@ _output_lock = threading.Lock()
 _last_ping_time = 0.0
 PING_CACHE_SECONDS = 2.0  # 2 秒内跳过重复 ping
 
+# estout 依赖探测命令。提为常量以便测试断言命令串本身。
+# 不能加 capture —— 那会吞掉错误使 rc 恒为 0，见 stata_export_excel 中的说明。
+_ESTOUT_PROBE_CMD = "which estout"
+
 # Stata 返回码中文释义
 STATA_RC_MESSAGES = {
     0: "成功",
@@ -161,7 +168,7 @@ STATA_RC_MESSAGES = {
     10: "数据集中无观测值",
     20: "矩阵尺寸不匹配",
     99: "观测值不足",
-    111: "变量名已存在",
+    111: "变量或命令未找到",
     198: "命令语法错误",
     199: "选项语法错误",
     3000: "命令执行成功，无文本输出",
@@ -527,6 +534,26 @@ def _flush_block(buffer: list[str], blocks: list[str]) -> None:
     buffer.clear()
 
 
+def _opens_end_block(line: str) -> bool:
+    """判断该行是否开启一个以单独 ``end`` 结束的多行输入块。
+
+    ``program`` 定义、``input`` 数据录入、``mata`` / ``python`` 子解释器都会让
+    Stata 进入等待输入状态，直到读到单独一行 ``end``。若把这类块拆成单行分别
+    交给 ``StataSO_Execute``，首行就会使会话挂死，且看门狗的 ``SetBreak`` 无法
+    恢复（实测 Stata 19.5 MP）。故须整块收集，交由 ``_materialize_block``
+    写入临时 do 文件执行。
+
+    ``program`` 的 ``drop`` / ``dir`` / ``list`` 子命令不进入定义模式，排除。
+    """
+    head = line.strip().split()
+    if not head:
+        return False
+    kw = head[0].rstrip(":")
+    if kw == "program":
+        return len(head) < 2 or head[1] not in ("drop", "dir", "list")
+    return kw in ("input", "mata", "python")
+
+
 def _parse_command_blocks(cmd: str) -> list[str]:
     """将多行 Stata 输入解析为可执行块。
 
@@ -642,6 +669,7 @@ def _parse_command_blocks(cmd: str) -> list[str]:
     in_block_comment = False
     in_continuation = False
     cont_space_before = False
+    in_end_block = False
 
     for raw_line in cmd.split("\n"):
         line = raw_line.strip("\r")
@@ -693,7 +721,14 @@ def _parse_command_blocks(cmd: str) -> list[str]:
         else:
             buffer.append(content)
 
-        if brace_depth == 0 and not in_block_comment:
+        # end 配对块（program / input / mata）：与 { } 同理必须整体执行，
+        # 否则首行会让 Stata 进入等待输入状态而挂死。
+        if not in_end_block and brace_depth == 0 and _opens_end_block(content):
+            in_end_block = True
+        elif in_end_block and content.strip() == "end":
+            in_end_block = False
+
+        if brace_depth == 0 and not in_block_comment and not in_end_block:
             _flush_block(buffer, blocks)
 
     if buffer:
@@ -847,6 +882,66 @@ def _execute_safe(cmd: str, timeout: int = 60) -> tuple:
     return rc, out
 
 
+def _describe_empty_result() -> str:
+    """命令毫无输出时，给出可操作的解释而非笼统的「成功」。
+
+    内存中没有数据集时，Stata 执行 ``summarize`` / ``list`` / ``tabulate``
+    既不报错也不输出，笼统回一句「执行成功，无文本输出」会让调用方去排查命令
+    本身，而真实原因只是还没载入数据。这里用 ``c(N)`` 把这种情况单独讲清楚。
+
+    仅在确无输出时才触发（约 12ms），不影响正常路径。
+    调用者必须已持有 ``_stata_lock``。
+    """
+    try:
+        rc, out = _execute_single("display c(N)", timeout=10)
+    except Exception:  # noqa: BLE001 - 探测失败不应影响主命令的结果
+        logger.exception("空输出原因探测失败")
+        return "(命令执行成功，无文本输出)"
+    if rc in (0, STATA_RC_NO_OUTPUT) and out.strip() == "0":
+        return (
+            "(无输出：当前内存中没有数据集。"
+            '请先用 stata_use_dataset("路径.dta") 载入数据，'
+            '或 stata_run("sysuse auto, clear") 载入示例数据。)'
+        )
+    return "(命令执行成功，无文本输出)"
+
+
+def _materialize_block(cmd: str) -> str:
+    """把多行命令块落到 Stata 临时 do 文件，返回实际要执行的单条命令。
+
+    ``StataSO_Execute`` 是**单条命令**接口，不是脚本接口：换行不被视为命令
+    分隔符，而是被当作同一条命令的续写。实测（Stata 19.5 MP）后果分三级：
+
+    - ``display 1\\ndisplay 2`` → 只执行第一条，第二条成为参数 → r(198)
+    - ``capture noisily {...}`` → "code follows on the same line as open brace"
+    - ``if _N > 0 {...}`` / ``program define ... end`` → Stata 进入等待输入
+      状态，**整个会话挂死，看门狗的 SetBreak 也无法恢复**
+
+    因此多行块必须整体交给 Stata 解析。官方 ``pystata.stata.run`` 对多行输入
+    采用同样策略：写入临时 do 文件后 ``include`` 执行。用 ``include`` 而非
+    ``do``，是为了让块内定义的局部宏对后续命令可见 —— 语义上贴近「在命令行
+    逐条敲」，符合 MCP 会话的预期。
+
+    单行命令原样返回，继续走 ``StataSO_Execute`` 快路径：实测单行约 12ms，
+    include 约 257ms，20 倍差距，不能一律走临时文件。
+
+    Args:
+        cmd: 单个命令块（可能多行）。
+
+    Returns:
+        可直接交给 StataSO_Execute 的单条命令。
+
+    Raises:
+        OSError: 临时文件创建或写入失败。
+    """
+    if "\n" not in cmd.strip():
+        return cmd
+    tmpf = sfi.SFIToolkit.getTempFile()
+    with open(tmpf, "w", encoding="utf-8") as f:
+        f.write(cmd if cmd.endswith("\n") else cmd + "\n")
+    return f'include "{tmpf}"'
+
+
 def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     """执行单条 Stata 命令，返回 (return_code, output_text)。
 
@@ -865,6 +960,13 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     Returns:
         (return_code, output_text)
     """
+    # 多行块无法直接喂给单命令接口，先落到临时 do 文件（详见 _materialize_block）
+    try:
+        exec_cmd = _materialize_block(cmd)
+    except OSError as e:
+        logger.exception("无法为多行命令块创建临时 do 文件: %s", cmd[:80])
+        return 1, f"错误: 无法创建临时 do 文件执行多行命令块: {e}"
+
     # 执行前排空残留缓冲（最短 drain）
     _drain_output(min_wait=0.05, quiet_gap=0.01)
 
@@ -887,7 +989,7 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
 
     try:
         with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
-            encoded = config.get_encode_str(cmd)
+            encoded = config.get_encode_str(exec_cmd)
             rc = config.stlib.StataSO_Execute(encoded, False)
     except Exception as e:
         logger.exception("StataSO_Execute crashed on: %s", cmd[:80])
@@ -1103,7 +1205,7 @@ def _run_stata_command(
                 hwritten = True
                 had_error = True
 
-        full = all_buf.getvalue() if hwritten else "(命令执行成功，无文本输出)"
+        full = all_buf.getvalue() if hwritten else _describe_empty_result()
         with _output_lock:
             _last_output = full
 
@@ -1672,6 +1774,90 @@ def _has_unsafe_brace(cmd: str) -> bool:
     return len(blocks) != 1
 
 
+# 矢量图格式：graph export 的 width()/height() 以英寸计（0.5–20），
+# 位图格式则以像素计。把像素值传给矢量格式会直接 r(198)。
+_VECTOR_GRAPH_EXTS = frozenset({".pdf", ".eps", ".ps", ".svg", ".emf", ".wmf"})
+
+
+def _graph_size_options(export_path: str, width: int, height: int) -> tuple[str, str]:
+    """按导出格式生成 graph export 的尺寸选项，并说明被忽略的取值。
+
+    实测：对 .pdf 传 ``width(800)`` 会失败并输出
+    "width() must be a number between 0.5 and 20" —— 因为矢量格式的单位是英寸。
+    故矢量格式下超出英寸范围的取值一律丢弃，并把这一决定回报给调用方，
+    避免「悄悄改了参数」。
+
+    Returns:
+        (选项串, 说明文本)；无需说明时说明文本为空串。
+    """
+    ext = os.path.splitext(export_path)[1].lower()
+    if ext not in _VECTOR_GRAPH_EXTS:
+        opts = [f"width({width})"] if width > 0 else []
+        if height > 0:
+            opts.append(f"height({height})")
+        return " ".join(opts), ""
+
+    kept, dropped = [], []
+    for label, value in (("width", width), ("height", height)):
+        if value <= 0:
+            continue
+        if 1 <= value <= 20:
+            kept.append(f"{label}({value})")
+        else:
+            dropped.append(f"{label}={value}")
+    note = ""
+    if dropped:
+        note = (
+            f"提示：{ext} 为矢量格式，width()/height() 单位是英寸（0.5–20），"
+            f"已忽略像素取值 {', '.join(dropped)}，改用 Stata 默认尺寸。"
+        )
+    return " ".join(kept), note
+
+
+def _mtime_ns(path: str) -> int | None:
+    """文件的纳秒级修改时间；不存在或无法读取时返回 None。
+
+    不能直接用 ``os.stat``：调用点在 ``os.path.isfile`` 之后，两者之间文件
+    可能已被删除或替换。
+    """
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _file_written_since(path: str, before_ns: int | None) -> bool:
+    """判断文件是否在本次调用中被真正写入（新建或覆盖）。
+
+    ``before_ns`` 为调用前的 ``st_mtime_ns``，文件当时不存在则为 None。
+    仅检查「文件存在」不足以判定成功：replace=False 且目标已存在时 Stata 会
+    拒绝写入，文件却依然在原处。
+    """
+    if not os.path.isfile(path):
+        return False
+    if before_ns is None:
+        return True
+    now_ns = _mtime_ns(path)
+    return now_ns is None or now_ns != before_ns
+
+
+def _format_size(path: str) -> str:
+    """人类可读的文件大小。
+
+    整数 KB 会把 117 字节的回归结果表显示成 "0 KB"，看起来像导出失败，
+    故小文件直接用字节。
+    """
+    try:
+        n = os.path.getsize(path)
+    except OSError:
+        return "大小未知"
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def stata_graph(
     command: str,
@@ -1724,9 +1910,13 @@ def stata_graph(
         # 导出模式：使用 { } 复合块确保 graph + export 原子执行
         export_path = _normalize_path(export)
         replace_opt = "replace" if replace else ""
-        size_opts = f"width({width})"
-        if height > 0:
-            size_opts += f" height({height})"
+        size_opts, size_note = _graph_size_options(export_path, width, height)
+
+        # 复合块内的错误被 capture 吞掉（rc 恒为 0），无法据此判断成败；
+        # 改以「文件是否被这次调用新写入」为准，故先记录调用前的状态。
+        # 只看文件存在与否不够：replace=False 且目标已存在时 Stata 会拒绝写入，
+        # 而文件依旧在，会被误判成功。
+        before_ns = _mtime_ns(export_path) if os.path.isfile(export_path) else None
 
         compound = (
             f"capture noisily {{\n"
@@ -1744,11 +1934,18 @@ def stata_graph(
         if isinstance(result, ToolResult):
             return result
 
-        # 验证文件是否生成
-        if os.path.isfile(export_path) and "[返回码:" not in result:
-            size_kb = os.path.getsize(export_path) // 1024
-            result += f"\n(图形已导出: {export_path}, {size_kb}KB)"
+        # 以文件是否被本次调用写入为准，而非 rc —— capture 已把块内错误吞掉。
+        if not _file_written_since(export_path, before_ns):
+            hint = ""
+            if before_ns is not None and not replace:
+                hint = "\n提示：目标文件已存在且 replace=False，如需覆盖请传 replace=True。"
+            return _make_error_result(
+                f"错误: 图形导出失败，未生成文件 {export_path}{hint}\n{result.strip()}"
+            )
 
+        result += f"\n(图形已导出: {export_path}, {_format_size(export_path)})"
+        if size_note:
+            result += f"\n{size_note}"
         return result
 
     except Exception as e:
@@ -1814,10 +2011,25 @@ def stata_export_excel(
         # stata_install_package("estout") 手动安装。绝不在此内嵌 ssc install ——
         # headless 环境下 SSC 网络请求会阻塞 StataSO_Execute，看门狗的 SetBreak
         # 无法干净中断网络 I/O，会损坏 DLL 状态导致后续调用全部卡死。
-        # 用 rc 判断：capture which estout 成功 rc=0，失败 rc≠0（不能靠输出含
-        # "estout" 字样，因为未安装时的错误信息也含该词）。
-        probe_rc, _ = _execute_safe("capture which estout", timeout=20)
-        if probe_rc != 0:
+        #
+        # 必须用裸 which，不能加 capture：capture 的语义就是吞掉命令自身的错误、
+        # 只写入 _rc，实测（Stata 19.5 MP）`capture which <pkg>` 在已装与未装
+        # 两种情况下一律返回 rc=0，无法区分。裸 which 已装返回 0、未装返回 111。
+        #
+        # 锁内执行：Stata DLL 非线程安全，且 _execute_safe 会 drain 输出缓冲，
+        # 不加锁会抢走并发命令的输出。_ping_stata 不持 _stata_lock，无重入风险。
+        # 探测与下方 esttab 分属两段临界区（Lock 不可重入，不能跨 _run_stata_command）。
+        with _stata_lock:
+            probe_rc, probe_out = _execute_safe(_ESTOUT_PROBE_CMD, timeout=20)
+
+        if probe_rc == 998:
+            # DLL 无响应：透传原始诊断（含「重启 MCP Server」指引）。误报为
+            # 「未安装」会让用户去装包，而错过真正需要的恢复步骤。
+            return _make_error_result(probe_out)
+        if probe_rc == STATA_RC_RECOVERED:
+            # 崩溃已恢复、探测命令未执行：按 997 契约返回非致命提示，不标 isError。
+            return probe_out.strip()
+        if probe_rc not in (0, STATA_RC_NO_OUTPUT):
             return _result_or_error(
                 "错误: 未安装 estout（esttab 所依赖），无法导出回归结果。\n"
                 "请先手动安装：调用 stata_install_package(\"estout\", source=\"ssc\")，"
@@ -1849,8 +2061,7 @@ def stata_export_excel(
 
     # 验证文件已生成；仅在 Stata 未报错时追加成功提示，避免 replace=False 已存在文件时误判
     if os.path.isfile(export_path) and "[返回码:" not in result:
-        size_kb = os.path.getsize(export_path) // 1024
-        return f"{changed_msg}已导出 {size_kb} KB -> {export_path}\n{result}"
+        return f"{changed_msg}已导出 {_format_size(export_path)} -> {export_path}\n{result}"
     return changed_msg + result
 
 
@@ -1892,29 +2103,40 @@ def stata_install_package(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def stata_find_package(keyword: str) -> str | ToolResult:
-    """搜索 Stata 扩展包。
+    """搜索可安装的 Stata 扩展包（联网）。
 
-    在 ssc 存档中搜索与关键词匹配的 Stata 包。
+    使用 ``net search``，覆盖 SSC 与 Stata Journal 等 net 资源，返回包名、
+    来源 URL 与简介；拿到包名后可交给 ``stata_install_package`` 安装。
+
+    注意：本工具会访问 www.stata.com（实测约 1 秒）。若网络不可达，命令会等到
+    超时为止。仅需查看某个已知包的详情时，用 ``stata_run("ssc describe <包名>")``
+    更快；仅需搜索本机已安装的帮助文件时，用 ``stata_run("search <词>, local")``。
 
     Args:
-        keyword: 搜索关键词（如 "panel"、"graph"、"iv"）。
+        keyword: 搜索关键词（如 "panel"、"binscatter"、"iv"）。
 
     Returns:
         匹配的包列表及简要描述。
     """
     if err := _validate_no_injection(keyword, "keyword"):
         return _result_or_error(err)
-    return _run_stata_command(f"ssc search {keyword}", timeout=120)
+    if not keyword.strip():
+        return _make_error_result("错误：请提供搜索关键词。")
+    return _run_stata_command(f"net search {keyword.strip()}", timeout=120)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def stata_list_packages() -> str | ToolResult:
-    """列出当前已安装的所有 Stata 扩展包。
+    """列出当前已安装的所有 Stata 扩展包（包名 + 一句简介）。
+
+    用 ``ado dir`` 而非 ``ado describe``：后者会把每个包的完整文档全文吐出来，
+    实测本机 49516 字符 / 13 页，而 ``ado dir`` 只要 4330 字符就给出同样的包
+    清单。需要某个包的详情时再用 ``stata_run("ado describe <包名>")``。
 
     Returns:
         已安装包列表。
     """
-    return _run_stata_command("ado describe", timeout=120)
+    return _run_stata_command("ado dir", timeout=120)
 
 
 # =============================================================================
@@ -1949,11 +2171,16 @@ def stata_status() -> str | ToolResult:
     """获取当前 Stata 会话状态。
 
     显示当前加载的数据集、变量数量、观测数量、工作目录和内存使用情况。
+    变量清单请用 ``stata_describe``，此处只给概览。
 
     Returns:
         会话状态摘要。
     """
-    return _run_stata_command("describe\ncd\nmemory")
+    # 查工作目录必须用 display c(pwd)，不能用裸 cd —— Stata 的 cd 不带参数会
+    # **切换**到 home 目录（同 Unix shell）并把新目录打印出来，看着像查询实为修改。
+    # 曾因此让本工具在 readOnlyHint=True 的情况下悄悄重置用户 set_cwd 的结果，
+    # 使后续相对路径全部指向 home。
+    return _run_stata_command("describe, short\ndisplay c(pwd)\nmemory")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))

@@ -34,7 +34,7 @@ stata-mcp/
 | 分析 | `stata_regress`, `stata_logistic`, `stata_ttest` | ✓ | OLS / Logit / t 检验 |
 | 图形 | `stata_graph` | — | 执行图形命令并可选导出文件（destructiveHint=True，可覆盖文件） |
 | 导出 | `stata_export_excel` | — | 数据集导出为 .xlsx（replace 默认 False）；回归结果自动转为 CSV |
-| 包管理 | `stata_install_package`, `stata_find_package`, `stata_list_packages` | — | ssc 或完整 URL 安装 |
+| 包管理 | `stata_install_package`, `stata_find_package`, `stata_list_packages` | — | 安装（ssc 或完整 URL）、`net search` 联网找包、`ado dir` 列已装包 |
 | 翻页 | `stata_more` | ✓ | 大输出分页浏览（缓存 120K chars） |
 | 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + 内存 |
 | 心跳 | `stata_ping` | ✓ | 快速检测 Stata DLL 存活状态 |
@@ -62,6 +62,7 @@ stata-mcp/
 ### 输出收集（指数退避）
 
 ```
+落盘前: _materialize_block   — 多行块写入临时 do 文件转为 include（单行原样通过）
 执行前: _drain_output(50ms)  — 短排空残留缓冲（指数退避 1→20ms）
 执行中: StataSO_Execute       — 同步调用，60s 超时看门狗（长命令可显式传 timeout）
 执行后: 快轮询(指数退避 1→20ms) — 收集主体输出，3次空转即退出
@@ -91,17 +92,41 @@ stata-mcp/
 
 **缓存失效**：当 ping 失败或崩溃恢复失败时，缓存立即清零，确保下次调用重新执行心跳而非使用过期缓存。这在 Stata DLL 崩溃后防止连续调用继续命中无响应的 DLL。
 
+### 多行块执行：`StataSO_Execute` 是单命令接口
+
+**这是本项目最容易踩的坑。** `StataSO_Execute` 不接受脚本，只接受一条命令：
+换行不是命令分隔符，而被当成同一条命令的续写。实测（Stata 19.5 MP）后果分三级：
+
+| 输入 | 后果 |
+|------|------|
+| `display 1\ndisplay 2` | 只执行第一条，第二条成为参数 → r(198) |
+| `capture noisily {...}` | `code follows on the same line as open brace` |
+| `if {...}`、`program define ... end` | **Stata 进入等待输入状态，会话挂死，`SetBreak` 也无法恢复** |
+
+因此 `_materialize_block` 把**多行块写入 Stata 临时 do 文件后 `include` 执行**
+（官方 `pystata.stata.run` 对多行输入同样如此）。用 `include` 而非 `do`，
+是为了让块内局部宏对后续命令可见，贴近「在命令行逐条敲」的语义。
+临时文件由 `sfi.SFIToolkit.getTempFile()` 提供，Stata 在会话结束时自动清理。
+
+**单行仍走 `StataSO_Execute` 快路径**：实测单行约 12ms，include 约 257ms，
+相差 20 倍。所以 `_parse_command_blocks` 把多行输入拆成单行分别执行的设计依然
+重要 —— 只有无法拆分的块（`{ }`、`end` 配对）才需要落盘。
+
 ### `_parse_command_blocks` 解析器
 
-修复了两个关键问题：
-1. **`///` 续行符**不被误判为 `//` 注释过滤
-2. **`{ }` 复合块**跨多行合并为单次 `StataSO_Execute` 调用（解决 graph + export 原子性问题）
+把输入切成「能独立执行的最小单位」，让绝大多数命令走快路径：
+
+1. **`///` 续行符**不被误判为 `//` 注释过滤，合并后是单行 → 快路径
+2. **`{ }` 复合块**整块收集（循环、条件、graph+export 原子块）
+3. **`end` 配对块**整块收集（`program` / `input` / `mata`）—— 否则首行挂死会话；
+   `program` 的 `drop` / `dir` / `list` 子命令不进入定义模式，已排除
 
 解析规则：
 - `*` 行首 → 注释跳过
 - `//` 行（且不是 `///`）→ 注释跳过
 - `///` 行尾 → 续行符，合并到下一行
 - `{` 出现但 `}` 不在同行的 → 复合块开始，收集直到 `}` 闭合
+- `program` / `input` / `mata` 开头 → 收集直到单独一行 `end`
 
 ### 文件存在性检查
 
@@ -119,13 +144,18 @@ stata-mcp/
 ## Gotchas
 
 - **第三方绘图包（binscatter 等）在 headless 环境会挂起**：Stata DLL 试图创建 GUI 窗口失败。服务器启动时自动执行 `set graphics off`，且在 `stata_graph` 导出复合块开头也注入 `set graphics off`。建议优先使用原生命令（`twoway scatter`、`histogram`）。
-- **`graph export` 必须和图形命令在同一个 Stata 复合块 `{ }` 内**，或使用 `stata_graph(..., export="path.png")` 一次完成。图形窗口不跨 `StataSO_Execute` 调用持久。
+- **图形导出用 `stata_graph(..., export="path.png")`**：它把 graph 与 export 放进同一复合块原子执行。实测图形对象其实**能**跨 `StataSO_Execute` 调用存活（分两步也可成功），但复合块少一次往返且语义更清晰，仍是推荐写法。
+- **`graph export` 的 `width()`/`height()` 单位随格式而变**：位图（png/tif/gif）是像素，矢量（pdf/eps/ps/svg/emf/wmf）是英寸且必须落在 0.5–20。对 .pdf 传 `width(800)` 会 r(198)。`stata_graph` 已按扩展名自动处理：矢量格式下超范围的取值被忽略并在返回信息中说明。
+- **图形导出成功与否以文件为准，不看返回码**：复合块用 `capture noisily` 包裹，rc 恒为 0。`stata_graph` 比对导出前后的 `st_mtime_ns` 判定是否真的写入 —— 只看「文件存在」会把「replace=False 且文件已存在」误判为成功。
 - **图形导出后自动清理**：`graph drop _all` 在复合块外单独执行，确保即使图形命令出错，缓存的图形对象也会被清理。
 - **`stata_graph` 与 `stata_export_excel` 的 `replace` 默认值为 `False`**（而非 True），写文件前需确保目标文件不存在或显式传入 `replace=True`。安全性优先于向后兼容。
 - **`stata_export_excel(results=True)`** 自动输出为 CSV（不支持 xlsx），若 `estout` 未安装则返回明确错误并提示手动安装（**不自动安装**——见下）。
 - **`///` 续行符**：现在已被修复支持（版本 v2+），可在 `stata_run` 中使用 `///` 连接多行长命令。
-- **`{ }` 复合块**：用于将多条命令打包为单次执行。典型用途：`capture noisily { twoway ... \n graph export ..., replace }`。
+- **`{ }` 复合块与循环可以直接写**：`forvalues` / `foreach` / `if` 块、`program define ... end` 都能在 `stata_run` 里正常使用（走临时 do 文件，见上）。注意 Stata 语法要求 `{` 之后换行 —— `forvalues i=1/3 { display \`i' }` 写在一行会 r(198)，这是 Stata 本身的规则。
+- **`stata_find_package` 走 `net search`（联网，约 1 秒）**：`ssc` 没有 `search` 子命令。只想看某个已知包的详情用 `stata_run("ssc describe <包名>")`；只搜本机帮助用 `stata_run("search <词>, local")`。
 - **`winsor2` 的 `suffix(_w)` 不能和 `replace` 一起用**：选项冲突。要么 `suffix(_w)` 创建新变量，要么 `replace` 覆盖原变量。
+- **裸 `cd`（不带参数）会切换到 home，不是显示当前目录**：同 Unix shell，它切换并把新目录打印出来，看着像查询实为修改。查当前目录一律用 `display c(pwd)`。`stata_status` 曾因此在标注只读的情况下悄悄重置用户 `set_cwd` 的结果。
+- **`stata_list_packages` 用 `ado dir` 而非 `ado describe`**：后者输出每个包的完整文档（实测本机 49516 字符 / 13 页），前者 4330 字符即给出同样的包清单。看单个包详情用 `stata_run("ado describe <包名>")`。
 - **`stata_more` 只能翻上次命令的缓存**：之间不能插入其他命令，否则 `_last_output` 被覆盖。
 - **`.mcp.json` 有用户路径，已 gitignore**：clone 后必须运行 `setup.py` 生成。
 - **Stata display 不支持中文字符串直接传参**：使用 Stata 的 `"中文"'` 引号语法替代单引号 `'中文'`。
@@ -197,8 +227,10 @@ Stata 命令执行异常链:
 ### 批量命令优先
 - 每次 `stata_run` 可在 `\n` 后跟多条命令，全部在一个往返中完成
 - 推荐：`stata_run("regress mpg weight\nestat vif\nestat hettest")` — 3 条一次往返
-- 不推荐：3 次独立 `stata_run`（3 倍往返开销，约 3 x 1.5s）
-- 适用于：多步建模（加载→清洗→回归→诊断）
+- 省的是 **MCP 协议往返**，不是 Stata 执行时间：实测 Stata 侧批量 3 条 34ms、
+  独立 3 次 35ms，几乎无差；单条命令在 Stata 内约 12ms。所以不必为了压缩
+  Stata 耗时而把不相关的命令硬凑到一起 —— 拆开执行的错误定位更清晰。
+- 适用于：本就属于同一步骤的多条命令（加载→清洗→回归→诊断）
 
 ### 并行工具调用
 - 数据探索类工具（describe、summarize、codebook、tabulate）**互不依赖**
@@ -210,16 +242,20 @@ Stata 命令执行异常链:
 * ✅ 推荐：使用 stata_graph 的 export 参数（自动用 { } 复合块，无临时文件）
 stata_graph(command="twoway scatter price weight", export="graph.png", scheme="economist")
 
-* ✅ 也支持：在 stata_run 中用 { } 复合块（自动合并为单次执行）
+* ✅ 也支持：在 stata_run 中用 { } 复合块（整块写入临时 do 文件执行）
 stata_run("capture noisily {
     set scheme s2color
     twoway scatter price weight
     graph export 'graph.png', replace width(800)
 }")
 
-* ❌ 不要分两步做（图形窗口丢失）
+* ⚠️ 分两步实测也能成功（图形对象跨调用存活），但多一次往返，且错误定位更散
 stata_run("scatter price weight")
-stata_run("graph export graph.png, replace")   ← 可能失败：r(601)
+stata_run("graph export graph.png, replace")
+
+* ❌ 矢量格式别传像素尺寸
+stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
+  ← width() 对 pdf 以英寸计（0.5–20），800 会被忽略并提示；要指定就传 width=6
 ```
 
 ### 输出分页工作流
@@ -236,9 +272,16 @@ stata_run("graph export graph.png, replace")   ← 可能失败：r(601)
 | `winsor2` 选项冲突 | 级联错误→DLL 崩溃 | `_drain_output` 缓冲隔离 + 逐命令错误处理 |
 | 高并发调用 | Stata DLL 非线程安全，并发调用会竞态崩溃 | 使用 `threading.Lock` 将所有命令串行化，并配合 `SetBreak` 恢复 |
 | `///` 续行被过滤 | 解析器把 `///` 当 `//` 注释跳过 | `_parse_command_blocks` 区隔 `///` vs `//` |
-| graph + export 分步失败 | 两次 `StataSO_Execute` 间图形窗口丢失 | `_parse_command_blocks` 支持 `{ }` 复合块原子执行 |
 | 中文字符在 Stata 报错 | 单引号 `'` 被 Stata 解释为宏引用 | 改用 `\`"中文\"'` 语法 |
 | 复杂 twoway 图形崩溃 | headless 环境多 overlay 图形过载（需再验证） | 推荐使用轻量图形 + 导出 |
+| `{ }` 复合块全部失败 | `StataSO_Execute` 是单命令接口，多行被拼成一行 → `code follows on the same line as open brace` | `_materialize_block` 把多行块写入临时 do 文件后 `include` |
+| `if { }`、`program define` 挂死会话 | 首行使 Stata 进入等待输入状态，`SetBreak` 无法恢复 | 同上；`_parse_command_blocks` 另按 `end` 收集 `program`/`input`/`mata` 块 |
+| 图形导出失败被报成功 | 复合块的 `capture noisily` 吞掉错误使 rc 恒为 0 | 改以导出前后 `st_mtime_ns` 判定文件是否真被写入 |
+| `.pdf` 导出 r(198) | 矢量格式 `width()` 以英寸计（0.5–20），却收到像素值 800 | `_graph_size_options` 按扩展名区分单位，超范围则忽略并提示 |
+| `stata_find_package` 全不可用 | `ssc` 无 `search` 子命令 → r(198) invalid subcommand | 改用 `net search` |
+| `stata_export_excel(results=True)` 探测失效 | `capture which estout` 装与不装都返回 rc=0 | 改用裸 `which estout`（装=0，未装=111） |
+| `stata_status` 悄悄重置工作目录 | 裸 `cd` 会切到 home，却被当成查询命令使用 | 改用 `display c(pwd)` |
+| 无数据时回「执行成功，无文本输出」 | Stata 对空数据集的 summarize 既不报错也无输出 | `_describe_empty_result` 用 `c(N)` 判定并给出载入指引 |
 
 ## 权限配置
 

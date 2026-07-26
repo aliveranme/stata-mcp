@@ -126,14 +126,14 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 ### 导出
 | 工具 | 说明 |
 |------|------|
-| `stata_export_excel` | 数据集导出为 .xlsx（`replace` 默认 False）；回归结果 export 自动改为 CSV，自动安装 estout |
+| `stata_export_excel` | 数据集导出为 .xlsx（`replace` 默认 False）；回归结果 export 自动改为 CSV，需预先安装 estout（缺失时报错，用 `stata_install_package` 安装） |
 
 ### 包管理
 | 工具 | 说明 |
 |------|------|
 | `stata_install_package` | 安装扩展包（ssc 或完整 from() URL） |
-| `stata_find_package` | 搜索扩展包 |
-| `stata_list_packages` | 列出已安装包 |
+| `stata_find_package` | 联网搜索可安装的扩展包（`net search`，约 1 秒） |
+| `stata_list_packages` | 列出已安装包（包名 + 简介） |
 
 ### 会话控制
 | 工具 | 说明 |

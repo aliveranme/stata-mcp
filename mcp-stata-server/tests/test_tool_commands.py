@@ -1,10 +1,13 @@
 from unittest.mock import patch
 
+from conftest import abs_path
 from fastmcp.tools.base import ToolResult
 
 from server import (
+    _ESTOUT_PROBE_CMD,
     stata_codebook,
     stata_export_excel,
+    stata_find_package,
     stata_graph,
     stata_install_package,
     stata_list,
@@ -117,16 +120,33 @@ def test_install_package_net_url():
         assert cmd == "net install somepkg, from(https://example.com/pkg)"
 
 
+# 以下 estout 探测返回值取自 Stata 19.5 MP 实测（见 _ESTOUT_PROBE_CMD 注释）：
+# 已装 `which estout` → rc=0 + ado 路径；未装 → rc=111 + not found 文本。
+_PROBE_INSTALLED = (0, "/Users/x/Library/Application Support/Stata/ado/plus/e/estout.ado")
+_PROBE_MISSING = (111, "command estout not found as either built-in or ado-file")
+
+
+def test_export_excel_results_probe_must_not_use_capture():
+    """探测必须用裸 which：capture 会吞掉错误使 rc 恒为 0，探测静默失效。
+
+    这条断言防止「正确修复被无声回退」——若有人加回 capture，功能测试
+    仍会全绿（mock 的 rc 是手工给的），只有这里会失败。
+    """
+    assert _ESTOUT_PROBE_CMD == "which estout"
+    assert "capture" not in _ESTOUT_PROBE_CMD
+
+
 def test_export_excel_results_forces_csv():
     with (
         patch("server._run_stata_command") as mock_run,
-        patch("server._execute_safe", return_value=(0, "D:\\ado\\plus\\e\\estout.ado")),
+        patch("server._execute_safe", return_value=_PROBE_INSTALLED) as mock_probe,
         patch("server.os.path.isfile", return_value=True),
         patch("server.os.path.getsize", return_value=1024),
     ):
-        result = stata_export_excel("C:/output/results.xlsx", results=True)
+        result = stata_export_excel(abs_path("output", "results.xlsx"), results=True)
+        assert mock_probe.call_args[0][0] == _ESTOUT_PROBE_CMD
         cmd = mock_run.call_args[0][0]
-        assert 'esttab using "C:/output/results.csv"' in cmd
+        assert f'esttab using "{abs_path("output", "results.csv")}"' in cmd
         assert ", csv " in cmd
         assert "提示：" in result
 
@@ -135,23 +155,69 @@ def test_export_excel_results_aborts_when_estout_missing():
     """estout 未安装时，results=True 应直接报错，不内嵌 ssc install（防 headless 卡死）。"""
     with (
         patch("server._run_stata_command") as mock_run,
-        patch("server._execute_safe", return_value=(111, "command estout is unrecognized")),
+        patch("server._execute_safe", return_value=_PROBE_MISSING) as mock_probe,
     ):
-        result = stata_export_excel("C:/output/results.csv", results=True)
-        assert "错误" in _result_text(result)
-        assert "estout" in _result_text(result)
+        result = stata_export_excel(abs_path("output", "results.csv"), results=True)
+        assert mock_probe.call_args[0][0] == _ESTOUT_PROBE_CMD
+        text = _result_text(result)
+        assert getattr(result, "is_error", False)
+        assert "未安装 estout" in text
+        assert "stata_install_package" in text
         mock_run.assert_not_called()
 
 
 def test_export_excel_results_aborts_on_dll_dead():
-    """DLL 无响应（rc=998）时探测应中止，不执行 esttab。"""
+    """DLL 无响应（rc=998）时透传原始诊断，不得误报为「未安装 estout」。
+
+    误报会让用户去装包，而错过真正需要的「重启 MCP Server」恢复步骤。
+    """
+    diag = "[错误] Stata DLL 无响应\n建议: 重启 MCP Server"
     with (
         patch("server._run_stata_command") as mock_run,
-        patch("server._execute_safe", return_value=(998, "[错误] Stata DLL 无响应")),
+        patch("server._execute_safe", return_value=(998, diag)),
     ):
-        result = stata_export_excel("C:/output/results.csv", results=True)
-        assert getattr(result, "is_error", False) or "错误" in _result_text(result)
+        result = stata_export_excel(abs_path("output", "results.csv"), results=True)
+        text = _result_text(result)
+        assert getattr(result, "is_error", False)
+        assert "重启 MCP Server" in text
+        assert "未安装 estout" not in text
         mock_run.assert_not_called()
+
+
+def test_export_excel_results_recovered_is_non_fatal():
+    """rc=997（崩溃已恢复）按契约为非致命：提示重试，不标 isError、不报未安装。"""
+    recovered = "StataSO_Execute 崩溃: boom\n(Stata 已自动恢复，请重试命令)"
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server._execute_safe", return_value=(997, recovered)),
+    ):
+        result = stata_export_excel(abs_path("output", "results.csv"), results=True)
+        text = _result_text(result)
+        assert not getattr(result, "is_error", False)
+        assert "请重试命令" in text
+        assert "未安装 estout" not in text
+        mock_run.assert_not_called()
+
+
+def test_export_excel_results_probe_runs_under_stata_lock():
+    """探测必须在 _stata_lock 内执行：DLL 非线程安全，且 drain 会抢并发命令的输出。"""
+    import server
+
+    seen = {}
+
+    def _probe(cmd, timeout=60):
+        seen["locked"] = server._stata_lock.locked()
+        return _PROBE_INSTALLED
+
+    with (
+        patch("server._run_stata_command"),
+        patch("server._execute_safe", side_effect=_probe),
+        patch("server.os.path.isfile", return_value=True),
+        patch("server.os.path.getsize", return_value=1024),
+    ):
+        stata_export_excel("C:/output/results.xlsx", results=True)
+
+    assert seen["locked"] is True
 
 
 def test_export_excel_dataset_uses_excel():
@@ -160,11 +226,12 @@ def test_export_excel_dataset_uses_excel():
         patch("server.os.path.isfile", return_value=True),
         patch("server.os.path.getsize", return_value=1024),
     ):
-        stata_export_excel("C:/output/data.xlsx", varlist="mpg price", sheet="Data", replace=True)
+        target = abs_path("output", "data.xlsx")
+        stata_export_excel(target, varlist="mpg price", sheet="Data", replace=True)
         cmd = mock_run.call_args[0][0]
-        assert (
-            cmd
-            == 'export excel mpg price using "C:/output/data.xlsx", replace firstrow(variables) sheet("Data")'
+        assert cmd == (
+            f'export excel mpg price using "{target}", '
+            'replace firstrow(variables) sheet("Data")'
         )
 
 
@@ -176,9 +243,10 @@ def test_graph_export_includes_height_when_set():
     ):
         from server import stata_graph
 
-        stata_graph("scatter price weight", export="C:/output/fig.png", width=1200, height=800)
+        target = abs_path("output", "fig.png")
+        stata_graph("scatter price weight", export=target, width=1200, height=800)
         cmd = mock_run.call_args[0][0]
-        assert 'graph export "C:/output/fig.png"' in cmd
+        assert f'graph export "{target}"' in cmd
         assert "width(1200)" in cmd
         assert "height(800)" in cmd
 
@@ -208,7 +276,10 @@ def test_graph_allows_brace_inside_string():
     ):
         from server import stata_graph
 
-        stata_graph('twoway scatter price weight, title("a} b")', export="C:/output/fig.png")
+        stata_graph(
+            'twoway scatter price weight, title("a} b")',
+            export=abs_path("output", "fig.png"),
+        )
         cmd = mock_run.call_args[0][0]
         assert "capture noisily {" in cmd
 
@@ -245,9 +316,10 @@ def test_save_dataset_rejects_path_with_illegal_chars():
 
 def test_save_dataset_builds_command_for_valid_path():
     with patch("server._run_stata_command") as mock_run:
-        stata_save_dataset("C:/output/data.dta", replace=True)
+        target = abs_path("output", "data.dta")
+        stata_save_dataset(target, replace=True)
         cmd = mock_run.call_args[0][0]
-        assert cmd == 'save "C:/output/data.dta", replace'
+        assert cmd == f'save "{target}", replace'
 
 
 def test_install_package_rejects_source_with_closing_paren():
@@ -337,17 +409,19 @@ def test_stata_run_rejects_null_byte():
 
 def test_stata_use_dataset_builds_command_with_clear():
     with patch("server._run_stata_command") as mock_run:
-        stata_use_dataset("C:/data/auto.dta", clear=True)
+        target = abs_path("data", "auto.dta")
+        stata_use_dataset(target, clear=True)
         cmd = mock_run.call_args[0][0]
-        assert 'use "C:/data/auto.dta", clear' == cmd
-        assert mock_run.call_args.kwargs["require_file"] == "C:/data/auto.dta"
+        assert cmd == f'use "{target}", clear'
+        assert mock_run.call_args.kwargs["require_file"] == target
 
 
 def test_stata_use_dataset_without_clear():
     with patch("server._run_stata_command") as mock_run:
-        stata_use_dataset("C:/data/auto.dta", clear=False)
+        target = abs_path("data", "auto.dta")
+        stata_use_dataset(target, clear=False)
         cmd = mock_run.call_args[0][0]
-        assert cmd == 'use "C:/data/auto.dta"'
+        assert cmd == f'use "{target}"'
 
 
 def test_stata_ping_alive_when_42_in_output():
@@ -366,3 +440,119 @@ def test_stata_ping_returns_error_on_exception():
     with patch("server._execute_single", side_effect=RuntimeError("boom")):
         result = stata_ping()
     assert getattr(result, "is_error", False)
+
+
+# --- 图形导出失败必须可见 ----------------------------------------------------
+# 复合块用 capture noisily 包裹，Stata 的 rc 恒为 0；若只看 rc，导出失败会被
+# 报告为成功（实测：PDF 传像素 width、变量名写错、拒绝覆盖，三者全部静默）。
+
+
+def test_graph_export_reports_failure_when_file_not_created():
+    with (
+        patch(
+            "server._run_stata_command",
+            return_value="variable nonexistent not found\nr(111);",
+        ),
+        patch("server.os.path.isfile", return_value=False),
+    ):
+        result = stata_graph(
+            "twoway scatter nonexistent weight",
+            export=abs_path("out", "fig.png"),
+            replace=True,
+        )
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "未生成文件" in text
+    assert "r(111)" in text, "应保留 Stata 原始错误，便于定位"
+
+
+def test_graph_export_detects_refused_overwrite(tmp_path):
+    """replace=False 且目标已存在时 Stata 拒绝写入，文件却仍在——不能算成功。"""
+    target = tmp_path / "fig.png"
+    target.write_bytes(b"old content")
+    with patch(
+        "server._run_stata_command",
+        return_value="file fig.png already exists\nr(602);",
+    ):
+        result = stata_graph(
+            "twoway scatter price weight", export=str(target), replace=False
+        )
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "replace=True" in text, "应给出可操作的下一步"
+
+
+def test_graph_export_succeeds_when_file_freshly_written(tmp_path):
+    target = tmp_path / "fig.png"
+
+    def _write_file(*_a, **_kw):
+        target.write_bytes(b"png data")
+        return "file written in PNG format"
+
+    with patch("server._run_stata_command", side_effect=_write_file):
+        result = stata_graph(
+            "twoway scatter price weight", export=str(target), replace=True
+        )
+    assert not getattr(result, "is_error", False)
+    assert "图形已导出" in _result_text(result)
+
+
+def test_graph_pdf_export_notes_dropped_pixel_size(tmp_path):
+    target = tmp_path / "fig.pdf"
+
+    def _write_file(*_a, **_kw):
+        target.write_bytes(b"pdf data")
+        return "saved as PDF format"
+
+    with patch("server._run_stata_command", side_effect=_write_file) as mock_run:
+        result = stata_graph(
+            "twoway scatter price weight", export=str(target), replace=True
+        )
+    cmd = mock_run.call_args[0][0]
+    assert "width(800)" not in cmd, "矢量格式不能收到像素宽度，否则 r(198)"
+    assert "英寸" in _result_text(result), "参数被丢弃必须告知调用方"
+
+
+# --- 包搜索 ------------------------------------------------------------------
+
+
+def test_find_package_uses_net_search():
+    """ssc 没有 search 子命令，实测报 r(198) invalid subcommand。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_find_package("binscatter")
+        assert mock_run.call_args[0][0] == "net search binscatter"
+
+
+def test_find_package_rejects_blank_keyword():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_find_package("   ")
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+# --- 会话状态查询不得有副作用 ------------------------------------------------
+
+
+def test_status_uses_pwd_query_not_bare_cd():
+    """裸 cd 会切换到 home 并打印新目录，看似查询实为修改。
+
+    该工具标注 readOnlyHint=True，用裸 cd 会悄悄重置用户 set_cwd 的结果，
+    使后续相对路径全部指向 home。
+    """
+    from server import stata_status
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_status()
+        cmd = mock_run.call_args[0][0]
+    lines = [ln.strip() for ln in cmd.split("\n")]
+    assert "display c(pwd)" in lines
+    assert "cd" not in lines, "裸 cd 会修改工作目录，不能出现在只读工具里"
+
+
+def test_list_packages_uses_ado_dir():
+    """ado describe 会吐出每个包的全文（实测 49516 字符），ado dir 只需 4330。"""
+    from server import stata_list_packages
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_list_packages()
+        assert mock_run.call_args[0][0] == "ado dir"
