@@ -1,36 +1,74 @@
-# Stata MCP Server + Skill for Claude Code
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%"
+       alt="Stata MCP Server — 让 Claude Agent 直接驱动 Stata：一个持久会话跑完加载、建模、诊断、导出。示例展示真实回归输出 regress price weight mpg，weight 系数 1.7466，R²=0.293，N=74。">
+</p>
 
-让 AI Agent 完全自动化地撰写并执行 Stata 命令 — 通过 MCP Server 提供执行能力，Skill 提供 Stata 编程知识。
+<p align="center">
+  <a href="https://www.stata.com"><img src="https://img.shields.io/badge/Stata-Now%2019.5%20MP-1a476f" alt="Stata"></a>
+  <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.10+-4a90d9" alt="Python"></a>
+  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-stdio-f4a259" alt="MCP"></a>
+  <img src="https://img.shields.io/badge/tools-33-6fcf97" alt="33 tools">
+  <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT">
+</p>
 
-[![Stata Version](https://img.shields.io/badge/Stata-Now%2019.5%20MP-blue)](https://www.stata.com)
-[![Python](https://img.shields.io/badge/Python-3.10+-green)](https://python.org)
-[![MCP](https://img.shields.io/badge/MCP-stdio-orange)](https://modelcontextprotocol.io)
+在 Claude Code 里用自然语言做 Stata 分析。你描述要什么，Agent 自己写命令、执行、
+读结果、继续下一步 —— 加载数据、清洗、建模、诊断、导出，全在**一个持久的 Stata
+会话**里完成，数据不用反复载入。
+
+## 一句话，跑完整个分析
+
+> **你：** 加载 auto.dta，用 weight 和 mpg 回归 price，并检查异方差
+
+**Agent 自动完成（无需你写任何 Stata 命令）：**
+
+```text
+stata_use_dataset("auto.dta")          →  74 obs, 12 vars 已载入
+stata_regress("price", "weight mpg")   →  R² = 0.293 ; weight 1.75 (p=0.008)
+stata_run("estat hettest")             →  Breusch–Pagan χ² 检验异方差
+stata_graph("rvfplot", export="…png")  →  残差图导出为文件
+```
+
+数据从第一步起就留在内存里，后面每一步都接着用 —— 这正是 `stata_run("regress …")`
+之外还值得有一个 MCP Server 的原因。
+
+## 这是什么
+
+两部分组成，一起装进 Claude Code：
+
+- **执行层（MCP Server）** —— 经 `pystata` 直接调用 Stata 的运行时，把 33 个工具
+  暴露给 Agent。`stata_run` 执行任意命令、`stata_help` 查任意命令的官方语法，二者
+  合起来即「全量内置命令支持」；其余专用工具（回归 / 面板 / IV / 生成变量 …）是给
+  高频命令加结构化参数与校验的便利层。
+- **知识层（Skill）** —— 一份 Stata 编程指南：语法要点、分析模板、常见陷阱、命令
+  地图与常用外置包。Agent 据此知道**该用什么命令**，而不是靠猜。
+
+## 为什么是 pystata，而不是 subprocess
+
+`pystata` 通过 ctypes 在**进程内**加载 Stata 运行时，而非每条命令起一个子进程：
+
+- **真会话持久** —— Stata 在 MCP Server 启动时初始化一次，数据集、估计结果、局部
+  宏在所有工具调用之间保持。多步分析（加载 → 清洗 → 回归 → 诊断）就是自然的对话。
+- **低延迟** —— 无进程启动开销，单条命令约 12ms。
+- **输出可控** —— 直接读 Stata 输出缓冲；大输出自动分页（`stata_more` 翻页），
+  硬上限 120K 字符防止撑爆 MCP 通道；长命令有 60s 超时看门狗（可显式调大）。
 
 ## 架构
 
-```
-┌──────────────────────────────────────────────────┐
-│                  Claude Code Agent                │
-│  ┌──────────────┐          ┌──────────────────┐  │
-│  │  stata Skill │◄────────►│  stata MCP Server │  │
-│  │  (知识层)     │  指导     │  (执行层)          │  │
-│  │  - 语法规范   │          │  - 33 个工具       │  │
-│  │  - 分析模板   │          │  - pystata 直接调用 │  │
-│  │  - 常见陷阱   │          │  - StataNow 19.5 MP │  │
-│  └──────────────┘          └──────────────────┘  │
-└──────────────────────────────────────────────────┘
-```
-
-## 前置条件
-
-- **Windows** 操作系统
-- **StataNow 19** 或 **Stata 18+**（MP / SE / BE 版本均可）
-- **Python 3.10+**（推荐 3.12+）
-- **Claude Code**（最新版本）
+<p align="center">
+  <img src="./assets/readme/workflow.svg" width="100%"
+       alt="架构图：Claude Agent 同时使用 stata Skill（知识层）与 MCP Server（执行层）；MCP 经 pystata 的 ctypes 直连调用 Stata DLL；所有工具共享一个持久会话，数据在 use → regress → predict → export 之间保持不变。">
+</p>
 
 ## 快速开始
 
-### 1. 克隆并运行安装脚本
+### 前置条件
+
+- **Stata**：StataNow 19 或 Stata 18+（MP / SE / BE 均可）——需含 `utilities/pystata`
+- **Python** 3.10+（推荐 3.12+）
+- **Claude Code** 最新版
+- **操作系统**：Windows 或 macOS（见下方「兼容性」）
+
+### 一键安装
 
 ```bash
 git clone https://gitea.aliveranme.space/aliveranme/stata-mcp.git
@@ -38,217 +76,157 @@ cd stata-mcp
 python setup.py
 ```
 
-`setup.py` 自动完成：
-1. 检测 Stata 安装路径（检查常见目录 + 环境变量 `STATA_HOME`）
-2. 创建 Python 虚拟环境并安装 `fastmcp`
-3. 生成 `.mcp.json` 配置文件（含正确路径）
-4. 验证 MCP Server 可正常启动
+`setup.py` 会：检测 Stata 安装（常见路径 + `STATA_HOME` 环境变量，跨平台）→
+创建虚拟环境并安装 `fastmcp` → 生成 `.mcp.json`（保留你已有的其他 MCP Server 配置）
+→ 验证 Server 可启动。
 
-### 2. 手动安装（备选）
-
-如果自动检测失败，先设置环境变量再运行：
+<details>
+<summary><b>手动安装（自动检测失败时）</b></summary>
 
 ```bash
-# 设置 Stata 路径（请替换为你本机实际安装路径；setup.py 通常会自动检测）
-# Git Bash / MSYS2:
-export STATA_HOME="C:/Program Files/StataNow/StataNow19"
-export STATA_EDITION=mp
+# 1. 指定 Stata 路径（替换为你本机实际路径）
+export STATA_HOME="C:/Program Files/StataNow/StataNow19"   # Windows
+# export STATA_HOME="/Applications/Stata"                  # macOS
+export STATA_EDITION=mp                                     # mp / se / be
 
-# 或者 Windows CMD:
-# set STATA_HOME="C:/Program Files/StataNow/StataNow19"
-# set STATA_EDITION=mp
-
-# 创建虚拟环境
+# 2. 建虚拟环境并装依赖
 cd mcp-stata-server
 uv venv
-
-# Windows Git Bash / MSYS2:
-source .venv/Scripts/activate
-# Windows PowerShell:
-# .venv\Scripts\Activate.ps1
-# Windows CMD:
-# .venv\Scripts\activate.bat
-
+source .venv/Scripts/activate      # Windows Git Bash
+# source .venv/bin/activate        # macOS / Linux
 uv pip install fastmcp
 
-# 复制并编辑 .mcp.json
+# 3. 生成配置
 cd ..
-cp .mcp.json.example .mcp.json
-# 编辑 .mcp.json，将 <repo-path> 替换为实际路径
+cp .mcp.json.example .mcp.json     # 编辑其中的 <repo-path>
 ```
+</details>
 
-### 3. 连接 Claude Code
+### 连接并验证
 
-重启 Claude Code（或运行 `/reload-plugins`），`.mcp.json` 中配置的 `stata` MCP Server 会自动连接。
+重启 Claude Code（或 `/reload-plugins`），`.mcp.json` 里的 `stata` Server 会自动连接。
+然后在对话里直接说：
 
-### 4. 验证
+> 帮我加载 auto.dta 并做描述统计
 
-在 Claude Code 中输入：
+Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize`。
 
-> 帮我加载 auto.dta 数据并做描述统计
+## MCP 工具（33 个）
 
-Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summarize` 完成分析。
+> 能力边界不在工具数量上：`stata_run` + `stata_help` 已覆盖全部内置命令。下面的
+> 专用工具是给高频命令加结构化参数与校验的便利层。
 
-## MCP 工具列表（33 个）
-
-> `stata_run` 执行任意命令、`stata_help` 查任意命令的官方语法，二者即「全量内置
-> 命令支持」。下面的专用工具是给高频命令加结构化参数与校验的便利层。
-
-### 数据管理
-| 工具 | 说明 | destructiveHint |
-|------|------|:---:|
-| `stata_use_dataset` | 加载 .dta 数据文件 | ✓ |
-| `stata_save_dataset` | 保存数据为 .dta | ✓ |
-| `stata_set_cwd` | 更改工作目录 | ✓ |
-| `stata_generate` | 创建新变量（`generate`）；支持 `condition` | 改数据集 |
-| `stata_egen` | 扩展生成（`egen`）；支持 `by` 组内聚合 | 改数据集 |
-
-### 数据探索
-| 工具 | 说明 |
+| 类别 | 工具 |
 |------|------|
-| `stata_describe` | 变量基本信息（类型、标签） |
-| `stata_codebook` | 详细变量字典（值标签、分布）；支持 `condition` |
-| `stata_summarize` | 描述统计量（均值、标准差等）；支持 `condition` 和 `detail` |
-| `stata_list` | 查看数据值；支持 `condition` / `in_range` |
-| `stata_tabulate` | 频数表 / 交叉表；支持 `condition`、卡方检验 |
-| `stata_correlate` | 相关矩阵（`correlate`/`pwcorr`）；支持 `condition` |
-| `stata_display` | 表达式计算 / 查看返回值 |
+| **核心执行** | `stata_run`（任意命令，含危险前缀拦截）· `stata_run_do_file` |
+| **数据管理** | `stata_use_dataset` · `stata_save_dataset` · `stata_set_cwd` · `stata_generate` · `stata_egen` |
+| **数据探索** | `stata_describe` · `stata_codebook` · `stata_summarize` · `stata_list` · `stata_tabulate` · `stata_correlate` · `stata_display` |
+| **估计** | `stata_regress` · `stata_logistic` · `stata_probit` · `stata_poisson` · `stata_ttest` · `stata_xtreg` · `stata_ivregress` |
+| **后估计** | `stata_margins` · `stata_test` · `stata_predict` |
+| **图形 / 导出** | `stata_graph`（导出即验证文件写入）· `stata_export_excel` |
+| **包管理与帮助** | `stata_help`（查任意命令帮助）· `stata_install_package` · `stata_find_package` · `stata_list_packages` |
+| **会话** | `stata_more`（翻页）· `stata_status` · `stata_ping` |
 
-### 统计分析
-| 工具 | 说明 |
-|------|------|
-| `stata_regress` | 线性回归 (OLS)；支持 `condition` |
-| `stata_logistic` | Logistic 回归 (Logit)；支持 `condition` |
-| `stata_probit` | Probit 回归；可选 `marginal_effects` 附平均边际效应 |
-| `stata_poisson` | Poisson 计数回归；可选 `irr` 报发生率比 |
-| `stata_ttest` | t 检验；支持 `condition`、按组检验 |
-| `stata_xtreg` | 面板回归 fe/re/be/mle/pa（需先 `xtset`） |
-| `stata_ivregress` | 工具变量 2SLS/LIML/GMM |
+<details>
+<summary><b>各工具的参数与说明</b></summary>
 
-### 后估计（须先跑估计命令）
-| 工具 | 说明 |
-|------|------|
-| `stata_margins` | 边际效应 / 预测边际；`dydx` / `at` |
-| `stata_test` | 系数的 Wald 检验（联合显著、系数相等） |
-| `stata_predict` | 生成预测值 / 残差（会创建新变量） |
+**数据管理** — `stata_use_dataset` 加载 .dta；`stata_save_dataset` 保存；
+`stata_set_cwd` 改工作目录；`stata_generate` 创建变量（支持 `condition`）；
+`stata_egen` 扩展生成（支持 `by` 组内聚合）。
 
-### 通用执行
-| 工具 | 说明 |
-|------|------|
-| `stata_run` | **执行常见 Stata 命令**（含分页，自动拦截 `!`/`shell`/`winexec`/`python:`/`mata` 等危险前缀） |
-| `stata_run_do_file` | 执行 .do 文件 |
-| `stata_graph` | 生成图形（destructiveHint=True，`replace` 默认 False）；推荐 `export` 参数直接导出，支持 `height`。注意：`export` 模式会自动用 `{ }` 包装命令，请勿在 `command` 中手动包含未转义的 `}`。 |
-| `stata_more` | **翻页浏览大输出** |
+**数据探索** — `stata_summarize` / `stata_codebook` / `stata_list` / `stata_tabulate`
+均支持 `condition`；`stata_correlate` 可选 `pairwise` 走 `pwcorr`；`stata_display`
+算表达式 / 看返回值。
 
-### 导出
-| 工具 | 说明 |
-|------|------|
-| `stata_export_excel` | 数据集导出为 .xlsx（`replace` 默认 False）；回归结果 export 自动改为 CSV，需预先安装 estout（缺失时报错，用 `stata_install_package` 安装） |
+**估计** — `stata_regress`（OLS）、`stata_logistic`、`stata_probit`（可选
+`marginal_effects`）、`stata_poisson`（可选 `irr`）、`stata_ttest`（可按组）、
+`stata_xtreg`（`effects` = fe/re/be/mle/pa，需先 `xtset`）、`stata_ivregress`
+（2sls/liml/gmm）。
 
-### 包管理与帮助
-| 工具 | 说明 |
-|------|------|
-| `stata_help` | 查任意命令的官方帮助（内置 + 已装外置，覆盖全部命令）；支持子主题与分页 |
-| `stata_install_package` | 安装扩展包（ssc 或完整 from() URL） |
-| `stata_find_package` | 联网搜索可安装的扩展包（`net search`，约 1 秒） |
-| `stata_list_packages` | 列出已安装包（包名 + 简介） |
+**后估计**（须先跑估计命令）— `stata_margins`（`dydx` / `at`）、`stata_test`
+（Wald 检验）、`stata_predict`（预测值 / 残差，会创建变量）。
 
-### 会话控制
-| 工具 | 说明 |
-|------|------|
-| `stata_status` | 会话状态（当前数据、工作目录、内存） |
-| `stata_ping` | 快速检测 Stata DLL 存活 |
+**图形 / 导出** — `stata_graph` 把 graph 与 export 原子执行，以文件是否真被写入判定
+成败；矢量格式尺寸按英寸处理。`stata_export_excel` 导数据为 .xlsx，回归结果导为 CSV。
 
-## 项目结构
+**包管理与帮助** — `stata_help("命令")` 查任意内置 / 已装外置命令的官方语法；
+`stata_find_package` 走 `net search` 联网找包；`stata_install_package` 装（ssc 或 URL）；
+`stata_list_packages` 列已装。
 
-```
-stata-mcp/
-├── .mcp.json                          # MCP Server 配置（setup.py 自动生成）
-├── .mcp.json.example                  # MCP Server 配置模板（手动安装用）
-├── .gitignore
-├── README.md                          # 本文档
-├── setup.py                           # 一键安装脚本
-├── mcp-stata-server/
-│   ├── server.py                      # MCP Server 主程序（33 个工具）
-│   ├── requirements.txt               # Python 依赖
-│   ├── pyproject.toml                 # 项目配置与测试配置
-│   └── tests/                         # pytest 测试套件
-└── .claude/
-    ├── skills/
-    │   └── stata/
-    │       └── SKILL.md               # Stata 编程知识 Skill
-    └── settings.local.json            # Claude Code 本地配置（插件启用）
-```
+**会话** — `stata_more` 翻上一条命令的完整输出；`stata_status` 看数据 / cwd / 内存；
+`stata_ping` 心跳。
+</details>
 
-## Skill 内容概览
+## Stata 知识 Skill
+
+`.claude/skills/stata/SKILL.md` 是 Agent 的 Stata 编程参考：
 
 | 模块 | 内容 |
 |------|------|
-| **核心原则** | 分析前先了解数据、变量名大小写、路径规范、返回值检查 |
-| **语法要点** | 命令结构、if 条件陷阱、因子变量、egen 函数 |
-| **分析模板** | 数据探索、OLS/Logistic 回归、分组比较、数据清洗、面板数据、工具变量、DID |
-| **常见陷阱** | 变量名冲突、缺失值、字符串转换、路径、do 文件模板 |
-| **高级工作流** | 回归诊断、结果存储与输出、包管理 |
-| **协作规范** | 完整流程、错误排查顺序、图形导出 |
-
-## 技术细节
-
-### 为什么使用 pystata 而不是 subprocess？
-
-- **真会话持久**：Stata DLL 在服务器生命周期内保持初始化，数据在工具调用间保持
-- **低延迟**：无进程启动开销，命令执行在毫秒级
-- **完整输出**：通过 `StataSO_GetOutputBuffer` 直接获取输出缓冲
-- **线程安全**：使用 threading.Lock 确保命令串行执行
-
-### 输出轮询机制
-
-```
-执行前: _drain_output(50ms)  — 短排空残留缓冲（50ms 上限 + 10ms 安静退出）
-执行中: StataSO_Execute       — 同步调用，60s 超时看门狗
-执行后: 快轮询(300×1ms)       — 收集主体输出，3次空转即退出
-        _drain_output()       — 智能清尾：小输出 50ms | 大输出 100ms
-        截断 120K chars        — 防止 MCP 缓冲溢出
-        自动分页 4K chars       — 大输出自动分页，支持 stata_more 翻页
-```
-
-### 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。环境变量优先级最高；未设置时由 `setup.py` 自动检测，手动安装可覆盖。 |
-| `STATA_EDITION` | `mp` | Stata 版本（mp/se/be） |
-| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。未设置时不限制绝对路径。 |
-| `STATA_ALLOW_UNC` | 未设置 | 设为 `1` 允许 UNC 网络路径，默认拒绝。 |
-
-## 开发
-
-### 启动服务器（调试模式）
-
-```bash
-cd mcp-stata-server
-source .venv/Scripts/activate
-python server.py
-```
-
-### 安装新依赖
-
-```bash
-uv pip install <package>
-uv pip freeze > requirements.txt
-```
-
-## 许可证
-
-MIT License
+| 核心原则 | 分析前先探数据、变量名大小写、路径规范、返回值检查 |
+| 语法要点 | 命令结构、`if` 条件陷阱、因子变量、循环与条件块、egen 函数 |
+| 命令地图 | 3500+ 内置命令按族归类，语法一律指向 `stata_help` |
+| 分析模板 | 数据探索、OLS / Logit、面板、工具变量、DID —— 均经真实 Stata 验证 |
+| 外置命令表 | reghdfe / ivreg2 / estout / coefplot / did / rdrobust … 按计量方向组织 |
+| 常见陷阱 | 变量名冲突、缺失值、字符串转换、路径、do 文件 |
 
 ## 兼容性
 
 | 组件 | 要求 |
 |------|------|
-| **操作系统** | Windows（pystata 依赖 Windows DLL） |
-| **Stata 版本** | StataNow 19 / Stata 18（MP / SE / BE） |
+| **Stata** | StataNow 19 / Stata 18（MP / SE / BE），需含 `utilities/pystata` |
 | **Python** | 3.10+ |
-| **Claude Code** | 最新版本（支持 MCP stdio） |
+| **Claude Code** | 最新版（支持 MCP stdio） |
+| **操作系统** | Windows、macOS（`setup.py` 跨平台检测；Linux 亦受 `setup.py` 支持但未实测） |
 
-> **注意**：macOS / Linux 用户需使用 [stata_kernel](https://github.com/kylebarron/stata_kernel)
-> 或 subprocess 方式调用 Stata CLI，本项目的 pystata 方案仅支持 Windows。
+> `pystata` 是 Stata 官方的 Python 集成，随 Stata 一同分发，Windows / macOS / Linux
+> 均提供。本项目在 Windows 与 macOS（StataNow 19.5 MP）上均实测可用。
+
+## 配置
+
+<details>
+<summary><b>环境变量</b></summary>
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。环境变量优先级最高；未设置时由 `setup.py` 自动检测。 |
+| `STATA_EDITION` | `mp` | Stata 版本（mp / se / be） |
+| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。未设置时不限制绝对路径。 |
+| `STATA_ALLOW_UNC` | 未设置 | 设为 `1` 允许 UNC 网络路径，默认拒绝。 |
+</details>
+
+<details>
+<summary><b>开发 / 调试</b></summary>
+
+```bash
+# 调试模式启动 Server
+cd mcp-stata-server
+source .venv/bin/activate          # 或 .venv/Scripts/activate (Windows)
+python server.py
+
+# 跑测试与 lint
+python -m pytest tests/ -q
+python -m ruff check server.py tests/
+
+# 添加依赖
+uv pip install <package>
+uv pip freeze > requirements.txt
+```
+</details>
+
+## 项目结构
+
+```text
+stata-mcp/
+├── setup.py                        # 一键安装（跨平台检测 Stata）
+├── mcp-stata-server/
+│   ├── server.py                   # MCP Server 主程序（33 个工具）
+│   └── tests/                      # pytest 测试套件
+├── .claude/skills/stata/SKILL.md   # Stata 编程知识 Skill
+├── assets/readme/                  # README 视觉资产
+└── .mcp.json                       # Server 配置（setup.py 生成）
+```
+
+## 许可证
+
+MIT License
