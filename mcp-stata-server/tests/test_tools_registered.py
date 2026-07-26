@@ -55,6 +55,7 @@ EXPECTED_TOOLS = {
     "stata_scheme",
     "stata_export_excel",
     "stata_export_delimited",
+    "stata_etable",
     # 包管理与帮助
     "stata_install_package",
     "stata_uninstall_package",
@@ -109,6 +110,7 @@ def test_write_tools_are_not_marked_read_only():
         "stata_scheme",
         "stata_export_excel",
         "stata_export_delimited",
+    "stata_etable",
         "stata_install_package",
         "stata_uninstall_package",
         # 以下会创建变量，改动内存中的数据集

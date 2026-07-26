@@ -18,7 +18,7 @@ description: >
 结果输出全流程。
 
 **MCP Server 信息：**
-- 名称：`stata`，49 个工具覆盖数据管理/生成、探索、估计、后估计、图形导出、包管理与帮助、会话控制；`stata_run` + `stata_help` 覆盖全部内置命令
+- 名称：`stata`，50 个工具覆盖数据管理/生成、探索、估计、后估计、图形导出、包管理与帮助、会话控制；`stata_run` + `stata_help` 覆盖全部内置命令
 - Stata 版本：StataNow 19 / Stata 18+（取决于安装的版本）
 - 连接方式：本地 stdio，通过 pystata 直接调用 DLL
 - **会话持久**：Stata 在服务器启动时初始化一次，所有命令共享同一会话。
@@ -140,7 +140,8 @@ description: >
 ### 结果导出
 | 工具 | 用途 |
 |------|------|
-| `stata_export_excel` | 导出数据集为 .xlsx（`sheet_mode`/`cell`/`firstrow`/`if`-`in`）；`results=True` 时回归结果转 CSV |
+| `stata_etable` | **回归表导出首选**（官方 `etable`，Stata 17+，无第三方依赖）。`estimates="m1 m2"` 并排多模型，`stars=True` 加星号，`stats="N r2"` 附统计量，`export=` 直出 .docx/.xlsx/.pdf/.tex/.html/.md |
+| `stata_export_excel` | 导出数据集为 .xlsx（`sheet_mode`/`cell`/`firstrow`/`if`-`in`）；`results=True` 是回归表的**旧路径**：依赖第三方 estout 且只能产出 CSV，新代码用 `stata_etable` |
 | `stata_export_delimited` | 导出为 CSV / TSV / 自定义分隔符（`delimiter`、`novarnames`、`quote` 等） |
 
 ### 包管理与帮助

@@ -7,7 +7,7 @@
   <a href="https://www.stata.com"><img src="https://img.shields.io/badge/Stata-Now%2019.5%20MP-1a476f" alt="Stata"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.10+-4a90d9" alt="Python"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-stdio-f4a259" alt="MCP"></a>
-  <img src="https://img.shields.io/badge/tools-49-6fcf97" alt="49 tools">
+  <img src="https://img.shields.io/badge/tools-50-6fcf97" alt="50 tools">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT">
 </p>
 
@@ -35,7 +35,7 @@ stata_graph("rvfplot", export="…png")  →  残差图导出为文件
 
 两部分组成，一起装进 Claude Code：
 
-- **执行层（MCP Server）** —— 经 `pystata` 直接调用 Stata 的运行时，把 49 个工具
+- **执行层（MCP Server）** —— 经 `pystata` 直接调用 Stata 的运行时，把 50 个工具
   暴露给 Agent。`stata_run` 执行任意命令、`stata_help` 查任意命令的官方语法，二者
   合起来即「全量内置命令支持」；其余专用工具（回归 / 面板 / IV / 生成变量 …）是给
   高频命令加结构化参数与校验的便利层。
@@ -114,7 +114,7 @@ cp .mcp.json.example .mcp.json     # 编辑其中的 <repo-path>
 
 Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize`。
 
-## MCP 工具（49 个）
+## MCP 工具（50 个）
 
 > 能力边界不在工具数量上：`stata_run` + `stata_help` 已覆盖全部内置命令。下面的
 > 专用工具是给高频命令加结构化参数与校验的便利层。
@@ -127,7 +127,7 @@ Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize
 | **数据探索** | `stata_describe` · `stata_codebook` · `stata_summarize` · `stata_list` · `stata_tabulate` · `stata_correlate` · `stata_display` |
 | **估计** | `stata_regress` · `stata_logistic` · `stata_probit` · `stata_poisson` · `stata_ttest` · `stata_xtreg` · `stata_ivregress` |
 | **后估计** | `stata_margins` · `stata_test` · `stata_predict` · `stata_estat`（vif/hettest/ovtest/ic）· `stata_estimates`（存取与并排比较）· `stata_return_list` |
-| **图形 / 导出** | `stata_graph`（导出即验证文件写入）· `stata_scheme`（主题）· `stata_export_excel` · `stata_export_delimited` |
+| **图形 / 导出** | `stata_graph`（导出即验证文件写入）· `stata_scheme`（主题）· `stata_export_excel` · `stata_export_delimited` · `stata_etable`（回归表直出 Word/Excel） |
 | **包管理与帮助** | `stata_help`（查任意命令帮助）· `stata_install_package` · `stata_uninstall_package` · `stata_describe_package` · `stata_find_package` · `stata_list_packages` |
 | **会话** | `stata_more`（翻页）· `stata_status` · `stata_ping` |
 
@@ -157,8 +157,11 @@ eps/ps/emf 不支持）、`quality`（仅 jpg）、`mag`（仅 pdf/eps/ps）、`
 （仅矢量格式）—— 不适用的选项被丢弃并在返回信息中说明，而非让 Stata 静默失败。
 `stata_scheme` 列出 / 查询 / 设置主题（不传 `scheme` 时**不会**改动你当前的主题）。
 `stata_export_excel` 导数据为 .xlsx（支持 `sheet_mode` / `cell` / `firstrow` /
-`if`-`in` 筛选），回归结果导为 CSV；`stata_export_delimited` 导 CSV / TSV /
-自定义分隔符。
+`if`-`in` 筛选）；`stata_export_delimited` 导 CSV / TSV / 自定义分隔符。
+**回归表**用 `stata_etable`（官方 `etable`，Stata 17+，无第三方依赖）：
+`estimates="m1 m2 m3"` 并排多模型，直出 .docx / .xlsx / .pdf / .tex / .html / .md，
+并以文件是否真被写入判定成败 —— `etable` 会先把表打印出来再报导出错误，只看输出
+很容易把失败当成功。
 
 **包管理与帮助** — `stata_help("命令")` 查任意内置 / 已装外置命令的官方语法；
 `stata_find_package` 走 `net search` 联网找包；`stata_install_package` 装（ssc 或 URL）；
@@ -241,7 +244,7 @@ uv pip freeze > requirements.txt
 stata-mcp/
 ├── setup.py                        # 一键安装（跨平台检测 Stata）
 ├── mcp-stata-server/
-│   ├── server.py                   # MCP Server 主程序（49 个工具）
+│   ├── server.py                   # MCP Server 主程序（50 个工具）
 │   ├── tests/                      # 单元测试（mock pystata，无需 Stata）
 │   └── tests_e2e/                  # 端到端测试（需真实 Stata）
 ├── .claude/skills/stata/SKILL.md   # Stata 编程知识 Skill

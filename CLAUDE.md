@@ -6,7 +6,7 @@
 
 ```
 stata-mcp/
-├── mcp-stata-server/server.py       # MCP 执行层：49 个工具，通过 pystata 调用 Stata DLL
+├── mcp-stata-server/server.py       # MCP 执行层：50 个工具，通过 pystata 调用 Stata DLL
 ├── .claude/skills/stata/SKILL.md    # 知识层：Stata 语法、模板、陷阱、Agent 协作规范
 ├── setup.py                         # 安装层：检测 Stata、创建 venv、生成 .mcp.json
 ├── .gitignore                       # 忽略 .mcp.json(生成) .venv dta/log/smcl
@@ -24,7 +24,7 @@ stata-mcp/
 | `cd mcp-stata-server && source .venv/Scripts/activate && python server.py` | 调试模式启动 |
 | `uv pip install fastmcp && uv pip freeze > requirements.txt` | 添加新依赖 |
 
-## MCP 工具（49 个）
+## MCP 工具（50 个）
 
 > **能力边界不在工具数上**：`stata_run` 执行任意命令、`stata_help` 查任意命令的
 > 官方语法，二者即「全量内置命令支持」。专用工具（回归/面板/IV/生成变量等）是
@@ -44,7 +44,7 @@ stata-mcp/
 | 后估计 | `stata_margins`, `stata_test`, `stata_predict`, `stata_estat`, `stata_estimates` | ✓* | 边际效应/Wald 检验/预测（`stata_predict` 会创建变量，非只读）；`stata_estat` 诊断(vif/hettest/ovtest/ic)；`stata_estimates` 存取与并排比较模型 |
 | 返回值 | `stata_return_list` | ✓ | 一次列出 `r()`/`e()`/`c()` 全部返回值，不必逐个 `display` |
 | 图形 | `stata_graph`, `stata_scheme` | — / ✓* | 绘图并可选导出（选项按格式自动适配，见下）；`stata_scheme` 列出/查询/设置主题（`action="set"` 非只读） |
-| 导出 | `stata_export_excel`, `stata_export_delimited` | — | 数据集导出为 .xlsx 或 CSV/TSV/自定义分隔符（replace 默认 False）；`export_excel(results=True)` 走 esttab 转 CSV |
+| 导出 | `stata_export_excel`, `stata_export_delimited`, `stata_etable` | — | 数据集导出为 .xlsx 或 CSV/TSV/自定义分隔符（replace 默认 False）；**回归表导出优先用 `stata_etable`**（官方 `etable`，无第三方依赖，直出 .docx/.xlsx/.pdf/.tex）。`export_excel(results=True)` 是旧路径：依赖第三方 estout 且只能产出 CSV |
 | 包管理与帮助 | `stata_install_package`, `stata_uninstall_package`, `stata_describe_package`, `stata_find_package`, `stata_list_packages`, `stata_help` | — / ✓ | 装/卸（`ado uninstall` 本地安全）/查详情（本地 `ado describe` 或联网 `ssc describe`）/`net search` 找包/`ado dir` 列包/`stata_help` 查任意命令帮助 |
 | 翻页 | `stata_more` | ✓ | 大输出分页浏览（缓存 120K chars） |
 | 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + **frame** + **面板/时序设定** + **已存/活跃估计** + 内存 —— 覆盖 Agent 调 `xtreg`/`margins`/`predict` 前需确认的全部前提 |
@@ -426,6 +426,7 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | `STATA_HOME` 无效时被静默忽略 | 环境变量是文档声明的最高优先级，目录不存在（外置卷未挂载、路径笔误）时直接落入自动检测，可能把**另一套** Stata 写进 `.mcp.json` | 加黄色警告指明被忽略的路径，再继续自动检测 |
 | 导出图形会摧毁多面板工作流 | 复合块后无条件 `graph drop _all`。具名图正是「后续要引用它」的显式表达，于是 `graph combine g1 g2` 导出一张后，换个布局导出第二张时源图已不存在。真机确认匿名图名为 `Graph`，`graph drop Graph` 只删它、具名图存活 | 改 drop 目标为 `Graph`；真机复验四步工作流全部成功且 `graph dir` 仍列出 g1 g2 |
 | 一行 `ssc install` 让 do 文件的错误报告不可读 | 失败时走 `_result_text_inline`（换行变 `" | "`），而该函数是为并入单行**报告条目**设计的，套在可达 120K 的完整输出上会把错误上下文、表格、行号压成一条巨型单行；同一 do 文件不含 `ssc install` 时走原路径、格式完好 | 抽出保留换行的 `_result_text`，失败路径改用它；`_result_text_inline` 的 docstring 写明只可用于单行条目 |
+| 回归表导出被第三方包与 CSV 锁死 | 唯一路径 `stata_export_excel(results=True)` 依赖第三方 `estout`，名叫 excel 却只能产出 CSV；而 Stata 17+ 自带的 `etable` 无需任何第三方包，直出 .docx/.xlsx/.pdf/.tex | 新增 `stata_etable`。导出格式经真机逐一实测（9 种可用，`.csv`/`.rtf` 报 r(198)），不支持的格式在入口拦下 —— `etable` 会先打印表格再报错，只看输出会把失败当成功；成败以文件 mtime 判定（与 `stata_graph` 同思路） |
 
 ## 权限配置
 

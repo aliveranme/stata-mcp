@@ -3556,6 +3556,103 @@ def stata_export_excel(
     return f"{changed_msg}已导出 {_format_size(export_path)} -> {export_path}\n{result}"
 
 
+# etable 支持的导出格式，逐一在 Stata 19.5 MP 上实测过：
+# .csv 与 .rtf 报 r(198) 且不产出文件，其余九种均 rc=0 且文件真实写出。
+# 必须在入口拦下不支持的格式 —— etable 会先把表格正常打印出来再报错，
+# r(198) 淹没在表格输出里，用户很容易以为导出成功了。
+_ETABLE_EXPORT_EXTS = frozenset(
+    {".docx", ".xlsx", ".xls", ".html", ".pdf", ".tex", ".md", ".txt", ".smcl"}
+)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_etable(
+    estimates: str = "",
+    export: str = "",
+    replace: bool = False,
+    stars: bool = False,
+    stats: str = "",
+    title: str = "",
+    options: str = "",
+) -> str | ToolResult:
+    """生成回归结果表并可导出（官方 ``etable``，Stata 17+）。
+
+    这是「把回归表交出去」的官方路径：**不需要任何第三方包**，且能直接产出
+    Word/Excel/PDF/LaTeX。对照 ``stata_export_excel(results=True)`` —— 那条路
+    依赖第三方 ``estout``，且只能产出 CSV。
+
+    典型用法：跑完多个模型各自 ``stata_estimates(action="store", name="m1")``，
+    再用 ``estimates="m1 m2 m3"`` 并排成表导出。不传 ``estimates`` 时用当前
+    活跃的估计结果。
+
+    Args:
+        estimates: 已存储的估计结果名（空格分隔）。留空则用当前活跃估计。
+        export: 导出路径。支持 .docx / .xlsx / .xls / .html / .pdf / .tex /
+            .md / .txt / .smcl（实测 .csv 与 .rtf 会 r(198)）。留空只打印。
+        replace: 覆盖已存在的文件（默认 False）。
+        stars: 显示显著性星号并附星号说明（``showstars showstarsnote``）。
+        stats: 附加的模型统计量，空格分隔，如 "N r2 r2_a aic"
+            （官方语法是每个各写一个 ``mstat()``，此处自动展开）。
+        title: 表标题。
+        options: 其余官方选项，如 "column(dvlabel)"、"cstat(_r_b, nformat(%9.3f))"。
+
+    Returns:
+        表格文本；导出时附确认信息。
+    """
+    if err := _validate_varlist(estimates, "estimates"):
+        return _result_or_error(err)
+    if err := _validate_varlist(stats, "stats"):
+        return _result_or_error(err)
+    if err := _validate_sheet_name(title):
+        return _result_or_error(err.replace("工作表名", "title"))
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+
+    export_path = ""
+    if export:
+        if err := _validate_path(export):
+            return _result_or_error(err)
+        ext = os.path.splitext(export)[1].lower()
+        if ext not in _ETABLE_EXPORT_EXTS:
+            return _make_error_result(
+                f"错误: etable 不支持导出为 {ext or '<无扩展名>'}"
+                f"（实测 .csv 与 .rtf 会 r(198)）。可用: "
+                f"{', '.join(sorted(_ETABLE_EXPORT_EXTS))}"
+            )
+        export_path = _normalize_path(export)
+
+    opts = []
+    if estimates.strip():
+        opts.append(f"estimates({estimates.strip()})")
+    if stars:
+        opts.append("showstars showstarsnote")
+    # 官方语法是每个统计量各写一个 mstat()，不是 mstat(N r2)
+    opts.extend(f"mstat({s})" for s in stats.split())
+    if title.strip():
+        opts.append(f'title("{title.strip()}")')
+    if export_path:
+        replace_opt = ", replace" if replace else ""
+        opts.append(f'export("{export_path}"{replace_opt})')
+    if options.strip():
+        opts.append(options.strip())
+
+    cmd = "etable" + (f", {' '.join(opts)}" if opts else "")
+
+    before_ns = (
+        _mtime_ns(export_path) if export_path and os.path.isfile(export_path) else None
+    )
+    result = _run_stata_command(cmd)
+    if isinstance(result, ToolResult) or not export_path:
+        return result
+
+    # 以文件是否被本次调用写入为准：etable 会先打印表格再报导出错误，
+    # 只看输出很容易把失败当成功（与 stata_graph 同一判定思路）。
+    if not _file_written_since(export_path, before_ns):
+        hint = "" if replace else "\n提示：目标文件已存在时需传 replace=True。"
+        return _make_error_result(f"错误: 表格未能写入 {export_path}{hint}\n{result}")
+    return f"已导出 {_format_size(export_path)} -> {export_path}\n{result}"
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def stata_export_delimited(
     filepath: str,

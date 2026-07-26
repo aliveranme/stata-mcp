@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import pytest
 from conftest import abs_path
 from fastmcp.tools.base import ToolResult
 
@@ -2775,3 +2776,86 @@ def test_run_do_file_keeps_error_output_multiline(tmp_path):
     assert "variable bad not found" in text
     assert " | " not in text
     assert text.count("\n") >= 3
+
+
+# --- stata_etable：官方回归表导出 ------------------------------------------------
+# 此前唯一的回归表导出路径是 stata_export_excel(results=True)：依赖第三方 estout，
+# 且名叫 excel 却只能产出 CSV。Stata 17+ 自带的 etable 无需任何第三方包，直接产出
+# .docx/.xlsx/.pdf/.tex —— 正是应用计量最常见的最后一步交付物。
+
+
+def test_etable_active_estimates_minimal():
+    from server import stata_etable
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_etable()
+    assert mock_run.call_args[0][0] == "etable"
+
+
+def test_etable_multiple_stored_models():
+    from server import stata_etable
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_etable(estimates="m1 m2 m3", stars=True, stats="N r2")
+    cmd = mock_run.call_args[0][0]
+    assert "estimates(m1 m2 m3)" in cmd
+    assert "showstars" in cmd and "showstarsnote" in cmd
+    # 每个统计量各自一个 mstat()，这是官方语法
+    assert "mstat(N)" in cmd and "mstat(r2)" in cmd
+
+
+def test_etable_export_builds_export_option(tmp_path):
+    from server import stata_etable
+
+    target = tmp_path / "table.docx"
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_etable(estimates="m1", export=str(target), replace=True)
+    cmd = mock_run.call_args[0][0]
+    assert f'export("{target}", replace)' in cmd
+
+
+def test_etable_export_omits_replace_by_default(tmp_path):
+    from server import stata_etable
+
+    target = tmp_path / "table.docx"
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_etable(export=str(target))
+    assert f'export("{target}")' in mock_run.call_args[0][0]
+
+
+@pytest.mark.parametrize("ext", [".csv", ".rtf", ".png"])
+def test_etable_rejects_unsupported_export_formats(tmp_path, ext):
+    """真机实测 .csv/.rtf 都是 r(198)，而错误会淹没在正常的表格输出里。"""
+    from server import stata_etable
+
+    result = stata_etable(export=str(tmp_path / f"t{ext}"))
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert "错误" in text and ext in text
+
+
+@pytest.mark.parametrize(
+    "ext", [".docx", ".xlsx", ".html", ".pdf", ".tex", ".md", ".txt", ".xls", ".smcl"]
+)
+def test_etable_accepts_supported_export_formats(tmp_path, ext):
+    """真机逐一验证过的 9 种格式。"""
+    from server import stata_etable
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_etable(export=str(tmp_path / f"t{ext}"))
+    assert "export(" in mock_run.call_args[0][0]
+
+
+def test_etable_title_is_quoted():
+    from server import stata_etable
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_etable(title="模型比较 (2024)")
+    assert 'title("模型比较 (2024)")' in mock_run.call_args[0][0]
+
+
+def test_etable_rejects_injection_in_estimates():
+    from server import stata_etable
+
+    result = stata_etable(estimates='m1) export("/evil/x.docx") //')
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert "错误" in text
