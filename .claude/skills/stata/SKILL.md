@@ -566,6 +566,7 @@ esttab m1 m2 using "results.csv", replace
    - 优先用 `summarize`、`tabulate`、`codebook` 而非 `list`
    - 确实需要全量数据时利用自动分页：先看首页，需要时再 `stata_more`
 5. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装
+5a. **缺失包的处理**：某工具报「未安装 X 包」时，**不要**自己往 `stata_run` 里塞 `ssc install`（会阻塞冻结流程）。照提示单独调用一次 `stata_install_package("X", source="ssc", timeout=120)`（联网，阻塞几秒到十几秒；超时会被干净中断不卡死），装好后**重试刚才失败的那一步**、继续原任务。不要因为装个包就放弃或重排整个分析。
 6. **图形需导出**：`graph export "output/fig1.png", replace width(1200)`。`width()`/`height()` 单位随格式而变：png 等位图是**像素**，pdf/eps/svg 等矢量是**英寸（0.5–20）**——对 pdf 传 800 会报 r(198)。
 7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway scatter mpg weight", export="output/scatter.png", scheme="s2color")`。它把 graph 与 export 放进同一复合块，少一次往返；导出成败以文件是否真被写入为准，失败会明确报错。分两步调用（先 `scatter` 再 `graph export`）实测也能成功，但错误定位更分散。
 8. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
@@ -577,4 +578,4 @@ esttab m1 m2 using "results.csv", replace
     - `stata_use_dataset(filepath, clear=True)` — 默认清除内存中已有数据
     - `stata_run(command, timeout=60)` — 命令默认超时 60s，安装包/复杂回归可传 `timeout=120`
 12. **`stata_graph` 非只读**：虽然标记为只读探索，但导出文件时会写入磁盘（destructiveHint=True），Agent 应在覆盖文件前向用户确认。
-13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并**不会**自动安装 `estout`：执行前先探测，缺失则直接报错。此时改用 `stata_install_package("estout", source="ssc")` 手动安装后重试。不要在 `stata_run` 里内嵌 `ssc install` —— SSC 网络请求会独占串行锁阻塞整个流程（实测 3–13s 波动，慢网络更久），且看门狗超时对网络 I/O 不生效；这是「阻塞太久」而非「损坏 DLL」，改走专用工具即可（可控时机、显式 timeout）。
+13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并**不会**自动安装 `estout`：执行前先探测，缺失则报错并给出可执行的单条安装命令。照提示执行 `stata_install_package("estout", source="ssc", timeout=120)`，装好后**重试本次导出**即可。不要在 `stata_run` 里内嵌 `ssc install` —— SSC 网络请求会独占串行锁阻塞整个流程（实测 3–13s 波动，慢网络更久）；这是「阻塞太久」而非「损坏 DLL」，且 `install` 工具的 `timeout` 超时会被看门狗干净中断（不卡死），改走专用工具即可。

@@ -324,7 +324,7 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | `title("'90s")` 让 `///` 失效 | 复合引号定界符写反：把 `"'`（Stata 的**结束**符）当成开启符，于是普通字符串里一出现 `"'` 就翻转状态 | 开启符改为 `` `" ``、结束符改为 `"'`，与 Stata 语法一致 |
 | 空 `depvar` 静默算错 | `_validate_identifier` 对空值一律放行，`regress("", "weight")` 拼出 `regress  weight`，Stata 把 weight 当因变量跑出**另一个回归**并返回成功 | 加 `required=True`，必填参数拒绝空值 |
 | `scheme` 可注入 `set scheme` 的选项 | 黑名单漏掉 `,`，而 `set scheme` 支持 `, permanently` | 改用正向白名单 `_SCHEME_NAME_RE` |
-| 「SSC 网络请求损坏 DLL」被误诊 | 早先据「用户报告卡死了」记为 DLL 损坏，但从未复现。实测（Stata 19.5 MP，macOS）`ssc install` 耗时 3–13s 波动、慢网络更久，整段独占 `_stata_lock`、看门狗超时对网络 I/O 不生效——表现为「卡住」但**不损坏 DLL**，网络返回后干净完成，会话健康（多场景复现无一崩溃） | 无代码改动：`stata_install_package` 独立成工具的设计依旧正确（隔离长阻塞的网络操作）；仅把文档中「损坏 DLL / 卡死」改正为「网络阻塞太久」 |
+| 「SSC 网络请求损坏 DLL」被误诊 | 早先据「用户报告卡死了」记为 DLL 损坏，但从未复现。实测（Stata 19.5 MP，macOS）`ssc install` 耗时 3–13s 波动、慢网络更久，整段独占 `_stata_lock`——表现为「卡住」但**不损坏 DLL**：装超过 timeout 时看门狗 `SetBreak` 会干净中断（rdrobust 在 10s 被 break，会话健康、包不残留），网络正常时干净完成，多场景复现无一崩溃 | 无代码改动：`stata_install_package` 独立成工具的设计依旧正确（隔离长阻塞的网络操作），并加 `timeout` 参数供用户兜底；仅把文档中「损坏 DLL / 卡死」改正为「网络阻塞太久」 |
 
 ## 权限配置
 
@@ -348,6 +348,6 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
   - 测试用 `conftest.abs_path()` 构造平台原生绝对路径，不要硬编码 `C:/` —— POSIX 下 `os.path.isabs("C:/x")` 为假，路径会被当相对路径拼上 cwd。
 - **无类型检查**：无 `mypy`、`pre-commit`。server.py 混合中英文标识符。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
-- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**不要内嵌 `ssc install`** —— 但原因不是「损坏 DLL」。实测（Stata 19.5 MP，macOS）：`ssc install` 是网络阻塞调用，同一个包耗时在 **3–13s 间波动**，慢/不可达网络下可达分钟级；它整段独占 `_stata_lock` 阻塞整个 server，且**看门狗超时对网络 I/O 不生效**（实测 `timeout=1` 的安装照样跑满 3.3s 完成，未被 break）。表现为「卡住」，但**并不损坏 DLL**——网络返回后安装干净完成，会话健康（`display`/`summarize`/后续多条命令全正常，多场景复现无一崩溃）。真正的问题是：内嵌进分析步骤时，一个不可中断的多分钟网络阻塞会意外冻结整个流程。故包安装走专用的 `stata_install_package`（用户可控时机、显式 300s timeout）。
+- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**不要内嵌 `ssc install`** —— 但原因不是「损坏 DLL」。实测（Stata 19.5 MP，macOS）：`ssc install` 是网络阻塞调用，同一个包耗时在 **3–13s 间波动**，慢/不可达网络下更久；它整段独占 `_stata_lock` 阻塞整个 server。**看门狗超时对它是生效的**：装超过 timeout 时 `SetBreak` 会**干净中断**（实测 rdrobust 在 10s 下限被 break，返回超时提示，会话健康、包不残留半装状态；`timeout=1/2` 的 fre/mdesc 没被 break 只是它们在 10s 下限前就装完了）。**全程无 DLL 损坏**——多场景复现，break 后 `display`/`summarize`/`regress` 全正常。真正的问题只是：内嵌进分析步骤时，一个几秒到十几秒的网络阻塞会意外冻结整个流程。故包安装走专用的 `stata_install_package`（用户可控时机、`timeout` 参数真实兜底）。
 - **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（60s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。
 - **工具错误语义**：错误结果（Stata 返回码非 0、输入验证失败、DLL 崩溃）通过 `ToolResult(is_error=True)` 告知 MCP 客户端。成功工具结果仍以普通字符串返回。若使用 `mcp.list_tools` 或类似客户端，需注意区分返回类型。

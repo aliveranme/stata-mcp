@@ -135,6 +135,19 @@ def test_install_package_net_url():
         assert cmd == "net install somepkg, from(https://example.com/pkg)"
 
 
+def test_install_package_default_timeout():
+    with patch("server._run_stata_command") as mock_run:
+        stata_install_package("estout", source="ssc")
+        assert mock_run.call_args.kwargs.get("timeout") == 300
+
+
+def test_install_package_custom_timeout():
+    """用户可自定义安装超时；实测超时会被看门狗干净中断，不卡死。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_install_package("estout", source="ssc", timeout=120)
+        assert mock_run.call_args.kwargs.get("timeout") == 120
+
+
 # 以下 estout 探测返回值取自 Stata 19.5 MP 实测（见 _ESTOUT_PROBE_CMD 注释）：
 # 已装 `which estout` → rc=0 + ado 路径；未装 → rc=111 + not found 文本。
 _PROBE_INSTALLED = (0, "/Users/x/Library/Application Support/Stata/ado/plus/e/estout.ado")
@@ -167,7 +180,7 @@ def test_export_excel_results_forces_csv():
 
 
 def test_export_excel_results_aborts_when_estout_missing():
-    """estout 未安装时，results=True 应直接报错，不内嵌 ssc install（防 headless 卡死）。"""
+    """estout 未安装时不自动装，而给出可恢复的单条安装指令（含 timeout）+ 重试提示。"""
     with (
         patch("server._run_stata_command") as mock_run,
         patch("server._execute_safe", return_value=_PROBE_MISSING) as mock_probe,
@@ -177,7 +190,9 @@ def test_export_excel_results_aborts_when_estout_missing():
         text = _result_text(result)
         assert getattr(result, "is_error", False)
         assert "未安装 estout" in text
-        assert "stata_install_package" in text
+        # 可执行的单条安装命令 + 显式 timeout + 装后重试的指引
+        assert 'stata_install_package("estout", source="ssc", timeout=120)' in text
+        assert "重试" in text
         mock_run.assert_not_called()
 
 

@@ -2683,8 +2683,9 @@ def stata_export_excel(
         if probe_rc not in (0, STATA_RC_NO_OUTPUT):
             return _result_or_error(
                 "错误: 未安装 estout（esttab 所依赖），无法导出回归结果。\n"
-                "请先手动安装：调用 stata_install_package(\"estout\", source=\"ssc\")，"
-                "或参考 .claude/skills/stata/SKILL.md。"
+                "请执行这一条安装命令（联网，会阻塞几秒到十几秒）：\n"
+                '    stata_install_package("estout", source="ssc", timeout=120)\n'
+                "装好后重试本次导出即可，无需改动其他步骤。"
             )
 
         cmd = (
@@ -2733,18 +2734,26 @@ def stata_export_excel(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def stata_install_package(
-    package: str, source: str = "ssc", replace: bool = False
+    package: str, source: str = "ssc", replace: bool = False, timeout: int = 300
 ) -> str | ToolResult:
-    """安装 Stata 扩展包。
+    """安装 Stata 扩展包（联网）。
 
-    从 ssc 或完整 from() URL 安装 Stata 包。
-    支持 force/replace 选项来解决版本冲突。
+    从 ssc 或完整 from() URL 安装 Stata 包。支持 replace 解决版本冲突。
+
+    **这是唯一的联网安装入口，请单独调用、装完再继续原任务**：`ssc install`
+    是网络阻塞调用（实测同一包 3–13s 波动，慢网络更久），执行期间独占串行锁、
+    冻结整个 server。不要把 `ssc install` 内嵌进 `stata_run` 的分析步骤里。
+
+    ``timeout`` 是真实兜底：安装超过它时看门狗会**干净中断**（实测超时的
+    `ssc install` 被 break 后会话健康、包不残留半装状态），返回超时提示而非
+    卡死。下限受 `stata_run` 约束为 10s；慢网络下装大包建议 120–300s。
 
     Args:
         package: 包名称（如 "outreg2"、"estout"、"ivreg2"）。
         source: 安装源 — "ssc"（默认）或完整的 from() URL。
                 例："https://fmwww.bc.edu/RePEc/bocode/o"
         replace: 是否强制替换已有文件（解决版本冲突，默认 False）。
+        timeout: 安装超时秒数（默认 300）。超时则中断并提示，不会卡死会话。
 
     Returns:
         安装过程输出。
@@ -2759,7 +2768,7 @@ def stata_install_package(
         cmd = f"ssc install {package}{replace_opt}"
     else:
         cmd = f"net install {package}{replace_opt}, from({source.strip()})"
-    return _run_stata_command(cmd, timeout=300)
+    return _run_stata_command(cmd, timeout=timeout)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
