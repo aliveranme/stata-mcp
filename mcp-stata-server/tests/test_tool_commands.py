@@ -9,6 +9,7 @@ from server import (
     stata_codebook,
     stata_correlate,
     stata_describe,
+    stata_describe_package,
     stata_egen,
     stata_export_excel,
     stata_find_package,
@@ -31,6 +32,7 @@ from server import (
     stata_tabulate,
     stata_test,
     stata_ttest,
+    stata_uninstall_package,
     stata_use_dataset,
     stata_xtreg,
 )
@@ -1055,4 +1057,53 @@ def test_new_wrappers_reject_injection_in_identifier():
     with patch("server._run_stata_command") as mock_run:
         assert getattr(stata_generate("x;drop", "1"), "is_error", False)
         assert getattr(stata_probit("y;shell ls", "x"), "is_error", False)
+        mock_run.assert_not_called()
+
+
+# ============================================================================
+# 包管理补全：uninstall / describe
+# ============================================================================
+
+
+def test_uninstall_package_builds_command():
+    with patch("server._run_stata_command") as mock_run:
+        stata_uninstall_package("winsor2")
+        assert mock_run.call_args[0][0] == "ado uninstall winsor2"
+
+
+def test_uninstall_package_rejects_empty():
+    with patch("server._run_stata_command") as mock_run:
+        assert getattr(stata_uninstall_package("  "), "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_uninstall_package_rejects_injection():
+    with patch("server._run_stata_command") as mock_run:
+        assert getattr(stata_uninstall_package("pkg; shell ls"), "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_describe_package_installed_uses_ado_describe():
+    """默认本地：ado describe，无网络。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_describe_package("estout")
+        assert mock_run.call_args[0][0] == "ado describe estout"
+
+
+def test_describe_package_ssc_uses_network():
+    with patch("server._run_stata_command") as mock_run:
+        stata_describe_package("estout", source="ssc")
+        assert mock_run.call_args[0][0] == "ssc describe estout"
+
+
+def test_describe_package_rejects_bad_source():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_describe_package("estout", source="pypi")
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_describe_package_rejects_empty():
+    with patch("server._run_stata_command") as mock_run:
+        assert getattr(stata_describe_package(""), "is_error", False)
         mock_run.assert_not_called()

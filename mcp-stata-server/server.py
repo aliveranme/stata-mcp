@@ -2762,6 +2762,64 @@ def stata_install_package(
     return _run_stata_command(cmd, timeout=300)
 
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_uninstall_package(package: str) -> str | ToolResult:
+    """卸载一个已安装的 Stata 扩展包（删除其 ado 文件）。
+
+    与 ``stata_install_package`` 对称，补全包的安装/卸载生命周期。执行
+    ``ado uninstall <package>``，这是**纯本地**操作（只删文件，不联网），
+    实测约 20ms，不存在 SSC 网络请求卡死 DLL 的风险。
+
+    包未安装时 Stata 返回 r(111) ``package not found``。不确定包名时先用
+    ``stata_list_packages`` 查已装清单。
+
+    Args:
+        package: 要卸载的包名（须与 ``stata_list_packages`` 列出的名称一致）。
+
+    Returns:
+        卸载确认信息。
+    """
+    if err := _validate_identifier(package, "package", required=True):
+        return _result_or_error(err)
+    return _run_stata_command(f"ado uninstall {package}")
+
+
+# 包详情来源白名单：本地已装 vs 联网查 SSC
+_DESCRIBE_SOURCES = {"installed", "ssc"}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_describe_package(package: str, source: str = "installed") -> str | ToolResult:
+    """查看某个扩展包的详情（作者、功能、包含的文件）。
+
+    两种来源：
+    - ``source="installed"``（默认）：``ado describe <package>``，**本地**读取
+      已安装包的信息，实测约 12ms，无网络风险。包未安装则报错。
+    - ``source="ssc"``：``ssc describe <package>``，**联网**查询 SSC 存档，可在
+      安装**前**了解一个包（实测约 1–7s）。网络不可达时会等到超时。
+
+    安装决策流程：``stata_find_package`` 搜索 → ``stata_describe_package(pkg,
+    source="ssc")`` 看详情 → ``stata_install_package`` 安装。
+
+    Args:
+        package: 包名。
+        source: "installed"（本地已装，默认）或 "ssc"（联网查 SSC）。
+
+    Returns:
+        包详情文本。
+    """
+    if err := _validate_identifier(package, "package", required=True):
+        return _result_or_error(err)
+    src = source.strip().lower()
+    if src not in _DESCRIBE_SOURCES:
+        return _make_error_result(
+            f"错误: source 只能是 {', '.join(sorted(_DESCRIBE_SOURCES))} 之一，收到 '{source}'"
+        )
+    if src == "ssc":
+        return _run_stata_command(f"ssc describe {package}", timeout=120)
+    return _run_stata_command(f"ado describe {package}")
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def stata_find_package(keyword: str) -> str | ToolResult:
     """搜索可安装的 Stata 扩展包（联网）。

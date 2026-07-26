@@ -6,7 +6,7 @@
 
 ```
 stata-mcp/
-├── mcp-stata-server/server.py       # MCP 执行层：33 个工具，通过 pystata 调用 Stata DLL
+├── mcp-stata-server/server.py       # MCP 执行层：35 个工具，通过 pystata 调用 Stata DLL
 ├── .claude/skills/stata/SKILL.md    # 知识层：Stata 语法、模板、陷阱、Agent 协作规范
 ├── setup.py                         # 安装层：检测 Stata、创建 venv、生成 .mcp.json
 ├── .gitignore                       # 忽略 .mcp.json(生成) .venv dta/log/smcl
@@ -24,7 +24,7 @@ stata-mcp/
 | `cd mcp-stata-server && source .venv/Scripts/activate && python server.py` | 调试模式启动 |
 | `uv pip install fastmcp && uv pip freeze > requirements.txt` | 添加新依赖 |
 
-## MCP 工具（33 个）
+## MCP 工具（35 个）
 
 > **能力边界不在工具数上**：`stata_run` 执行任意命令、`stata_help` 查任意命令的
 > 官方语法，二者即「全量内置命令支持」。专用工具（回归/面板/IV/生成变量等）是
@@ -40,7 +40,7 @@ stata-mcp/
 | 后估计 | `stata_margins`, `stata_test`, `stata_predict` | ✓* | 边际效应/Wald 检验/预测（`stata_predict` 会创建变量，非只读） |
 | 图形 | `stata_graph` | — | 执行图形命令并可选导出文件（destructiveHint=True，可覆盖文件） |
 | 导出 | `stata_export_excel` | — | 数据集导出为 .xlsx（replace 默认 False）；回归结果自动转为 CSV |
-| 包管理与帮助 | `stata_install_package`, `stata_find_package`, `stata_list_packages`, `stata_help` | — / ✓ | 安装、`net search` 找包、`ado dir` 列包、`stata_help` 查任意命令帮助（只读） |
+| 包管理与帮助 | `stata_install_package`, `stata_uninstall_package`, `stata_describe_package`, `stata_find_package`, `stata_list_packages`, `stata_help` | — / ✓ | 装/卸（`ado uninstall` 本地安全）/查详情（本地 `ado describe` 或联网 `ssc describe`）/`net search` 找包/`ado dir` 列包/`stata_help` 查任意命令帮助 |
 | 翻页 | `stata_more` | ✓ | 大输出分页浏览（缓存 120K chars） |
 | 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + 内存 |
 | 心跳 | `stata_ping` | ✓ | 快速检测 Stata DLL 存活状态 |
@@ -170,7 +170,8 @@ stata-mcp/
 - **`stata_export_excel(results=True)`** 自动输出为 CSV（不支持 xlsx），若 `estout` 未安装则返回明确错误并提示手动安装（**不自动安装**——见下）。
 - **`///` 续行符**：现在已被修复支持（版本 v2+），可在 `stata_run` 中使用 `///` 连接多行长命令。
 - **`{ }` 复合块与循环可以直接写**：`forvalues` / `foreach` / `if` 块、`program define ... end` 都能在 `stata_run` 里正常使用（走临时 do 文件，见上）。注意 Stata 语法要求 `{` 之后换行 —— `forvalues i=1/3 { display \`i' }` 写在一行会 r(198)，这是 Stata 本身的规则。
-- **`stata_find_package` 走 `net search`（联网，约 1 秒）**：`ssc` 没有 `search` 子命令。只想看某个已知包的详情用 `stata_run("ssc describe <包名>")`；只搜本机帮助用 `stata_run("search <词>, local")`。
+- **`stata_find_package` 走 `net search`（联网，约 1 秒）**：`ssc` 没有 `search` 子命令。只搜本机帮助用 `stata_run("search <词>, local")`。
+- **包生命周期已补全 `uninstall` / `describe`**：`stata_uninstall_package` 是 `ado uninstall`（**纯本地**删文件，实测约 20ms，无 SSC 网络卡死风险，与 `install` 对称）。`stata_describe_package` 默认 `source="installed"` 走本地 `ado describe`（约 12ms）；`source="ssc"` 走联网 `ssc describe`（约 1–7s，装前查详情用）—— 网络路径与 `install` 同属有卡死风险的联网操作，故独立成工具、用户可控时机。`update` 由 `install` 的 `replace=True` 覆盖（`ssc install pkg, replace` 即重装最新）。
 - **`winsor2` 的 `suffix(_w)` 不能和 `replace` 一起用**：选项冲突。要么 `suffix(_w)` 创建新变量，要么 `replace` 覆盖原变量。
 - **裸 `cd`（不带参数）会切换到 home，不是显示当前目录**：同 Unix shell，它切换并把新目录打印出来，看着像查询实为修改。查当前目录一律用 `display c(pwd)`。`stata_status` 曾因此在标注只读的情况下悄悄重置用户 `set_cwd` 的结果。
 - **`stata_list_packages` 用 `ado dir` 而非 `ado describe`**：后者输出每个包的完整文档（实测本机 49516 字符 / 13 页），前者 4330 字符即给出同样的包清单。看单个包详情用 `stata_run("ado describe <包名>")`。

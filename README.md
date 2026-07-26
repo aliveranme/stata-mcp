@@ -7,7 +7,7 @@
   <a href="https://www.stata.com"><img src="https://img.shields.io/badge/Stata-Now%2019.5%20MP-1a476f" alt="Stata"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.10+-4a90d9" alt="Python"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-stdio-f4a259" alt="MCP"></a>
-  <img src="https://img.shields.io/badge/tools-33-6fcf97" alt="33 tools">
+  <img src="https://img.shields.io/badge/tools-35-6fcf97" alt="35 tools">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT">
 </p>
 
@@ -35,7 +35,7 @@ stata_graph("rvfplot", export="…png")  →  残差图导出为文件
 
 两部分组成，一起装进 Claude Code：
 
-- **执行层（MCP Server）** —— 经 `pystata` 直接调用 Stata 的运行时，把 33 个工具
+- **执行层（MCP Server）** —— 经 `pystata` 直接调用 Stata 的运行时，把 35 个工具
   暴露给 Agent。`stata_run` 执行任意命令、`stata_help` 查任意命令的官方语法，二者
   合起来即「全量内置命令支持」；其余专用工具（回归 / 面板 / IV / 生成变量 …）是给
   高频命令加结构化参数与校验的便利层。
@@ -111,7 +111,7 @@ cp .mcp.json.example .mcp.json     # 编辑其中的 <repo-path>
 
 Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize`。
 
-## MCP 工具（33 个）
+## MCP 工具（35 个）
 
 > 能力边界不在工具数量上：`stata_run` + `stata_help` 已覆盖全部内置命令。下面的
 > 专用工具是给高频命令加结构化参数与校验的便利层。
@@ -124,7 +124,7 @@ Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize
 | **估计** | `stata_regress` · `stata_logistic` · `stata_probit` · `stata_poisson` · `stata_ttest` · `stata_xtreg` · `stata_ivregress` |
 | **后估计** | `stata_margins` · `stata_test` · `stata_predict` |
 | **图形 / 导出** | `stata_graph`（导出即验证文件写入）· `stata_export_excel` |
-| **包管理与帮助** | `stata_help`（查任意命令帮助）· `stata_install_package` · `stata_find_package` · `stata_list_packages` |
+| **包管理与帮助** | `stata_help`（查任意命令帮助）· `stata_install_package` · `stata_uninstall_package` · `stata_describe_package` · `stata_find_package` · `stata_list_packages` |
 | **会话** | `stata_more`（翻页）· `stata_status` · `stata_ping` |
 
 <details>
@@ -151,6 +151,8 @@ Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize
 
 **包管理与帮助** — `stata_help("命令")` 查任意内置 / 已装外置命令的官方语法；
 `stata_find_package` 走 `net search` 联网找包；`stata_install_package` 装（ssc 或 URL）；
+`stata_uninstall_package` 卸载（`ado uninstall`，纯本地）；`stata_describe_package`
+查包详情（默认本地 `ado describe`，`source="ssc"` 走联网 `ssc describe` 供装前了解）；
 `stata_list_packages` 列已装。
 
 **会话** — `stata_more` 翻上一条命令的完整输出；`stata_status` 看数据 / cwd / 内存；
@@ -220,7 +222,7 @@ uv pip freeze > requirements.txt
 stata-mcp/
 ├── setup.py                        # 一键安装（跨平台检测 Stata）
 ├── mcp-stata-server/
-│   ├── server.py                   # MCP Server 主程序（33 个工具）
+│   ├── server.py                   # MCP Server 主程序（35 个工具）
 │   └── tests/                      # pytest 测试套件
 ├── .claude/skills/stata/SKILL.md   # Stata 编程知识 Skill
 ├── assets/readme/                  # README 视觉资产

@@ -18,7 +18,7 @@ description: >
 结果输出全流程。
 
 **MCP Server 信息：**
-- 名称：`stata`，33 个工具覆盖数据管理/生成、探索、估计、后估计、图形导出、包管理与帮助、会话控制；`stata_run` + `stata_help` 覆盖全部内置命令
+- 名称：`stata`，35 个工具覆盖数据管理/生成、探索、估计、后估计、图形导出、包管理与帮助、会话控制；`stata_run` + `stata_help` 覆盖全部内置命令
 - Stata 版本：StataNow 19 / Stata 18+（取决于安装的版本）
 - 连接方式：本地 stdio，通过 pystata 直接调用 DLL
 - **会话持久**：Stata 在服务器启动时初始化一次，所有命令共享同一会话。
@@ -134,7 +134,9 @@ description: >
 | 工具 | 用途 |
 |------|------|
 | `stata_help` | **查任意命令的官方帮助**（内置 + 已装外置，覆盖全部命令） |
-| `stata_install_package` | 安装扩展包（ssc 或完整 from() URL） |
+| `stata_install_package` | 安装扩展包（ssc 或完整 from() URL）；`replace=True` 即重装最新 |
+| `stata_uninstall_package` | 卸载已装包（`ado uninstall`，纯本地，与 install 对称） |
+| `stata_describe_package` | 查包详情：默认本地 `ado describe`；`source="ssc"` 联网查（装前了解） |
 | `stata_find_package` | 联网搜索可安装的扩展包（`net search`） |
 | `stata_list_packages` | 列出已安装包 |
 
@@ -494,8 +496,10 @@ esttab m1 m2 using "results.csv", replace
 
 ## 常用第三方包
 
-用法：`stata_find_package("包名")` 搜 → `stata_install_package("包名", source="ssc")`
-装 → `stata_help("包名")` 查语法。**切勿**把 `ssc install` 写进 `stata_run` ——
+用法：`stata_find_package("包名")` 搜 → `stata_describe_package("包名", source="ssc")`
+看详情（可选）→ `stata_install_package("包名", source="ssc")` 装 → `stata_help("包名")`
+查语法。不再需要时 `stata_uninstall_package("包名")` 卸载。**切勿**把 `ssc install`
+或 `ssc describe` 写进 `stata_run` ——
 headless 下 SSC 网络请求会卡死 DLL（见「与 Agent 协作规范」）。
 
 ### 结果输出 / 表格

@@ -43,6 +43,8 @@ EXPECTED_TOOLS = {
     "stata_export_excel",
     # 包管理与帮助
     "stata_install_package",
+    "stata_uninstall_package",
+    "stata_describe_package",
     "stata_find_package",
     "stata_list_packages",
     "stata_help",
@@ -90,6 +92,7 @@ def test_write_tools_are_not_marked_read_only():
         "stata_graph",
         "stata_export_excel",
         "stata_install_package",
+        "stata_uninstall_package",
         # 以下会创建变量，改动内存中的数据集
         "stata_generate",
         "stata_egen",
