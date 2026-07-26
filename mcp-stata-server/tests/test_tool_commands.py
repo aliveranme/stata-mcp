@@ -798,3 +798,42 @@ def test_more_paginates_cached_output():
     assert page1.startswith("── 第 1/10 页")
     full = _result_text(stata_more(page=0))
     assert len(full) == 10_000, "page=0 应返回完整缓存"
+
+
+# --- 未闭合块与数值边界 --------------------------------------------------------
+
+
+def test_run_rejects_unclosed_block_with_actionable_message():
+    """未闭合的块送去执行会挂死会话（实测 `capture noisily {` 单行即可复现）。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run("capture noisily {")
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "未闭合" in text
+    assert "}" in text
+    mock_run.assert_not_called()
+
+
+def test_run_still_blocks_danger_inside_unclosed_block():
+    """危险命令恰是最易未闭合的一类，护栏不能因解析失败而放行。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run("/**/python: import os")
+    assert getattr(result, "is_error", False)
+    assert "危险前缀" in _result_text(result)
+    mock_run.assert_not_called()
+
+
+def test_graph_rejects_negative_size():
+    for kwargs in ({"width": -100}, {"height": -1}):
+        with patch("server._run_stata_command") as mock_run:
+            result = stata_graph("histogram price", **kwargs)
+        assert getattr(result, "is_error", False)
+        assert "不能为负数" in _result_text(result)
+        mock_run.assert_not_called()
+
+
+def test_graph_accepts_zero_size_as_unset():
+    """0 表示「不指定」，是默认值，不能被负值校验误伤。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_graph("histogram price", width=0, height=0)
+        mock_run.assert_called_once()

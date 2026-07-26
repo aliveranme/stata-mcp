@@ -133,6 +133,12 @@ stata-mcp/
 - `///` 行尾 → 续行符，合并到下一行
 - `{` 出现但 `}` 不在同行的 → 复合块开始，收集直到 `}` 闭合
 - `program` / `input` / `mata` 开头 → 收集直到单独一行 `end`
+- **输入结束时块仍未闭合 → 抛 `UnbalancedBlockError`**，不把残缺块送去执行。
+  Stata 收到孤立的 `{` 或未配对的 `program` 会进入等待输入状态并**挂死会话**
+  （实测 `capture noisily {` 单独一行即可复现，`SetBreak` 救不回）。异常携带
+  `blocks`（已完整解析的块）与 `pending`（未闭合块的已累积文本），供安全护栏
+  继续检查 —— 危险命令恰是最容易未闭合的一类（`mata:` / `python:` 单独出现
+  即开启 end 块），丢弃已知内容会让护栏对最该拦的输入失效。
 
 ### 文件存在性检查
 
@@ -306,6 +312,7 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | `fastmcp>=3.0.0` 是假下界 | `fastmcp.tools.base` 在 3.2.0 才出现，实测 3.0.0/3.1.0 均 `ModuleNotFoundError` | 提升到 `>=3.2.0`（pyproject 与 requirements 同步） |
 | `setup.py` 在 macOS/Linux 完全不可用 | edition 检测只查 Windows 的 `{edition}-64.dll`，macOS 候选路径还指向 app bundle 内部 | `_edition_artifacts` 按平台给出特征文件；候选路径改为含 `utilities/pystata` 的安装根目录 |
 | 重跑 `setup.py` 抹掉其他 MCP 配置 | `generate_mcp_json` 无条件整文件覆盖 | 改为读取后只更新 `stata` 条目，保留其他 server 与自定义 env |
+| 未闭合的 `{` / `program` 挂死会话 | 解析器把残缺块原样发出（旧注释称「让 Stata 报语法错」，实测它不报错而是等待输入） | 解析出口抛 `UnbalancedBlockError`；`_precheck_command` 在入口拦下并给可操作提示 |
 
 ## 权限配置
 
@@ -322,7 +329,11 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 
 ## 已知局限
 
-- **CI 只覆盖 Linux**：`.github/workflows/test.yml` 在 ubuntu-latest 上跑 py3.10/3.11/3.12 的 `ruff check` + `pytest --cov`（ruff 规则见 `pyproject.toml` 的 `[tool.ruff]`）。但本项目主要面向 Windows（`STATA_HOME` 默认即 Windows 路径），Windows 与 macOS 均无 CI 覆盖。测试用 `conftest.abs_path()` 构造平台原生绝对路径，不要在测试里硬编码 `C:/` —— POSIX 下 `os.path.isabs("C:/x")` 为假，路径会被当相对路径拼上 cwd（CI 曾因此长期失败）。
+- **CI 实际不运行**：`.github/workflows/test.yml` 是 GitHub Actions 格式，而本仓库的 `origin` 是自建 Gitea（`gitea.aliveranme.space`）。除非该 Gitea 启用 Actions 并注册了 runner，推送**不会触发任何检查**。这份 workflow 目前只是「若迁到 GitHub 即可用」的配置，**不能当作质量门禁**。
+  - 它描述的内容：ubuntu-latest × py3.10/3.11/3.12，跑 `ruff check .` 加对仓库根 `setup.py` 的单独 lint，再跑 `pytest --cov`（ruff 规则见 `pyproject.toml` 的 `[tool.ruff]`）。
+  - 提交前请在本地手动执行：`cd mcp-stata-server && .venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check server.py tests/ && .venv/bin/python -m ruff check --config pyproject.toml ../setup.py`
+  - 即便迁到 GitHub，也只覆盖 Linux；本项目主要面向 Windows（`STATA_HOME` 默认即 Windows 路径），Windows 与 macOS 都无覆盖。
+  - 测试用 `conftest.abs_path()` 构造平台原生绝对路径，不要硬编码 `C:/` —— POSIX 下 `os.path.isabs("C:/x")` 为假，路径会被当相对路径拼上 cwd。
 - **无类型检查**：无 `mypy`、`pre-commit`。server.py 混合中英文标识符。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
 - **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**绝不内嵌 `ssc install`** —— headless MCP 环境下 SSC 网络请求会阻塞 `StataSO_Execute`，看门狗 `SetBreak` 无法干净中断网络 I/O，会损坏 DLL 状态导致后续调用全部卡死。包安装请走专用的 `stata_install_package`（用户可控时机、可显式传 timeout）。

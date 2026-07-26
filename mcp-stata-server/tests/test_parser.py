@@ -1,4 +1,6 @@
-from server import _parse_command_blocks
+import pytest
+
+from server import UnbalancedBlockError, _parse_command_blocks
 
 
 def test_simple_multiline_split():
@@ -160,12 +162,40 @@ def test_unclosed_block_comment_drops_trailing_text():
     assert "never ends" not in blocks[0]
 
 
-def test_unmatched_brace_emits_remaining_buffer():
-    # Parser does not enforce brace balance; unmatched '{' stays in buffer
-    # and gets emitted so Stata can report the syntax error.
-    blocks = _parse_command_blocks("capture noisily {\nsummarize mpg")
-    assert len(blocks) == 1
-    assert "capture noisily {" in blocks[0]
+@pytest.mark.parametrize(
+    ("cmd", "missing"),
+    [
+        ("capture noisily {", "}"),
+        ("capture noisily {\nsummarize mpg", "}"),
+        ("forvalues i=1/2 {\n    if 1 {\n        display 1\n    }", "}"),
+        ("program define hi\n    display 1", "end"),
+        ("input x y\n1 2", "end"),
+        ("mata:\n  1+1", "end"),
+    ],
+)
+def test_unclosed_block_raises_instead_of_hanging_session(cmd, missing):
+    """未闭合的块不能送去执行 —— Stata 会等待后续输入并挂死整个会话。
+
+    旧行为是把残缺块原样发出，注释里写着「让 Stata 报语法错」；实测
+    `capture noisily {` 单独一行会让会话无响应，看门狗的 SetBreak 也救不回。
+    """
+    with pytest.raises(UnbalancedBlockError) as exc:
+        _parse_command_blocks(cmd)
+    assert missing in str(exc.value)
+
+
+def test_unbalanced_error_carries_parsed_content():
+    """异常须带出已解析内容，否则安全护栏会对未闭合的危险命令失效。"""
+    with pytest.raises(UnbalancedBlockError) as exc:
+        _parse_command_blocks("summarize price\nmata:\n  1+1")
+    assert exc.value.blocks == ["summarize price"]
+    assert "mata:" in exc.value.pending
+
+
+def test_balanced_blocks_still_parse():
+    """闭合的块不受影响。"""
+    assert len(_parse_command_blocks("capture noisily {\n    display 1\n}")) == 1
+    assert len(_parse_command_blocks("program define hi\n    display 1\nend")) == 1
 
 
 def test_leading_space_star_is_not_comment():

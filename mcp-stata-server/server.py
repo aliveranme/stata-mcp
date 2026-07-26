@@ -370,9 +370,36 @@ def _validate_command_blocks(command: str) -> str | None:
     条原则。检查解析后的块还有个附带好处：真正被注释掉的内容不会产生执行块，
     因此注释里出现危险词也不会误伤。
     """
-    for block in _parse_command_blocks(command):
+    try:
+        blocks = _parse_command_blocks(command)
+    except UnbalancedBlockError as e:
+        # 块未闭合时仍要检查已解析出的内容。危险命令正是最容易未闭合的一类
+        # （`mata:` / `python:` 单独出现即开启 end 块），丢弃已知内容会让护栏
+        # 对最该拦的输入失效。未闭合本身由 _precheck_command 单独报错。
+        blocks = [*e.blocks, e.pending]
+    for block in blocks:
         if reason := _has_dangerous_command_prefix(block):
             return reason
+    return None
+
+
+def _precheck_command(command: str) -> str | None:
+    """自由文本命令的入口预检：危险前缀 + 块闭合性。返回错误文本或 None。
+
+    两项检查都必须在**进入执行路径之前**完成：
+    - 危险前缀：见 ``_validate_command_blocks``，校验解析后的执行块
+    - 块闭合性：未闭合的 ``{`` 或 ``end`` 送去执行会让 Stata 进入等待输入
+      状态并挂死会话，看门狗的 SetBreak 也救不回
+
+    顺序有意为之：先报危险前缀。``mata:`` 这类输入同时命中两项，此时「已被禁止」
+    比「块未闭合」更贴近用户的真实问题。
+    """
+    if reason := _validate_command_blocks(command):
+        return reason
+    try:
+        _parse_command_blocks(command)
+    except UnbalancedBlockError as e:
+        return f"错误: {e}"
     return None
 
 
@@ -587,6 +614,24 @@ def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
     footer += " — stata_more(page=0) 显示全部"
 
     return header + chunk + footer
+
+
+class UnbalancedBlockError(ValueError):
+    """命令块未闭合（缺 ``}`` 或 ``end``）。
+
+    单独成类而非复用 ValueError，是为了让调用方能把「用户写错了」与解析器
+    自身的内部错误区分开 —— 前者要给可操作提示，后者该记日志。
+
+    ``blocks`` 携带异常发生前已完整解析出的块，``pending`` 携带那个未闭合块
+    已累积的文本。安全护栏必须能看到这些内容：危险命令恰好是最容易「未闭合」
+    的一类（``mata:`` / ``python:`` 单独出现就会开启 end 块），若因解析失败
+    就丢弃已知内容，护栏对最该拦的输入反而失效。
+    """
+
+    def __init__(self, message: str, blocks: list[str] | None = None, pending: str = ""):
+        super().__init__(message)
+        self.blocks = blocks or []
+        self.pending = pending
 
 
 def _flush_block(buffer: list[str], blocks: list[str]) -> None:
@@ -809,6 +854,19 @@ def _parse_command_blocks(cmd: str) -> list[str]:
             _flush_block(buffer, blocks)
 
     if buffer:
+        # 输入结束时仍有未闭合的块 —— 把它送去执行会让 Stata 进入等待输入状态
+        # 并**挂死整个会话**（看门狗的 SetBreak 也救不回，实测 `capture noisily {`
+        # 单独一行即可复现）。抛错让调用方看到明确原因，比静默挂死好得多。
+        if brace_depth > 0 or in_end_block:
+            missing = "}" if brace_depth > 0 else "end"
+            pending = "\n".join(buffer)
+            raise UnbalancedBlockError(
+                f"命令块未闭合（缺少 {missing}）：{pending[:80]}\n"
+                f"提示：Stata 会等待后续输入直到读到 {missing}，"
+                "在 MCP 会话中这会挂死整个连接。请补全后重试。",
+                blocks=list(blocks),
+                pending=pending,
+            )
         _flush_block(buffer, blocks)
 
     return blocks
@@ -1263,7 +1321,11 @@ def _run_stata_command(
                 return _make_error_result(f"错误: 文件不存在 — {stata_abs}")
 
         # 使用新的解析器：正确处理 /// 续行和 { } 复合块
-        blocks = _parse_command_blocks(cmd)
+        try:
+            blocks = _parse_command_blocks(cmd)
+        except UnbalancedBlockError as e:
+            # 未闭合的块若送去执行会挂死会话，在此拦下并给出可操作提示
+            return _make_error_result(f"错误: {e}")
 
         if not blocks:
             return _make_error_result("(无有效命令)")
@@ -1486,8 +1548,8 @@ def stata_run(command: str, page: int = 1, timeout: int = 60) -> str | ToolResul
     safe_timeout = max(10, min(timeout, 1800))
     if "\x00" in command:
         return _make_error_result("错误: command 包含空字节")
-    # 校验解析后的执行块，而非原始文本 —— 详见 _validate_command_blocks
-    if reason := _validate_command_blocks(command):
+    # 入口预检：危险前缀（校验解析后的执行块）+ 块闭合性（未闭合会挂死会话）
+    if reason := _precheck_command(command):
         return _make_error_result(reason)
     return _run_stata_command(command, page, timeout=safe_timeout)
 
@@ -1909,8 +1971,14 @@ def _has_unsafe_brace(cmd: str) -> bool:
     将命令包裹在 { } 中传给 _parse_command_blocks：
     若 cmd 包含未匹配的 }（字符串/注释外），会提前闭合外层 {，
     产生多个 block → 不安全。反之仅产生 1 个 block → 安全。
+
+    cmd 自带未闭合的 ``{`` 时解析器会抛 UnbalancedBlockError（那种输入送去执行
+    会挂死会话），同样按不安全处理。
     """
-    blocks = _parse_command_blocks("{\n" + cmd + "\n}")
+    try:
+        blocks = _parse_command_blocks("{\n" + cmd + "\n}")
+    except UnbalancedBlockError:
+        return True
     return len(blocks) != 1
 
 
@@ -2037,10 +2105,15 @@ def stata_graph(
         # 临时 do 文件），因此必须与 stata_run 走同一层护栏 —— 实测
         # stata_graph(command='!touch /tmp/x') 曾能真实创建文件。
         # 同样要校验解析后的块：`sh/*x*/ell …` 在原始文本里不含 shell 一词。
-        if reason := _validate_command_blocks(command):
+        if reason := _precheck_command(command):
             return _make_error_result(reason)
         if err := _validate_scheme_name(scheme):
             return _result_or_error(err)
+        # 负值会被原样拼成 width(-100) 交给 Stata；实测虽因图形命令先失败而未暴露，
+        # 但语义上无意义，应在入口拒绝而不是依赖下游偶然报错。
+        for label, value in (("width", width), ("height", height)):
+            if value < 0:
+                return _make_error_result(f"错误: {label} 不能为负数（{value}）")
         if export:
             if err := _validate_path(export):
                 return _result_or_error(err)

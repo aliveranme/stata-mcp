@@ -220,6 +220,21 @@ forvalues i = 1/3 {                   // ✅
 }
 ```
 
+**每个块必须在同一次调用里闭合**。不要把开头和结尾拆到两次 `stata_run`：
+
+```stata
+// ❌ 第一次调用只发开头 —— 会被拒绝
+stata_run("forvalues i = 1/3 {")
+stata_run("    display `i'\n}")
+
+// ✅ 一次发完整块
+stata_run("forvalues i = 1/3 {\n    display `i'\n}")
+```
+
+未闭合的块会返回「命令块未闭合（缺少 `}`）」错误。这不是过度严格：Stata 收到
+孤立的 `{` 会进入等待输入状态，在 MCP 会话中直接挂死整个连接且无法恢复。
+`program define ... end`、`input ... end` 同理。
+
 批量处理变量时，循环比逐条调用工具高效得多 —— 一次往返完成全部迭代。
 
 ---
