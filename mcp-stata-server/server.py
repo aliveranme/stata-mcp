@@ -176,6 +176,7 @@ STATA_RC_MESSAGES = {
     10: "数据集中无观测值",
     20: "矩阵尺寸不匹配",
     99: "观测值不足",
+    110: "变量已存在（用 replace 覆盖或改用新名）",
     111: "变量或命令未找到",
     198: "命令语法错误",
     199: "选项语法错误",
@@ -196,6 +197,10 @@ _SCHEME_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _INSTALL_SOURCE_RE = re.compile(
     r"^https://[a-zA-Z0-9][-a-zA-Z0-9.]*(:\d+)?(/[^\s()\";`$]*)?$", re.IGNORECASE
 )
+# 帮助主题：命令名 + 可选的多词子主题（如 "xtreg postestimation"、"estat firststage"）。
+# 仅允许字母/数字/下划线/空格 —— 命令名与手册主题的全部合法字符都在此集内，
+# 而 ! ; 换行 反引号 $ 引号 ( ) 等注入字符一律被拒，杜绝把第二条命令拼进 help。
+_HELP_TOPIC_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ ]{0,63}$")
 
 # =============================================================================
 # 路径沙箱 (ALLOWED_ROOTS)
@@ -1661,6 +1666,113 @@ def stata_set_cwd(path: str) -> str | ToolResult:
     return _run_stata_command(f'cd "{_normalize_path(path)}"')
 
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def stata_generate(
+    newvar: str,
+    expression: str,
+    condition: str = "",
+) -> str | ToolResult:
+    """创建新变量（generate）。
+
+    变量名已存在时 Stata 报 r(110)；此时应改用 ``stata_run("replace ...")``
+    覆盖，或换个新名。
+
+    Args:
+        newvar: 新变量名（须是合法标识符，且当前不存在）。
+        expression: 赋值表达式，如 "ln(price)"、"price/100"、"age^2"、
+            "(foreign==1)"。
+        condition: if 条件子句（可选）—— 仅对满足条件的观测赋值，其余为缺失。
+
+    Returns:
+        创建确认信息。
+    """
+    if err := _validate_identifier(newvar, "newvar", required=True):
+        return _result_or_error(err)
+    if not expression.strip():
+        return _make_error_result("错误: 请提供赋值表达式")
+    if err := _validate_no_injection(expression, "expression"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    cmd = f"generate {newvar} = {expression.strip()}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    return _run_stata_command(cmd)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def stata_egen(
+    newvar: str,
+    fcn: str,
+    by: str = "",
+    condition: str = "",
+) -> str | ToolResult:
+    """用扩展生成函数创建新变量（egen）。
+
+    egen 提供 generate 没有的聚合/行运算函数。
+
+    Args:
+        newvar: 新变量名（须是合法标识符，且当前不存在）。
+        fcn: egen 函数调用，如 "mean(price)"、"rowmean(x1 x2 x3)"、
+            "group(id year)"、"total(sales)"、"rank(score)"、"tag(id)"。
+        by: 分组变量（可选，空格分隔）—— 拼成 ``bysort <by>: egen ...``，
+            用于组内聚合，如按 industry 求组内均值。
+        condition: if 条件子句（可选）。
+
+    Returns:
+        创建确认信息。
+    """
+    if err := _validate_identifier(newvar, "newvar", required=True):
+        return _result_or_error(err)
+    if not fcn.strip():
+        return _make_error_result("错误: 请提供 egen 函数，如 mean(price)")
+    if err := _validate_no_injection(fcn, "fcn"):
+        return _result_or_error(err)
+    if err := _validate_varlist(by, "by"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    prefix = f"bysort {by.strip()}: " if by.strip() else ""
+    cmd = f"{prefix}egen {newvar} = {fcn.strip()}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    return _run_stata_command(cmd)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def stata_predict(
+    newvar: str,
+    options: str = "",
+    condition: str = "",
+) -> str | ToolResult:
+    """在估计后生成预测值 / 残差等（predict，后估计命令）。
+
+    **前提**：先运行过一个估计命令（regress/logit 等）。它会创建一个新变量。
+
+    Args:
+        newvar: 存放结果的新变量名。
+        options: 预测类型，如 "xb"（线性预测，默认）、"residuals"（残差）、
+            "pr"（logit/probit 的预测概率）、"stdp"（预测标准误）、
+            "cooksd"（Cook 距离）。
+        condition: if 条件子句（可选）。
+
+    Returns:
+        创建确认信息。
+    """
+    if err := _validate_identifier(newvar, "newvar", required=True):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    cmd = f"predict {newvar}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    if options.strip():
+        cmd += f", {options.strip()}"
+    return _run_stata_command(cmd)
+
+
 # =============================================================================
 # MCP 工具 — 数据探索 (readOnlyHint=True)
 # =============================================================================
@@ -1979,6 +2091,296 @@ def stata_ttest(
         if options.strip():
             cmd += f", {options}"
     return _run_stata_command(cmd)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_probit(
+    depvar: str,
+    indepvars: str,
+    marginal_effects: bool = False,
+    options: str = "",
+    condition: str = "",
+) -> str | ToolResult:
+    """运行 Probit 回归（二元因变量）。
+
+    Args:
+        depvar: 二元因变量名（取值 0/1）。
+        indepvars: 自变量列表（空格分隔）。
+        marginal_effects: True 时在回归后自动追加 ``margins, dydx(*)`` 报告
+            平均边际效应（probit 系数不能直接解读，通常需要边际效应）。
+        options: 额外选项，如 "robust"、"vce(cluster id)"。
+        condition: if 条件子句（可选）。
+
+    Returns:
+        Probit 回归结果（可选附平均边际效应）。
+    """
+    if err := _validate_identifier(depvar, "depvar", required=True):
+        return _result_or_error(err)
+    if err := _validate_varlist(indepvars, "indepvars"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    cmd = f"probit {depvar} {indepvars}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    if options.strip():
+        cmd += f", {options}"
+    if marginal_effects:
+        cmd += "\nmargins, dydx(*)"
+    return _run_stata_command(cmd)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_poisson(
+    depvar: str,
+    indepvars: str,
+    irr: bool = False,
+    options: str = "",
+    condition: str = "",
+) -> str | ToolResult:
+    """运行 Poisson 回归（计数因变量）。
+
+    Args:
+        depvar: 计数因变量名（非负整数）。
+        indepvars: 自变量列表（空格分隔）。
+        irr: True 时报告发生率比（incidence-rate ratios）而非系数。
+        options: 额外选项，如 "robust"、"exposure(varname)"、"vce(cluster id)"。
+        condition: if 条件子句（可选）。
+
+    Returns:
+        Poisson 回归结果表。
+    """
+    if err := _validate_identifier(depvar, "depvar", required=True):
+        return _result_or_error(err)
+    if err := _validate_varlist(indepvars, "indepvars"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    cmd = f"poisson {depvar} {indepvars}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    opt_parts = [p for p in (("irr" if irr else ""), options.strip()) if p]
+    if opt_parts:
+        cmd += f", {' '.join(opt_parts)}"
+    return _run_stata_command(cmd)
+
+
+# 面板估计量白名单：作为 xtreg 的选项拼接，用正向白名单杜绝注入
+_XTREG_EFFECTS = {"fe", "re", "be", "mle", "pa"}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_xtreg(
+    depvar: str,
+    indepvars: str,
+    effects: str = "fe",
+    options: str = "",
+    condition: str = "",
+) -> str | ToolResult:
+    """运行面板数据回归（xtreg）。
+
+    **前提**：必须先声明面板结构 —— ``stata_run("xtset panelvar timevar")``，
+    否则报 r(459)。做 Hausman 检验时，分别用 ``effects="fe"`` 与 ``effects="re"``
+    运行并各自 ``estimates store``，再 ``stata_run("hausman fe re")``。
+
+    Args:
+        depvar: 因变量名。
+        indepvars: 自变量列表（空格分隔）。
+        effects: 估计量，取值 fe(固定效应)/re(随机效应)/be(组间)/mle/pa（默认 fe）。
+        options: 额外选项，如 "robust"、"vce(cluster id)"。
+        condition: if 条件子句（可选）。
+
+    Returns:
+        面板回归结果表。
+    """
+    if err := _validate_identifier(depvar, "depvar", required=True):
+        return _result_or_error(err)
+    if err := _validate_varlist(indepvars, "indepvars"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    eff = effects.strip().lower()
+    if eff not in _XTREG_EFFECTS:
+        return _make_error_result(
+            f"错误: effects 只能是 {', '.join(sorted(_XTREG_EFFECTS))} 之一，收到 '{effects}'"
+        )
+    cmd = f"xtreg {depvar} {indepvars}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    opt_parts = [p for p in (eff, options.strip()) if p]
+    cmd += f", {' '.join(opt_parts)}"
+    return _run_stata_command(cmd)
+
+
+# IV 估计量白名单
+_IVREGRESS_ESTIMATORS = {"2sls", "liml", "gmm"}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_ivregress(
+    depvar: str,
+    endogenous: str,
+    instruments: str,
+    exogenous: str = "",
+    estimator: str = "2sls",
+    options: str = "",
+    condition: str = "",
+) -> str | ToolResult:
+    """运行工具变量回归（ivregress，2SLS/LIML/GMM）。
+
+    拼出 ``ivregress <est> depvar [exog] (endog = instruments) [if], options``。
+    诊断走后估计：弱工具变量用 ``stata_run("estat firststage")``，
+    过度识别用 ``stata_run("estat overid")``。
+
+    Args:
+        depvar: 因变量名。
+        endogenous: 内生自变量列表（空格分隔）。
+        instruments: 排除的工具变量列表（空格分隔），需 ≥ 内生变量个数。
+        exogenous: 外生自变量列表（空格分隔，可留空）。
+        estimator: 估计量 2sls/liml/gmm（默认 2sls）。
+        options: 额外选项，如 "robust"、"first"、"vce(cluster id)"。
+        condition: if 条件子句（可选）。
+
+    Returns:
+        工具变量回归结果表。
+    """
+    if err := _validate_identifier(depvar, "depvar", required=True):
+        return _result_or_error(err)
+    if err := _validate_varlist(endogenous, "endogenous"):
+        return _result_or_error(err)
+    if not endogenous.strip():
+        return _make_error_result("错误: 至少需要一个内生变量")
+    if err := _validate_varlist(instruments, "instruments"):
+        return _result_or_error(err)
+    if not instruments.strip():
+        return _make_error_result("错误: 至少需要一个工具变量")
+    if err := _validate_varlist(exogenous, "exogenous"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    est = estimator.strip().lower()
+    if est not in _IVREGRESS_ESTIMATORS:
+        return _make_error_result(
+            f"错误: estimator 只能是 {', '.join(sorted(_IVREGRESS_ESTIMATORS))} 之一，收到 '{estimator}'"
+        )
+    exog = f" {exogenous.strip()}" if exogenous.strip() else ""
+    cmd = f"ivregress {est} {depvar}{exog} ({endogenous.strip()} = {instruments.strip()})"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    if options.strip():
+        cmd += f", {options}"
+    return _run_stata_command(cmd)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_correlate(
+    varlist: str = "",
+    pairwise: bool = False,
+    options: str = "",
+    condition: str = "",
+) -> str | ToolResult:
+    """计算相关系数矩阵。
+
+    Args:
+        varlist: 变量列表（空格分隔），留空 = 全部变量。
+        pairwise: True 用 ``pwcorr``（成对删除缺失，可配 sig/star 选项）；
+            False 用 ``correlate``（列表删除缺失，默认）。
+        options: 额外选项。pwcorr 支持 "sig"、"star(.05)"、"bonferroni"；
+            correlate 支持 "covariance"（改报协方差）等。
+        condition: if 条件子句（可选）。
+
+    Returns:
+        相关系数矩阵。
+    """
+    if err := _validate_varlist(varlist, "varlist"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    base = "pwcorr" if pairwise else "correlate"
+    cmd = base
+    if varlist.strip():
+        cmd += f" {varlist}"
+    if condition.strip():
+        cmd += f" if {condition.strip()}"
+    if options.strip():
+        cmd += f", {options}"
+    return _run_stata_command(cmd)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_margins(
+    marginlist: str = "",
+    dydx: str = "",
+    at: str = "",
+    options: str = "",
+) -> str | ToolResult:
+    """估计边际效应 / 预测边际（margins，后估计命令）。
+
+    **前提**：先运行过一个估计命令（regress/logit/probit 等）。probit/logit 的
+    系数不可直接解读，``margins, dydx(*)`` 给出平均边际效应。
+
+    Args:
+        marginlist: 因子变量的边际（如 "foreign"、"i.rep78"），可留空。
+        dydx: 求哪些变量的边际效应，如 "price"、"*"（全部）。
+        at: 在何处求值，如 "(mean) _all"、"age=(20 40 60)"。
+        options: 额外选项，如 "atmeans"、"vce(unconditional)"。
+
+    Returns:
+        边际效应表。
+    """
+    if err := _validate_varlist(marginlist, "marginlist"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(dydx, "dydx"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(at, "at"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    cmd = "margins"
+    if marginlist.strip():
+        cmd += f" {marginlist.strip()}"
+    opt_parts = []
+    if dydx.strip():
+        opt_parts.append(f"dydx({dydx.strip()})")
+    if at.strip():
+        opt_parts.append(f"at({at.strip()})")
+    if options.strip():
+        opt_parts.append(options.strip())
+    if opt_parts:
+        cmd += f", {' '.join(opt_parts)}"
+    return _run_stata_command(cmd)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_test(spec: str) -> str | ToolResult:
+    """对上一个估计结果做 Wald 检验（test，后估计命令）。
+
+    **前提**：先运行过一个估计命令。
+
+    Args:
+        spec: 检验设定。例：
+            - "weight mpg"        联合显著性：weight=0 且 mpg=0
+            - "weight = mpg"      系数相等
+            - "weight = 0.5"      系数等于某值
+
+    Returns:
+        Wald 检验结果（F 或 chi2 统计量与 p 值）。
+    """
+    if not spec.strip():
+        return _make_error_result("错误: 请提供检验设定，如 'weight mpg' 或 'weight = mpg'")
+    if err := _validate_no_injection(spec, "spec"):
+        return _result_or_error(err)
+    return _run_stata_command(f"test {spec.strip()}")
 
 
 # =============================================================================
@@ -2396,6 +2798,41 @@ def stata_list_packages() -> str | ToolResult:
         已安装包列表。
     """
     return _run_stata_command("ado dir", timeout=120)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_help(command: str, page: int = 1) -> str | ToolResult:
+    """查询任意 Stata 命令的官方帮助文档（语法、选项、示例）。
+
+    ``help`` 在 headless 环境下把 SMCL 帮助渲染为纯文本返回（实测可用，不会
+    卡在图形查看器），因此本工具**覆盖全部内置命令**（3500+）以及任何已安装的
+    外置命令 —— 需要某条命令的权威语法时，先用它查，而不是凭记忆拼命令。
+
+    支持多词主题：
+    - 命令：``stata_help("xtreg")``、``stata_help("reghdfe")``
+    - 后估计：``stata_help("regress postestimation")``
+    - 子命令：``stata_help("estat firststage")``
+
+    帮助文档常常很长，超过阈值会自动分页；用 ``page`` 翻页，或随后调用
+    ``stata_more(page=N)``。找不到命令时返回 Stata 的「help for X not found」
+    提示（不报错），可改用 ``stata_find_package`` 联网搜索可安装的包。
+
+    Args:
+        command: 命令名或帮助主题（可含空格分隔的子主题）。
+        page: 分页页码（默认第 1 页）。
+
+    Returns:
+        该命令的帮助文本（可能分页）。
+    """
+    topic = command.strip()
+    if not topic:
+        return _make_error_result("错误：请提供要查询的命令名。")
+    if not _HELP_TOPIC_RE.match(topic):
+        return _make_error_result(
+            "错误: 命令名只能包含字母、数字、下划线和空格（用于子主题，"
+            "如 'xtreg postestimation'）。含其他字符的帮助请用 stata_run 查询。"
+        )
+    return _run_stata_command(f"help {topic}", page=page, timeout=30)
 
 
 # =============================================================================

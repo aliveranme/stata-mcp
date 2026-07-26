@@ -18,7 +18,7 @@ description: >
 结果输出全流程。
 
 **MCP Server 信息：**
-- 名称：`stata`，22 个工具覆盖数据管理、探索、分析、导出、包管理和会话控制
+- 名称：`stata`，33 个工具覆盖数据管理/生成、探索、估计、后估计、图形导出、包管理与帮助、会话控制；`stata_run` + `stata_help` 覆盖全部内置命令
 - Stata 版本：StataNow 19 / Stata 18+（取决于安装的版本）
 - 连接方式：本地 stdio，通过 pystata 直接调用 DLL
 - **会话持久**：Stata 在服务器启动时初始化一次，所有命令共享同一会话。
@@ -75,12 +75,19 @@ description: >
 
 ## MCP 工具参考
 
+> **命令支持模型**：`stata_run` 能执行**任意** Stata 命令，`stata_help` 能查
+> **任意**命令的官方语法 —— 二者合起来即「全量内置命令支持」。下面的专用工具
+> 只是给最高频的命令加了结构化参数与校验，是便利层，不是能力边界。拿不准某条
+> 命令的语法时先 `stata_help("命令名")`，再用 `stata_run` 执行。
+
 ### 数据管理
 | 工具 | 用途 | destructiveHint |
 |------|------|:---:|
 | `stata_use_dataset` | 加载 .dta 文件 | ✓ |
 | `stata_save_dataset` | 保存当前数据 | ✓ |
 | `stata_set_cwd` | 更改工作目录 | ✓ |
+| `stata_generate` | 创建新变量（`generate`）；支持 `condition` | 改数据集 |
+| `stata_egen` | 扩展生成（`egen`）；支持 `by` 组内聚合 | 改数据集 |
 
 ### 数据探索（只读）
 | 工具 | 用途 |
@@ -90,6 +97,7 @@ description: >
 | `stata_summarize` | 描述统计量；支持 `condition` / `detail` |
 | `stata_list` | 查看数据值；支持 `condition` / `in_range` |
 | `stata_tabulate` | 频数/交叉表；支持 `condition`、卡方检验 |
+| `stata_correlate` | 相关矩阵（`correlate`/`pwcorr`）；支持 `condition` |
 | `stata_display` | 表达式计算/返回值 |
 
 ### 统计分析（只读）
@@ -97,25 +105,37 @@ description: >
 |------|------|----------|
 | `stata_regress` | 线性回归 (OLS)；支持 `condition` | 横截面 |
 | `stata_logistic` | Logistic 回归；支持 `condition` | 二元选择 |
+| `stata_probit` | Probit 回归；可选 `marginal_effects` 附平均边际效应 | 二元选择 |
+| `stata_poisson` | Poisson 回归；可选 `irr` 报发生率比 | 计数 |
 | `stata_ttest` | t 检验；支持 `condition`、按组检验 | 均值比较 |
+| `stata_xtreg` | 面板回归；`effects` = fe/re/be/mle/pa（需先 `xtset`） | 面板 |
+| `stata_ivregress` | 工具变量 2SLS/LIML/GMM | 内生性 |
+
+### 后估计（只读，须先跑估计命令）
+| 工具 | 用途 |
+|------|------|
+| `stata_margins` | 边际效应 / 预测边际；`dydx` / `at` |
+| `stata_test` | 系数的 Wald 检验（联合显著、系数相等） |
+| `stata_predict` | 生成预测值/残差（会创建新变量，改数据集） |
 
 ### 通用执行
 | 工具 | 用途 |
 |------|------|
-| `stata_run` | **执行任意 Stata 命令**（用于以上工具未覆盖的操作） |
+| `stata_run` | **执行任意 Stata 命令**（专用工具未覆盖的操作全走这里） |
 | `stata_run_do_file` | 执行 .do 文件 |
-| `stata_graph` | 生成图形（推荐使用 `export` 参数直接导出；支持 `height`） |
+| `stata_graph` | 生成图形（推荐用 `export` 参数直接导出；支持 `height`） |
 
 ### 结果导出
 | 工具 | 用途 |
 |------|------|
 | `stata_export_excel` | 导出数据集为 .xlsx；回归结果导出为 CSV |
 
-### 包管理
+### 包管理与帮助
 | 工具 | 用途 |
 |------|------|
+| `stata_help` | **查任意命令的官方帮助**（内置 + 已装外置，覆盖全部命令） |
 | `stata_install_package` | 安装扩展包（ssc 或完整 from() URL） |
-| `stata_find_package` | 搜索扩展包 |
+| `stata_find_package` | 联网搜索可安装的扩展包（`net search`） |
 | `stata_list_packages` | 列出已安装包 |
 
 ### 会话控制
@@ -126,9 +146,63 @@ description: >
 
 ### 工具选择指南
 
-- 需要 `correlate`、`anova`、`pwcorr`、`ttest`（配对）、`graph bar` 等未封装命令 → 使用 `stata_run`
+- 有专用工具的命令（回归/面板/IV/边际效应/生成变量等）→ 优先用专用工具，参数更规整、有校验
+- 专用工具未覆盖的命令（`anova`、`reshape`、`merge`、`graph bar`、`heckman` 等）→ 用 `stata_run`
+- 不确定某命令的语法/选项 → 先 `stata_help("命令名")` 查官方文档，再执行
 - 多命令组合（加载 + 清洗 + 回归）→ 单次 `stata_run` 用 `\n` 连接
-- 需要安装第三方包 → 先 `stata_find_package` 搜索，再 `stata_install_package` 安装
+- 需要第三方包 → 先 `stata_find_package` 搜索，再 `stata_install_package` 安装
+
+---
+
+## 内置命令地图
+
+Stata 有 3500+ 内置命令，**全部**可经 `stata_run` 执行、`stata_help` 查语法。
+下表按族列出高频命令，帮你快速定位；具体语法与选项一律 `stata_help("命令名")`。
+
+### 数据管理
+| 类别 | 命令 |
+|------|------|
+| 生成/修改 | `generate` `replace` `egen` `recode` `rename` `drop` `keep` `order` |
+| 类型转换 | `destring` `tostring` `encode` `decode` `format` `label` |
+| 重构 | `reshape`（长宽转换）`collapse`（聚合）`expand` `contract` `separate` |
+| 合并 | `merge`（横向）`append`（纵向）`joinby` `cross` |
+| 排序/去重 | `sort` `gsort` `by`/`bysort` `duplicates` |
+| 抽样/保存 | `sample` `preserve`/`restore` `save` `use` `import`/`export` `frame` |
+
+### 数据探索
+| 类别 | 命令 |
+|------|------|
+| 结构 | `describe` `codebook` `inspect` `ds` `lookfor` `compare` |
+| 统计 | `summarize` `tabstat` `tabulate` `table` `pwcorr`/`correlate` |
+| 缺失/分布 | `misstable` `histogram` `kdensity` `pnorm`/`qnorm` |
+
+### 估计（estimation）
+| 类别 | 命令 |
+|------|------|
+| 线性 | `regress` `areg` `anova` `cnsreg` `nl` |
+| 二元/多元选择 | `logit`/`logistic` `probit` `mlogit` `ologit`/`oprobit` `clogit` |
+| 计数 | `poisson` `nbreg` `zip`/`zinb` `tpoisson` |
+| 面板（xt） | `xtreg` `xtlogit` `xtpoisson` `xtgls` `xtabond` `xttobit` |
+| 时间序列（ts） | `tsset` `arima` `var` `vec` `dfuller` `newey` |
+| 内生性/选择 | `ivregress` `heckman` `treatreg` `etregress` |
+| 生存/删失 | `stset` `stcox` `streg` `tobit` `intreg` |
+| 分位数/稳健 | `qreg` `rreg` `bootstrap` `jackknife` |
+
+### 后估计（postestimation，须先跑估计命令）
+| 类别 | 命令 |
+|------|------|
+| 预测/边际 | `predict` `margins` `marginsplot` `estat` |
+| 假设检验 | `test` `testnl` `lincom` `nlcom` `contrast` |
+| 模型比较 | `estimates store`/`table` `lrtest` `hausman` `estat ic` |
+| 诊断 | `estat vif` `estat hettest` `estat ovtest` `estat firststage` `rvfplot` |
+
+### 图形
+`twoway`（`scatter` `line` `lfit` `connected`）`histogram` `graph bar`/`box`/`pie`
+`kdensity` `marginsplot` `coefplot`(外置) —— 一律经 `stata_graph` 导出。
+
+### 编程/其他
+`forvalues` `foreach` `while` `if`/`else` `program` `local`/`global` `scalar`
+`matrix` `return`/`ereturn` `capture` `assert` `postfile`
 
 ---
 
@@ -420,17 +494,60 @@ esttab m1 m2 using "results.csv", replace
 
 ## 常用第三方包
 
-| 包名 | 用途 |
-|------|------|
-| `outreg2` | 回归结果导出 Word/Excel/LaTeX |
-| `estout` / `esttab` | 估计结果格式化输出 |
-| `ivreg2` | 工具变量回归 |
-| `reghdfe` | 高维固定效应 |
-| `coefplot` | 系数可视化 |
-| `winsor2` | 缩尾处理 |
-| `binscatter` | 分箱散点图（headless 环境可能挂起，优先用原生 `twoway scatter`） |
-| `eventdd` | 事件研究 DID |
-| `ppmlhdfe` | PPML 高维固定效应 |
+用法：`stata_find_package("包名")` 搜 → `stata_install_package("包名", source="ssc")`
+装 → `stata_help("包名")` 查语法。**切勿**把 `ssc install` 写进 `stata_run` ——
+headless 下 SSC 网络请求会卡死 DLL（见「与 Agent 协作规范」）。
+
+### 结果输出 / 表格
+| 包 | 用途 | 补足哪个内置 |
+|----|------|------|
+| `estout` / `esttab` / `eststo` | 估计结果格式化成表（CSV/LaTeX/RTF） | `estimates table` |
+| `outreg2` | 回归结果导出 Word/Excel/LaTeX | 同上 |
+| `coefplot` | 系数图（点估计 + 置信区间） | `marginsplot` |
+
+### 高维固定效应 / 面板
+| 包 | 用途 | 补足哪个内置 |
+|----|------|------|
+| `reghdfe` | 多维固定效应线性回归（吸收大量虚拟变量） | `areg` / `xtreg` |
+| `ivreghdfe` | 高维固定效应 + IV | `ivregress` |
+| `ppmlhdfe` | 泊松高维固定效应（引力模型常用） | `poisson` |
+| `ftools` | reghdfe/gtools 的底层依赖 | — |
+| `xtabond2` | 动态面板 GMM（差分/系统 GMM） | `xtabond` |
+| `xtscc` | Driscoll-Kraay 标准误（面板异方差/自相关） | `xtreg, vce()` |
+
+### 工具变量
+| 包 | 用途 | 补足哪个内置 |
+|----|------|------|
+| `ivreg2` | IV/2SLS，弱工具/过度识别诊断直接打印在主输出 | `ivregress`（诊断走 `estat`） |
+
+### 因果推断 / 政策评估
+| 包 | 用途 | 补足哪个内置 |
+|----|------|------|
+| `csdid` | Callaway-Sant'Anna 交错 DID（异质处理效应） | 手写 DID 交互项 |
+| `did_multiplegt` | de Chaisemartin-D'Haultfœuille DID | 同上 |
+| `eventdd` | 事件研究法 DID 图 | 同上 |
+| `drdid` | 双重稳健 DID | 同上 |
+| `rdrobust` / `rddensity` | 断点回归（RD）估计与操纵检验 | — |
+| `psmatch2` / `teffects`(内置) | 倾向得分匹配 | `teffects psmatch` |
+| `synth` / `synth_runner` | 合成控制法 | — |
+
+### 微观计量 / 分解
+| 包 | 用途 | 补足哪个内置 |
+|----|------|------|
+| `cmp` | 递归多方程混合模型（联立 probit/tobit 等） | 分别估计 |
+| `oaxaca` | Blinder-Oaxaca 分解（工资差异等） | — |
+| `gllamm` | 广义线性潜变量混合模型 | `me` 系列 |
+
+### 数据处理 / 工具
+| 包 | 用途 | 补足哪个内置 |
+|----|------|------|
+| `winsor2` | 缩尾/截尾处理（注：`suffix()` 与 `replace` 互斥） | 手写 `egen pctile` |
+| `gtools`（`gcollapse` 等） | 大数据集加速版 collapse/egen | `collapse` / `egen` |
+| `binscatter` | 分箱散点图（**headless 可能挂起**，优先原生 `twoway scatter`） | — |
+| `estout` 见上 | — | — |
+
+> 未列出的包用 `stata_find_package("关键词")` 联网搜索。装好后 `stata_help("包名")`
+> 拿权威语法，不要凭记忆拼选项。
 
 ---
 

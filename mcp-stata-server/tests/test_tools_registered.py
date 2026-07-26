@@ -16,6 +16,8 @@ EXPECTED_TOOLS = {
     "stata_use_dataset",
     "stata_save_dataset",
     "stata_set_cwd",
+    "stata_generate",
+    "stata_egen",
     # 数据探索
     "stata_describe",
     "stata_codebook",
@@ -23,17 +25,27 @@ EXPECTED_TOOLS = {
     "stata_list",
     "stata_tabulate",
     "stata_display",
+    "stata_correlate",
     # 分析
     "stata_regress",
     "stata_logistic",
     "stata_ttest",
+    "stata_probit",
+    "stata_poisson",
+    "stata_xtreg",
+    "stata_ivregress",
+    # 后估计
+    "stata_margins",
+    "stata_test",
+    "stata_predict",
     # 图形与导出
     "stata_graph",
     "stata_export_excel",
-    # 包管理
+    # 包管理与帮助
     "stata_install_package",
     "stata_find_package",
     "stata_list_packages",
+    "stata_help",
     # 会话
     "stata_more",
     "stata_status",
@@ -78,6 +90,10 @@ def test_write_tools_are_not_marked_read_only():
         "stata_graph",
         "stata_export_excel",
         "stata_install_package",
+        # 以下会创建变量，改动内存中的数据集
+        "stata_generate",
+        "stata_egen",
+        "stata_predict",
     }
     wrong = [
         name

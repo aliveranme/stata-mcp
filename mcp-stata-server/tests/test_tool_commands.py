@@ -5,22 +5,34 @@ from fastmcp.tools.base import ToolResult
 
 from server import (
     _ESTOUT_PROBE_CMD,
+    _HELP_TOPIC_RE,
     stata_codebook,
+    stata_correlate,
     stata_describe,
+    stata_egen,
     stata_export_excel,
     stata_find_package,
+    stata_generate,
     stata_graph,
+    stata_help,
     stata_install_package,
+    stata_ivregress,
     stata_list,
     stata_logistic,
+    stata_margins,
     stata_ping,
+    stata_poisson,
+    stata_predict,
+    stata_probit,
     stata_regress,
     stata_run,
     stata_save_dataset,
     stata_summarize,
     stata_tabulate,
+    stata_test,
     stata_ttest,
     stata_use_dataset,
+    stata_xtreg,
 )
 
 
@@ -865,3 +877,182 @@ def test_ttest_still_allows_empty_optional_byvar():
     with patch("server._run_stata_command") as mock_run:
         stata_ttest("price")
         assert mock_run.call_args[0][0] == "ttest price"
+
+
+# ============================================================================
+# stata_help — 全量内置命令覆盖（按需查帮助）
+# ============================================================================
+
+
+def test_help_builds_help_command():
+    with patch("server._run_stata_command") as mock_run:
+        stata_help("regress")
+        assert mock_run.call_args[0][0] == "help regress"
+
+
+def test_help_passes_page_through():
+    with patch("server._run_stata_command") as mock_run:
+        stata_help("regress", page=3)
+        assert mock_run.call_args.kwargs.get("page") == 3
+
+
+def test_help_allows_multiword_subtopic():
+    with patch("server._run_stata_command") as mock_run:
+        stata_help("regress postestimation")
+        assert mock_run.call_args[0][0] == "help regress postestimation"
+
+
+def test_help_rejects_empty():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_help("   ")
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_help_rejects_injection():
+    """帮助主题不能夹带第二条命令。"""
+    for bad in ["regress\nmata:", "regress; shell ls", "regress`x'", "reg $var", 'reg "x"']:
+        with patch("server._run_stata_command") as mock_run:
+            result = stata_help(bad)
+            assert getattr(result, "is_error", False), f"应拒绝: {bad!r}"
+            mock_run.assert_not_called()
+
+
+def test_help_topic_regex_accepts_common_commands():
+    for ok in ["regress", "xtreg", "reghdfe", "estat firststage", "regress postestimation", "_n"]:
+        assert _HELP_TOPIC_RE.match(ok), f"应接受: {ok!r}"
+
+
+# ============================================================================
+# 估计 wrapper：命令构造
+# ============================================================================
+
+
+def test_probit_builds_command():
+    with patch("server._run_stata_command") as mock_run:
+        stata_probit("foreign", "price mpg", options="robust")
+        assert mock_run.call_args[0][0] == "probit foreign price mpg, robust"
+
+
+def test_probit_appends_marginal_effects():
+    with patch("server._run_stata_command") as mock_run:
+        stata_probit("foreign", "price mpg", marginal_effects=True)
+        cmd = mock_run.call_args[0][0]
+        assert cmd == "probit foreign price mpg\nmargins, dydx(*)"
+
+
+def test_poisson_irr_option():
+    with patch("server._run_stata_command") as mock_run:
+        stata_poisson("count", "x1 x2", irr=True, options="robust")
+        assert mock_run.call_args[0][0] == "poisson count x1 x2, irr robust"
+
+
+def test_xtreg_effects_appended_as_option():
+    with patch("server._run_stata_command") as mock_run:
+        stata_xtreg("y", "x1 x2", effects="fe", options="robust")
+        assert mock_run.call_args[0][0] == "xtreg y x1 x2, fe robust"
+
+
+def test_xtreg_rejects_bad_effects():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_xtreg("y", "x1", effects="xyz")
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_ivregress_builds_endog_syntax():
+    with patch("server._run_stata_command") as mock_run:
+        stata_ivregress("y", "x", "z1 z2", exogenous="w1", options="robust")
+        cmd = mock_run.call_args[0][0]
+        assert cmd == "ivregress 2sls y w1 (x = z1 z2), robust"
+
+
+def test_ivregress_rejects_bad_estimator():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_ivregress("y", "x", "z", estimator="ols")
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_ivregress_requires_endog_and_instruments():
+    with patch("server._run_stata_command") as mock_run:
+        assert getattr(stata_ivregress("y", "", "z"), "is_error", False)
+        assert getattr(stata_ivregress("y", "x", ""), "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_correlate_vs_pwcorr():
+    with patch("server._run_stata_command") as mock_run:
+        stata_correlate("price weight")
+        assert mock_run.call_args[0][0] == "correlate price weight"
+    with patch("server._run_stata_command") as mock_run:
+        stata_correlate("price weight", pairwise=True, options="sig")
+        assert mock_run.call_args[0][0] == "pwcorr price weight, sig"
+
+
+def test_margins_builds_dydx_and_at():
+    with patch("server._run_stata_command") as mock_run:
+        stata_margins(dydx="price", at="(mean) _all", options="atmeans")
+        cmd = mock_run.call_args[0][0]
+        assert cmd == "margins, dydx(price) at((mean) _all) atmeans"
+
+
+def test_test_builds_command():
+    with patch("server._run_stata_command") as mock_run:
+        stata_test("weight = mpg")
+        assert mock_run.call_args[0][0] == "test weight = mpg"
+
+
+def test_test_rejects_empty():
+    with patch("server._run_stata_command") as mock_run:
+        assert getattr(stata_test("  "), "is_error", False)
+        mock_run.assert_not_called()
+
+
+# ============================================================================
+# 改数据集 wrapper：命令构造
+# ============================================================================
+
+
+def test_generate_builds_command():
+    with patch("server._run_stata_command") as mock_run:
+        stata_generate("lprice", "ln(price)", condition="price > 0")
+        assert mock_run.call_args[0][0] == "generate lprice = ln(price) if price > 0"
+
+
+def test_generate_rejects_empty_expression():
+    with patch("server._run_stata_command") as mock_run:
+        assert getattr(stata_generate("x", "  "), "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_egen_with_by_prefix():
+    with patch("server._run_stata_command") as mock_run:
+        stata_egen("mp", "mean(price)", by="foreign")
+        assert mock_run.call_args[0][0] == "bysort foreign: egen mp = mean(price)"
+
+
+def test_egen_without_by():
+    with patch("server._run_stata_command") as mock_run:
+        stata_egen("rm", "rowmean(x1 x2)")
+        assert mock_run.call_args[0][0] == "egen rm = rowmean(x1 x2)"
+
+
+def test_predict_builds_command():
+    with patch("server._run_stata_command") as mock_run:
+        stata_predict("resid", options="residuals")
+        assert mock_run.call_args[0][0] == "predict resid, residuals"
+
+
+def test_predict_default_no_options():
+    with patch("server._run_stata_command") as mock_run:
+        stata_predict("yhat")
+        assert mock_run.call_args[0][0] == "predict yhat"
+
+
+def test_new_wrappers_reject_injection_in_identifier():
+    """newvar/depvar 走标识符校验，注入字符必被拒。"""
+    with patch("server._run_stata_command") as mock_run:
+        assert getattr(stata_generate("x;drop", "1"), "is_error", False)
+        assert getattr(stata_probit("y;shell ls", "x"), "is_error", False)
+        mock_run.assert_not_called()

@@ -14,7 +14,7 @@
 │  ┌──────────────┐          ┌──────────────────┐  │
 │  │  stata Skill │◄────────►│  stata MCP Server │  │
 │  │  (知识层)     │  指导     │  (执行层)          │  │
-│  │  - 语法规范   │          │  - 22 个工具       │  │
+│  │  - 语法规范   │          │  - 33 个工具       │  │
 │  │  - 分析模板   │          │  - pystata 直接调用 │  │
 │  │  - 常见陷阱   │          │  - StataNow 19.5 MP │  │
 │  └──────────────┘          └──────────────────┘  │
@@ -89,7 +89,10 @@ cp .mcp.json.example .mcp.json
 
 Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summarize` 完成分析。
 
-## MCP 工具列表
+## MCP 工具列表（33 个）
+
+> `stata_run` 执行任意命令、`stata_help` 查任意命令的官方语法，二者即「全量内置
+> 命令支持」。下面的专用工具是给高频命令加结构化参数与校验的便利层。
 
 ### 数据管理
 | 工具 | 说明 | destructiveHint |
@@ -97,6 +100,8 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 | `stata_use_dataset` | 加载 .dta 数据文件 | ✓ |
 | `stata_save_dataset` | 保存数据为 .dta | ✓ |
 | `stata_set_cwd` | 更改工作目录 | ✓ |
+| `stata_generate` | 创建新变量（`generate`）；支持 `condition` | 改数据集 |
+| `stata_egen` | 扩展生成（`egen`）；支持 `by` 组内聚合 | 改数据集 |
 
 ### 数据探索
 | 工具 | 说明 |
@@ -106,6 +111,7 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 | `stata_summarize` | 描述统计量（均值、标准差等）；支持 `condition` 和 `detail` |
 | `stata_list` | 查看数据值；支持 `condition` / `in_range` |
 | `stata_tabulate` | 频数表 / 交叉表；支持 `condition`、卡方检验 |
+| `stata_correlate` | 相关矩阵（`correlate`/`pwcorr`）；支持 `condition` |
 | `stata_display` | 表达式计算 / 查看返回值 |
 
 ### 统计分析
@@ -113,7 +119,18 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 |------|------|
 | `stata_regress` | 线性回归 (OLS)；支持 `condition` |
 | `stata_logistic` | Logistic 回归 (Logit)；支持 `condition` |
+| `stata_probit` | Probit 回归；可选 `marginal_effects` 附平均边际效应 |
+| `stata_poisson` | Poisson 计数回归；可选 `irr` 报发生率比 |
 | `stata_ttest` | t 检验；支持 `condition`、按组检验 |
+| `stata_xtreg` | 面板回归 fe/re/be/mle/pa（需先 `xtset`） |
+| `stata_ivregress` | 工具变量 2SLS/LIML/GMM |
+
+### 后估计（须先跑估计命令）
+| 工具 | 说明 |
+|------|------|
+| `stata_margins` | 边际效应 / 预测边际；`dydx` / `at` |
+| `stata_test` | 系数的 Wald 检验（联合显著、系数相等） |
+| `stata_predict` | 生成预测值 / 残差（会创建新变量） |
 
 ### 通用执行
 | 工具 | 说明 |
@@ -128,9 +145,10 @@ Agent 应自动使用 `stata_use_dataset` → `stata_describe` → `stata_summar
 |------|------|
 | `stata_export_excel` | 数据集导出为 .xlsx（`replace` 默认 False）；回归结果 export 自动改为 CSV，需预先安装 estout（缺失时报错，用 `stata_install_package` 安装） |
 
-### 包管理
+### 包管理与帮助
 | 工具 | 说明 |
 |------|------|
+| `stata_help` | 查任意命令的官方帮助（内置 + 已装外置，覆盖全部命令）；支持子主题与分页 |
 | `stata_install_package` | 安装扩展包（ssc 或完整 from() URL） |
 | `stata_find_package` | 联网搜索可安装的扩展包（`net search`，约 1 秒） |
 | `stata_list_packages` | 列出已安装包（包名 + 简介） |
@@ -151,7 +169,7 @@ stata-mcp/
 ├── README.md                          # 本文档
 ├── setup.py                           # 一键安装脚本
 ├── mcp-stata-server/
-│   ├── server.py                      # MCP Server 主程序（22 个工具）
+│   ├── server.py                      # MCP Server 主程序（33 个工具）
 │   ├── requirements.txt               # Python 依赖
 │   ├── pyproject.toml                 # 项目配置与测试配置
 │   └── tests/                         # pytest 测试套件

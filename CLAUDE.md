@@ -6,7 +6,7 @@
 
 ```
 stata-mcp/
-├── mcp-stata-server/server.py       # MCP 执行层：22 个工具，通过 pystata 调用 Stata DLL
+├── mcp-stata-server/server.py       # MCP 执行层：33 个工具，通过 pystata 调用 Stata DLL
 ├── .claude/skills/stata/SKILL.md    # 知识层：Stata 语法、模板、陷阱、Agent 协作规范
 ├── setup.py                         # 安装层：检测 Stata、创建 venv、生成 .mcp.json
 ├── .gitignore                       # 忽略 .mcp.json(生成) .venv dta/log/smcl
@@ -24,17 +24,23 @@ stata-mcp/
 | `cd mcp-stata-server && source .venv/Scripts/activate && python server.py` | 调试模式启动 |
 | `uv pip install fastmcp && uv pip freeze > requirements.txt` | 添加新依赖 |
 
-## MCP 工具（22 个）
+## MCP 工具（33 个）
+
+> **能力边界不在工具数上**：`stata_run` 执行任意命令、`stata_help` 查任意命令的
+> 官方语法，二者即「全量内置命令支持」。专用工具（回归/面板/IV/生成变量等）是
+> 给高频命令加结构化参数与校验的**便利层**，不是能力上限。
 
 | 类别 | 工具 | 只读? | 说明 |
 |------|------|:-----:|------|
 | 核心执行 | `stata_run`, `stata_run_do_file` | — | 通用命令执行和 do 文件 |
 | 数据管理 | `stata_use_dataset`, `stata_save_dataset`, `stata_set_cwd` | — | 读写 .dta、cd |
-| 数据探索 | `stata_describe`, `stata_codebook`, `stata_summarize`, `stata_list`, `stata_tabulate`, `stata_display` | ✓ | 只读探索 |
-| 分析 | `stata_regress`, `stata_logistic`, `stata_ttest` | ✓ | OLS / Logit / t 检验 |
+| 数据生成 | `stata_generate`, `stata_egen` | — | 创建变量（改数据集，非只读） |
+| 数据探索 | `stata_describe`, `stata_codebook`, `stata_summarize`, `stata_list`, `stata_tabulate`, `stata_correlate`, `stata_display` | ✓ | 只读探索 |
+| 估计 | `stata_regress`, `stata_logistic`, `stata_probit`, `stata_poisson`, `stata_ttest`, `stata_xtreg`, `stata_ivregress` | ✓ | OLS/Logit/Probit/Poisson/t 检验/面板/IV |
+| 后估计 | `stata_margins`, `stata_test`, `stata_predict` | ✓* | 边际效应/Wald 检验/预测（`stata_predict` 会创建变量，非只读） |
 | 图形 | `stata_graph` | — | 执行图形命令并可选导出文件（destructiveHint=True，可覆盖文件） |
 | 导出 | `stata_export_excel` | — | 数据集导出为 .xlsx（replace 默认 False）；回归结果自动转为 CSV |
-| 包管理 | `stata_install_package`, `stata_find_package`, `stata_list_packages` | — | 安装（ssc 或完整 URL）、`net search` 联网找包、`ado dir` 列已装包 |
+| 包管理与帮助 | `stata_install_package`, `stata_find_package`, `stata_list_packages`, `stata_help` | — / ✓ | 安装、`net search` 找包、`ado dir` 列包、`stata_help` 查任意命令帮助（只读） |
 | 翻页 | `stata_more` | ✓ | 大输出分页浏览（缓存 120K chars） |
 | 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + 内存 |
 | 心跳 | `stata_ping` | ✓ | 快速检测 Stata DLL 存活状态 |
