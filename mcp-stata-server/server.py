@@ -19,6 +19,7 @@ import io
 import logging
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -162,24 +163,36 @@ _TRUNCATION_NOTICE = (
 _ESTOUT_PROBE_CMD = "which estout"
 
 # Stata 返回码中文释义
+# 返回码释义。**每一条都在 Stata 19.5 MP 上真机触发核对过**，不要凭印象增补 ——
+# 这段文本由 _format_error 拼在 Stata 自己的报错**之前**，是 Agent 首先读到的
+# 一行，给错方向比不给更糟。旧表大半是错的：rc 9 被标成「变量类型不匹配」（真值
+# 是 assert 失败 assertion is false，而 type mismatch 其实是 rc **109**），
+# rc 4 标成「内存不足」（真值是数据未保存），rc 5 标成「变量不存在」（真值是
+# not sorted），rc 199 标成「选项语法错误」（真值是命令不存在）。
+# 未收录的返回码退化为「未知返回码(N)」，其后紧跟 Stata 原文，不会丢信息。
 STATA_RC_MESSAGES = {
     0: "成功",
-    1: "未指定的错误",
-    2: "无效的命令或选项",
-    3: "未找到指定的文件",
-    4: "内存不足",
-    5: "变量不存在",
-    6: "系统错误",
-    7: "操作被中断",
-    8: "无效的语法表达式",
-    9: "变量类型不匹配",
-    10: "数据集中无观测值",
-    20: "矩阵尺寸不匹配",
-    99: "观测值不足",
+    1: "已中断（Break）—— 看门狗超时会走这里",
+    2: "网络连接超时",
+    3: "当前没有载入数据集",
+    4: "内存中的数据集有未保存的修改（加 clear 选项或先 save）",
+    5: "数据未按要求排序（先 sort）",
+    7: "变量类型不符合命令要求（如需要字符串却是数值）",
+    9: "assert 断言不成立（数据不满足断言条件）",
+    100: "缺少必需的选项或变量（如 ttest 需要 by()）",
+    109: "类型不匹配（type mismatch）",
     110: "变量已存在（用 replace 覆盖或改用新名）",
     111: "变量或命令未找到",
-    198: "命令语法错误",
-    199: "选项语法错误",
+    133: "未知函数",
+    198: "语法无效或选项不被允许",
+    199: "命令不存在（拼写有误或包未安装）",
+    301: "找不到已存储的估计结果（先运行估计命令）",
+    459: "变量不能唯一识别观测（isid/duplicates 校验失败）",
+    601: "文件不存在",
+    602: "文件已存在（加 replace）",
+    603: "文件无法打开",
+    900: "无法再添加变量（已达变量数上限）",
+    2000: "没有观测值（筛选条件未匹配到任何观测）",
     3000: "命令执行成功，无文本输出",
     997: "Stata 崩溃后已自动恢复（命令未执行，请重试）",
     999: "Stata DLL 内部崩溃",
@@ -209,7 +222,8 @@ _HELP_TOPIC_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ ]{0,63}$")
 #   例: "C:/data;D:/projects/stata"
 #   设置后所有文件路径（含相对路径解析后）必须落在某根之下。
 #   未设置时保持向后兼容（不限制绝对路径）。
-# STATA_ALLOW_UNC: 可选，设为 "1" 后允许 UNC 网络路径（默认拒绝，仅对沙箱模式生效）。
+# STATA_ALLOW_UNC: 可选，设为 "1" 后允许 UNC 网络路径。默认拒绝，且拒绝是**无条件**的
+#   —— 不依赖 STATA_ALLOWED_ROOTS 是否配置。
 
 _STATA_ALLOWED_ROOTS_ENV = os.environ.get("STATA_ALLOWED_ROOTS", "")
 _STATA_ALLOW_UNC = os.environ.get("STATA_ALLOW_UNC", "") == "1"
@@ -1397,10 +1411,10 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
     使用 RedirectOutput 防止 Stata 输出泄漏到 MCP stdio 通道。
     内置超时保护：命令执行超过 timeout 秒时调用 StataSO_SetBreak 中断。
 
-    **输出收集优化**：自适应轮询 + 智能清尾。
-    - 首次 300ms 快轮询：1ms 间隔，连续 3 次空转退出
-    - 然后 50ms 短 drain：仅在小输出时执行
-    - 仅在输出量 ≥ 10K 时执行完整 drain（100ms）
+    **输出收集优化**：指数退避快轮询 + 三档智能清尾。
+    - 阶段 1 快轮询：间隔 1ms 起、每次翻倍封顶 20ms，连续 3 次空转即干净退出
+    - 阶段 2 清尾按情形分三档（见下方实现）：
+      干净退出的小输出 5ms | 未干净退出的小输出 50ms | ≥10K 的大输出 100ms
 
     Args:
         cmd: Stata 命令字符串。
@@ -1894,13 +1908,20 @@ def _extract_ssc_installs(do_text: str) -> tuple[str, list[tuple[str, bool]]]:
     - ``installs``：``[(package, replace)]``，按包名去重（保留首次出现的 replace 标志）。
 
     只处理**行首**的 `ssc install`（含 qui/cap/noi 前缀）；`{ }` 块或循环内的
-    安装极罕见，不特殊处理，仍随块内联执行。``install`` 只认全写。
+    安装仍随块内联执行 —— 它是**有条件**执行的（``if _rc != 0 { ssc install foo }``
+    是常见写法），提到脚本之前预装等于把它变成无条件安装，改变了 do 文件的语义。
+    此前 docstring 声称如此，代码却无块跟踪；块深度即在此维护。
+    ``install`` 只认全写。
     """
     installs: list[tuple[str, bool]] = []
     seen: set[str] = set()
     out_lines: list[str] = []
+    brace_depth = 0
     for raw in do_text.split("\n"):
-        m = _SSC_INSTALL_RE.match(raw)
+        m = _SSC_INSTALL_RE.match(raw) if brace_depth == 0 else None
+        # 粗粒度的花括号计数：这里只需知道「是否在块内」，宁可保守 ——
+        # 数错的后果是不拆分（退回内联执行，安全兜底），而非误拆。
+        brace_depth = max(0, brace_depth + raw.count("{") - raw.count("}"))
         if m:
             pkg = m.group(1)
             opts = (m.group("opts") or "")
@@ -3432,9 +3453,12 @@ def stata_export_excel(
             changed_msg = ""
 
         # 前置探测 estout 是否已安装：缺失则直接报错，引导用户用
-        # stata_install_package("estout") 手动安装。绝不在此内嵌 ssc install ——
-        # headless 环境下 SSC 网络请求会阻塞 StataSO_Execute，看门狗的 SetBreak
-        # 无法干净中断网络 I/O，会损坏 DLL 状态导致后续调用全部卡死。
+        # stata_install_package("estout") 手动安装。不在此内嵌 ssc install ——
+        # 但原因不是「损坏 DLL」：那条结论已被实测推翻（Stata 19.5 MP，多场景
+        # 复现无一崩溃，超时也能被 SetBreak 干净中断、包不残留半装状态）。
+        # 真正的问题是它整段独占 _stata_lock：同一个包耗时在 3–13 秒间波动，
+        # 慢网络更久，内嵌进分析步骤会意外冻结整个 server。故包安装独立成工具，
+        # 由用户控制时机、timeout 参数真实兜底。
         #
         # 必须用裸 which，不能加 capture：capture 的语义就是吞掉命令自身的错误、
         # 只写入 _rc，实测（Stata 19.5 MP）`capture which <pkg>` 在已装与未装
@@ -3730,6 +3754,16 @@ def stata_verify(
     if check == "duplicates":
         # duplicates 的第一个词是子命令而非选项，故从 options 取，缺省 report。
         sub = options.strip() or "report"
+        # 本工具标 readOnlyHint=True，而 `drop` 删除观测、`tag()` 创建变量 ——
+        # 都是「修改」而非「校验」。遵循 MCP 注解的客户端会对只读工具跳过确认，
+        # 放行等于静默改数据。挡在门外，比给一个「除非传某个选项否则只读」的
+        # 工具更安全；真要改数据走 stata_run，那里的注解是诚实的。
+        if re.match(r"^(drop|tag)\b", sub, re.IGNORECASE):
+            return _make_error_result(
+                f"错误: stata_verify 是只读工具，不执行会修改数据的 `duplicates {sub}`"
+                "（drop 删除观测、tag() 创建变量）。"
+                f'请改用 stata_run("duplicates {sub}")，那里会按非只读工具处理。'
+            )
         cmd = f"duplicates {sub}"
         if varlist.strip():
             cmd += f" {varlist.strip()}"
@@ -3759,20 +3793,37 @@ def stata_verify(
 _MERGE_KINDS = ("1:1", "m:1", "1:m", "m:m")
 
 
-def _split_using_paths(using: str) -> tuple[list[str], str | None]:
-    """把空格分隔的多个路径逐个校验并规范化。
+def _split_using_paths(using: str, single: bool = False) -> tuple[list[str], str | None]:
+    """把 ``using`` 参数解析成逐个校验、规范化后的路径列表。
 
     每个路径都要过 ``_validate_path`` —— append 可以一次接多个文件，
     只校验第一个等于给后面的留了口子。
 
+    含空格的路径在真实系统上是常态（``/Users/x/My Drive/…``、
+    ``C:/Program Files/…``），而按空白无脑切分会把它们劈成两半，报出的错还与
+    真实原因无关。两条出路：
+
+    - ``single=True``（``merge`` 只接一个文件）：整个字符串就是一个路径，
+      不切分，天然支持空格。
+    - ``single=False``（``append`` 可接多个）：按**双引号感知**切分，
+      用户用 ``"a b.dta" "c.dta"`` 表达含空格的路径；引号在校验前剥掉
+      （``_validate_path`` 会拒绝 ``"``）。
+
     Returns:
         (规范化路径列表, 错误文本)；成功时错误为 None。
     """
-    paths = [p for p in using.split() if p]
-    if not paths:
+    if single:
+        raw = [using.strip()] if using.strip() else []
+    else:
+        try:
+            raw = [t for t in shlex.split(using, posix=False) if t]
+        except ValueError:
+            return [], "错误: using 路径含未闭合的引号"
+        raw = [t[1:-1] if len(t) >= 2 and t[0] == t[-1] == '"' else t for t in raw]
+    if not raw:
         return [], "错误: 请提供至少一个 .dta 文件路径"
     out = []
-    for p in paths:
+    for p in raw:
         if err := _validate_path(p):
             return [], err
         out.append(_normalize_path(p))
@@ -3822,11 +3873,9 @@ def stata_merge(
                          (options, "options")):
         if err := _validate_no_injection(value, label):
             return _result_or_error(err)
-    paths, err = _split_using_paths(using)
+    paths, err = _split_using_paths(using, single=True)
     if err:
         return _result_or_error(err)
-    if len(paths) != 1:
-        return _make_error_result("错误: merge 一次只能接一个 using 文件")
 
     cmd = f'merge {kind} {keyvars.strip()} using "{paths[0]}"'
     cmd += _filter_clause(condition, in_range)
@@ -3838,7 +3887,7 @@ def stata_merge(
     )
     if opts:
         cmd += f", {opts}"
-    return _run_stata_command(cmd, timeout=120, require_file=using.split()[0])
+    return _run_stata_command(cmd, timeout=120, require_file=paths[0])
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
@@ -3865,7 +3914,7 @@ def stata_append(using: str, options: str = "") -> str | ToolResult:
     cmd = "append using " + " ".join(f'"{p}"' for p in paths)
     if options.strip():
         cmd += f", {options.strip()}"
-    return _run_stata_command(cmd, timeout=120, require_file=using.split()[0])
+    return _run_stata_command(cmd, timeout=120, require_file=paths[0])
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
@@ -4177,6 +4226,11 @@ _IMPORT_FORMAT_BY_EXT = {
 }
 _IMPORT_FORMATS = frozenset(_IMPORT_FORMAT_BY_EXT.values())
 # 各选项的适用格式（实测：传给不适用的格式一律 r(198)）。
+# cellrange 只可能是 A1、A1:B10 这类单元格引用；varnames 只可能是行号或 nonames。
+# 二者都被**裸拼**进 opt(...)，故用正向白名单而非黑名单 —— 一个 `)` 就能逃逸。
+_IMPORT_CELLRANGE_RE = re.compile(r"^[A-Za-z]+\d+(:[A-Za-z]+\d+)?$")
+_IMPORT_VARNAMES_RE = re.compile(r"^(\d+|nonames)$", re.IGNORECASE)
+
 _IMPORT_EXCEL_ONLY = frozenset({"excel"})
 _IMPORT_DELIMITED_ONLY = frozenset({"delimited"})
 # case() 除 parquet 外各格式都有。
@@ -4243,12 +4297,28 @@ def stata_import(
     for value, label in ((condition, "condition"), (in_range, "in_range")):
         if err := _validate_filter_expr(value, label):
             return _result_or_error(err)
-    for value, label in (
-        (options, "options"), (sheet, "sheet"), (cellrange, "cellrange"),
-        (varnames, "varnames"), (encoding, "encoding"),
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    # 这几项都被拼进 `opt("<值>")` 或 `opt(<值>)`，校验强度必须与
+    # stata_export_excel 的 sheet 对称 —— 后者走 _validate_sheet_name 明确拒绝
+    # `"`，而此处曾混在 _validate_no_injection 那批里（只拒换行/回车/空字节/分号），
+    # 于是同一个值在两个工具里下场完全相反：`S1") cellrange(A1:A1) //` 能提前
+    # 闭合引号并注入任意 import 选项。
+    if err := _validate_sheet_name(sheet):
+        return _result_or_error(err.replace("工作表名", "sheet"))
+    for value, label, pattern in (
+        (cellrange, "cellrange", _IMPORT_CELLRANGE_RE),
+        (varnames, "varnames", _IMPORT_VARNAMES_RE),
     ):
-        if err := _validate_no_injection(value, label):
-            return _result_or_error(err)
+        if value.strip() and not pattern.match(value.strip()):
+            return _make_error_result(
+                f"错误: {label} 格式非法（收到 {value!r}）—— 它被原样拼进 "
+                f"{label}(...)，含 ) 或引号即可逃逸出括号注入其他选项"
+            )
+    if encoding and any(ch in encoding for ch in ('"', "(", ")")):
+        return _make_error_result(
+            '错误: encoding 不能包含 " 或括号（它被拼进 encoding("...")）'
+        )
     if case and case not in ("preserve", "lower", "upper"):
         return _make_error_result(
             f'错误: case 只能是 "preserve" / "lower" / "upper"（收到 {case!r}）'
@@ -4384,7 +4454,10 @@ def stata_install_package(
         cmd = f"ssc install {package}{replace_opt}"
     else:
         cmd = f"net install {package}{replace_opt}, from({source.strip()})"
-    return _run_stata_command(cmd, timeout=timeout)
+    # 与 stata_run / stata_run_do_file 一致地钳制 —— 此前完全未钳制：timeout=1
+    # 会架起 1 秒看门狗（而 ssc install 实测需 3–13 秒，必然被 break），
+    # timeout=10**6 则突破 docstring 与 CLAUDE.md 所述的 1800 秒上限。
+    return _run_stata_command(cmd, timeout=max(10, min(timeout, 1800)))
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))

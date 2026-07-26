@@ -2628,3 +2628,103 @@ def test_find_package_still_rejects_injection_and_empty():
         result, cmd = _call("stata_find_package", keyword=kw)
         assert getattr(result, "is_error", False), kw
         assert cmd is None
+
+
+# --- 含空格的文件路径 ----------------------------------------------------------
+# _split_using_paths 按空白切分以支持 append 的多文件语法，代价是任何含空格的
+# 路径都被劈成两半（`/Users/x/My Drive/…`、`C:/Program Files/…` 在真实系统上是
+# 常态）。其余接路径的工具都用单参数 + 双引号包裹，完全支持空格 —— 只有这两个
+# 工具不支持，且报出的错与真实原因无关（merge 报「只能接一个文件」，append 把
+# 第二个碎片按 Python cwd 解析成另一个真实存在的路径）。
+
+
+def test_merge_accepts_path_with_spaces():
+    from server import stata_merge
+
+    target = abs_path("tmp", "my data", "panel.dta")
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+    ):
+        stata_merge(kind="1:1", keyvars="id", using=target)
+    cmd = mock_run.call_args[0][0]
+    assert f'using "{target}"' in cmd
+    assert mock_run.call_args.kwargs["require_file"] == target
+
+
+def test_append_accepts_quoted_paths_with_spaces():
+    from server import stata_append
+
+    a = abs_path("tmp", "my data", "a.dta")
+    b = abs_path("tmp", "b.dta")
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+    ):
+        stata_append(using=f'"{a}" "{b}"')
+    cmd = mock_run.call_args[0][0]
+    assert f'"{a}"' in cmd
+    assert f'"{b}"' in cmd
+    assert mock_run.call_args.kwargs["require_file"] == a
+
+
+def test_append_still_splits_plain_space_separated_paths():
+    from server import stata_append
+
+    a = abs_path("tmp", "a.dta")
+    b = abs_path("tmp", "b.dta")
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+    ):
+        stata_append(using=f"{a} {b}")
+    cmd = mock_run.call_args[0][0]
+    assert f'"{a}"' in cmd and f'"{b}"' in cmd
+
+
+def test_append_reports_unbalanced_quotes():
+    from server import stata_append
+
+    result = stata_append(using='"' + abs_path("tmp", "a.dta"))
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert "引号" in text
+
+
+def test_verify_rejects_mutating_duplicates_subcommands():
+    """``stata_verify`` 标 readOnlyHint=True，就不能执行会改数据的子命令。
+
+    ``duplicates drop`` 删除观测、``duplicates tag()`` 创建变量 —— 二者都是
+    「修改」而非「校验」，而遵循 MCP 注解的客户端会对只读工具跳过确认，等于
+    静默改数据。工具名即契约：把破坏性子命令挡在门外，比给一个「除非传某个
+    选项否则只读」的工具更安全。
+    """
+    from server import stata_verify
+
+    for sub in ("drop", "tag(dup)", "TAG(dup)", "  drop  "):
+        result = stata_verify(check="duplicates", options=sub)
+        text = result.content[0].text if hasattr(result, "content") else result
+        assert "错误" in text, sub
+        assert "stata_run" in text, sub
+
+
+def test_verify_allows_read_only_duplicates_subcommands():
+    from server import stata_verify
+
+    for sub in ("", "report", "list", "examples"):
+        with patch("server._run_stata_command") as mock_run:
+            stata_verify(check="duplicates", options=sub)
+        assert mock_run.call_args[0][0].startswith("duplicates ")
+
+
+def test_install_package_clamps_timeout():
+    """与 stata_run / stata_run_do_file 一致地夹在 10–1800 秒。
+
+    此前完全未钳制：timeout=1 会架起 1 秒看门狗（而安装实测需 3–13 秒），
+    timeout=10**6 则突破文档所称的 1800 秒上限。
+    """
+    from server import stata_install_package
+
+    for given, expected in ((1, 10), (0, 10), (10**6, 1800), (120, 120)):
+        with patch("server._run_stata_command") as mock_run:
+            stata_install_package("estout", timeout=given)
+        assert mock_run.call_args.kwargs["timeout"] == expected

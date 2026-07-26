@@ -432,3 +432,41 @@ def test_validate_scheme_allows_real_scheme_names(scheme):
 )
 def test_validate_scheme_rejects_anything_outside_whitelist(scheme):
     assert _validate_scheme_name(scheme) is not None
+
+
+# --- stata_import 的选项校验须与 stata_export_excel 对称 ------------------------
+# 同为双引号包裹的 sheet()，export 侧走 _validate_sheet_name（明确拒绝 `"`），
+# import 侧却混在 _validate_no_injection 那批里（只拒换行/回车/空字节/分号），
+# 于是同一个值在两个工具里下场完全相反：import 侧可提前闭合引号注入任意选项。
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "keyword"),
+    [
+        ({"sheet": 'S1") cellrange(A1:A1) //'}, "sheet"),
+        ({"cellrange": "A1:B2) clear //"}, "cellrange"),
+        ({"encoding": 'utf-8") clear //'}, "encoding"),
+        ({"varnames": '1) clear //'}, "varnames"),
+    ],
+)
+def test_import_rejects_quote_and_paren_escapes(kwargs, keyword, tmp_path):
+    from server import stata_import
+
+    target = tmp_path / ("book.xlsx" if "sheet" in kwargs or "cellrange" in kwargs else "d.csv")
+    target.write_text("x\n")
+    result = stata_import(filepath=str(target), **kwargs)
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert keyword in text and "错误" in text
+
+
+def test_import_allows_normal_sheet_name(tmp_path):
+    """含空格与括号的正常工作表名不应误伤（值在双引号内对 Stata 安全）。"""
+    from unittest.mock import patch
+
+    from server import stata_import
+
+    target = tmp_path / "book.xlsx"
+    target.write_text("x\n")
+    with patch("server._run_stata_command") as mock_run:
+        stata_import(filepath=str(target), sheet="Q1 (2024)")
+    assert 'sheet("Q1 (2024)")' in mock_run.call_args[0][0]

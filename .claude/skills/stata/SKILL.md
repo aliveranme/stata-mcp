@@ -617,5 +617,5 @@ esttab m1 m2 using "results.csv", replace
     - `stata_export_excel(..., replace=False)` — 导出文件时默认不覆盖已有文件
     - `stata_use_dataset(filepath, clear=True)` — 默认清除内存中已有数据
     - `stata_run(command, timeout=60)` — 命令默认超时 60s，安装包/复杂回归可传 `timeout=120`
-12. **`stata_graph` 非只读**：虽然标记为只读探索，但导出文件时会写入磁盘（destructiveHint=True），Agent 应在覆盖文件前向用户确认。
+12. **`stata_graph` 非只读**：它注册为 `readOnlyHint=False, destructiveHint=True`（导出时写磁盘），Agent 应在覆盖文件前向用户确认。此前本条写作「虽然标记为只读探索」，与实际注解相反。
 13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并**不会**自动安装 `estout`：执行前先探测，缺失则报错并给出可执行的单条安装命令。照提示执行 `stata_install_package("estout", source="ssc", timeout=120)`，装好后**重试本次导出**即可。不要在 `stata_run` 里内嵌 `ssc install` —— SSC 网络请求会独占串行锁阻塞整个流程（实测 3–13s 波动，慢网络更久）；这是「阻塞太久」而非「损坏 DLL」，且 `install` 工具的 `timeout` 超时会被看门狗干净中断（不卡死），改走专用工具即可。

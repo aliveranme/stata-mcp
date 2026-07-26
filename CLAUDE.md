@@ -94,14 +94,15 @@ stata-mcp/
 执行前: _drain_output(50ms)  — 短排空残留缓冲（指数退避 1→20ms）
 执行中: StataSO_Execute       — 同步调用，60s 超时看门狗（长命令可显式传 timeout）
 执行后: 快轮询(指数退避 1→20ms) — 收集主体输出，3次空转即退出
-        _drain_output()       — 智能清尾：小输出 50ms | 大输出 100ms
+        _drain_output()       — 智能清尾三档：干净退出的小输出 5ms
+                                | 未干净退出的小输出 50ms | ≥10K 大输出 100ms
         截断 120K chars        — 防止 MCP 缓冲溢出
         自动分页 4K chars       — 大输出自动分页，支持 stata_more 翻页
 ```
 
 ### 超时看门狗
 
-超时看门狗在后台线程中运行，默认 60s（通过 `timeout` 参数可覆盖，上限 1800s）。因 Stata DLL 非线程安全，看门狗调用 `StataSO_SetBreak` 存在极小并发风险；已通过二次确认、break 冷却机制降低触发概率。如需执行包安装、复杂回归或大循环，显式传入 `timeout=120` 或更高。
+超时看门狗在后台线程中运行，默认 60s（通过 `timeout` 参数可覆盖，钳制在 10–1800s）。因 Stata DLL 非线程安全，看门狗调用 `StataSO_SetBreak` 存在极小并发风险；目前的缓解**只有二次确认**（`exec_done.is_set()` 再判一次）。此前本节还写有「break 冷却机制」，代码中从未实现，已删除该说法。如需执行包安装、复杂回归或大循环，显式传入 `timeout=120` 或更高。
 
 ### 安全护栏
 
@@ -178,7 +179,7 @@ stata-mcp/
 do 文件常在开头写 `ssc install foo`，内联执行会让整段脚本卡在网络请求上（见「SSC 网络」条目）。`stata_run_do_file` 执行前先处理：
 
 1. **best-effort 读文件**（Python 侧，按 `_normalize_path` 的绝对路径）。读不到（如 Stata cwd 与 Python cwd 不一致的相对路径）→ 不拆分，退回 `do "path"` 原样执行，由 `require_file` 锁内权威路径兜底。
-2. `_extract_ssc_installs` 扫描**行首** `ssc install <pkg>[, replace]`（含 `qui`/`cap`/`noi` 前缀组合），按包名去重；安装行**改成注释保留行号**。`{ }` 块内、`ssc describe`/`uninstall`、缩写 `inst` 不匹配 —— 未命中就随原文内联，安全兜底。
+2. `_extract_ssc_installs` 扫描**行首** `ssc install <pkg>[, replace]`（含 `qui`/`cap`/`noi` 前缀组合），按包名去重；安装行**改成注释保留行号**。`{ }` 块内（函数维护花括号深度，深度 >0 时不匹配 —— 块内安装是**有条件**执行的，`if _rc != 0 { ssc install foo }` 提到脚本之前就变成了无条件安装）、`ssc describe`/`uninstall`、缩写 `inst` 都不匹配 —— 未命中就随原文内联，安全兜底。
 3. `_prepare_ssc_installs` 逐个处理：无 `replace` 时先 `which pkg` 探测，**已装则跳过不重复联网**；缺失才 `ssc install`（带 timeout，超时可被看门狗干净中断）。
 4. 清理后的脚本写 **Stata 临时 do 文件**执行（`finally` 中 `_cleanup_temp_block` 即用即删），返回信息前置「预装/跳过报告」。
 5. **文件中无 `ssc install` → 完全走原路径，行为逐字不变**（不写临时文件、不加报告头）。
@@ -394,6 +395,22 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | 空 `depvar` 静默算错 | `_validate_identifier` 对空值一律放行，`regress("", "weight")` 拼出 `regress  weight`，Stata 把 weight 当因变量跑出**另一个回归**并返回成功 | 加 `required=True`，必填参数拒绝空值 |
 | `scheme` 可注入 `set scheme` 的选项 | 黑名单漏掉 `,`，而 `set scheme` 支持 `, permanently` | 改用正向白名单 `_SCHEME_NAME_RE` |
 | 「SSC 网络请求损坏 DLL」被误诊 | 早先据「用户报告卡死了」记为 DLL 损坏，但从未复现。实测（Stata 19.5 MP，macOS）`ssc install` 耗时 3–13s 波动、慢网络更久，整段独占 `_stata_lock`——表现为「卡住」但**不损坏 DLL**：装超过 timeout 时看门狗 `SetBreak` 会干净中断（rdrobust 在 10s 被 break，会话健康、包不残留），网络正常时干净完成，多场景复现无一崩溃 | 无代码改动：`stata_install_package` 独立成工具的设计依旧正确（隔离长阻塞的网络操作），并加 `timeout` 参数供用户兜底；仅把文档中「损坏 DLL / 卡死」改正为「网络阻塞太久」 |
+| 通用前缀绕过危险命令护栏 | `_has_dangerous_command_prefix` 只做**行首**匹配，而 `capture`/`quietly`/`noisily`/`by g:` 是可套在任意命令前的通用前缀。真机确认 `capture shell touch <f>` 与 `quietly mata: _stata("shell touch <f>")` 真实创建了文件 | 新增 `_strip_command_prefixes` 归一化出「真正被执行的命令」，原文与剥离后各判一次 |
+| `#delimit ;` 绕过护栏并让脚本崩解 | 它把命令分隔符从换行改成 `;`，此后 `!` 永不在行首。真机确认 `#delimit ;` + `display 3 ; !touch <f> ;` 真实创建文件；同时行导向的解析器会把这类脚本切成碎块 | 护栏先按**顶层分号**切分再逐段匹配（字符串内的 `;` 不切）；入口另行拒绝 `#delimit` 并指向 `stata_run_do_file` |
+| `stata_import` 的 `condition`/`in_range` 可绕过路径沙箱 | 它是唯一把 `[if]`/`[in]` 拼在 `using "<已校验路径>"` **之前**的工具，而两个子句只过 `_validate_no_injection`（不拒 `/`、`"`、`using`）。实测 `condition='1 using "<越界>" //'` 用 `//` 注释掉沙箱路径读取任意文件 | 新增 `_validate_filter_expr`（`_validate_no_injection` 的超集，只在**字符串之外**拒绝 `//`、`/*`、`*/`、独立 `using` 与未闭合引号），接入全部 36 处入口而非只补该工具 |
+| 缩进的 `*` 注释被当代码扫描 | 解析器只认第 1 列（注释还写着「必须位于第 1 列」），真机反证顶层与循环体内的缩进注释都合法。于是注释里的 `{` 让合法循环抛 `UnbalancedBlockError`、`}` 把块提前切碎 | 注释判定移到**逻辑行**层面并允许缩进 |
+| `* 注释 ///` 反而执行了被注释掉的命令 | Stata 中 `///` 会把下一行并入注释（真机确认不输出），而解析器在 `*` 处提前 return、`has_cont` 恒为 False，下一行被当独立命令执行 | 新增 `in_comment_line` 状态跟踪注释的续行链；同时保证 `display 1 ///` + `* 2` 里的 `*` 仍是乘号（真机输出 2） |
+| `/*` 换行 `*/` 被解析成两条命令 | 它是官方**行连接符**（`///` 出现前的写法），解析器却 `buffer.append` 成新行。实测 `regress price weight /*\n*/ mpg foreign` 被劈开后只跑一个回归元，给出**另一个模型**并「成功」 | 跨行块注释结束后的内容并入上一行（原样拼接，`e(cmdline)` 与原生逐字一致） |
+| `quietly program define` 等前缀写法挂死会话 | `_opens_end_block` 只看首 token，前缀让 `program`/`input`/`mata` 块判定失效，开启行被单独送执行 | 复用 `_strip_command_prefixes` 后再判定 |
+| `ssc install` 探测不持锁访问 DLL | `_prepare_ssc_installs` 的 `which` 探测在锁外直接调 `_execute_safe`，违反串行化不变式（对照 estout 探测显式加锁）；探测返回 997/998 时还会当成「未安装」继续逐个联网安装 | 探测包进 `with _stata_lock`；997/998 时中止并报告 |
+| 普通错误不中止命令链，后续块覆盖磁盘数据 | 只有 997/998 会 break，r(601)/r(198) 与看门狗超时（rc=1）都继续执行。`use` 失败后的 `collapse` 在**上一个**内存数据集上聚合、`save … , replace` 把错误数据落盘 | 首错即停（对齐 Stata 自身的 do 文件语义），并提示 `capture` 是原生的继续执行方式 |
+| GBK/Big5 的 do 文件抛未捕获异常 | `stata_run_do_file` 只 `except OSError`，而 `UnicodeDecodeError` 继承自 `ValueError` | 一并捕获，退回 `do "path"` 原样执行 |
+| 返回码释义大半是错的 | `STATA_RC_MESSAGES` 像是凭印象填的：rc 9 标成「变量类型不匹配」（真值是 assert 失败，type mismatch 其实是 rc **109**）、rc 4 标成「内存不足」（真值是数据未保存）、rc 5 标成「变量不存在」（真值是 not sorted）、rc 199 标成「选项语法错误」（真值是命令不存在），459/601/2000 等高频码缺失。该文本拼在 Stata 原文**之前**，是 Agent 首先读到的一行 | 逐条真机触发核对后重写全表，补 100/109/133/301/459/601/602/603/900/2000；未核对的码删除，退化为「未知返回码(N)」+ Stata 原文 |
+| 含空格的路径在 merge/append 里必然失败 | `_split_using_paths` 按空白切分以支持多文件，于是 `/Users/x/My Drive/…` 被劈成两半；append 的第二个碎片还会按 Python cwd 解析成另一个真实路径 | `merge` 改为 `single=True` 不切分；`append` 改为双引号感知切分（`"a b.dta" "c.dta"`） |
+| `stata_verify` 标只读却能删数据 | `duplicates` 分支把 `options` 原样当子命令，`drop` 删除观测、`tag()` 创建变量，而遵循 MCP 注解的客户端会对只读工具跳过确认 | 拒绝这两个子命令并指向 `stata_run`（工具名即契约：校验就该是只读的） |
+| `stata_import` 的 sheet/cellrange/encoding/varnames 可逃逸括号 | 与 `stata_export_excel` 的 `sheet`（走 `_validate_sheet_name` 明确拒 `"`）不对称，import 侧混在 `_validate_no_injection` 里，`S1") cellrange(A1:A1) //` 可注入任意选项 | sheet 改走 `_validate_sheet_name`；cellrange/varnames 用正向白名单；encoding 拒引号与括号 |
+| `stata_install_package` 的 timeout 无钳制 | docstring 与 CLAUDE.md 都称 10–1800s，代码却直接透传：`timeout=1` 会架起 1 秒看门狗（安装实测需 3–13s，必然被 break） | 与 `stata_run` 一致钳制为 `max(10, min(timeout, 1800))` |
+| `{ }` 块内的 `ssc install` 被无条件预装 | docstring 与 CLAUDE.md 都声称块内不匹配，代码却无块跟踪。`if _rc != 0 { ssc install foo }` 被提到脚本之前变成无条件安装 | `_extract_ssc_installs` 维护花括号深度，深度 >0 时不匹配（数错则退回内联，安全兜底） |
 
 ## 权限配置
 
@@ -433,5 +450,5 @@ server 选择「始终允许」）。
 - **`setup.py` 无自动化测试**：它是每个新用户第一个运行的脚本（565 行，含跨平台检测、venv 创建、`.mcp.json` 合并写入），目前只有 `ruff` lint，没有单元测试。`generate_mcp_json` 的「保留其他 server 与自定义 env」逻辑尤其值得补测 —— 它写的是用户的真实配置文件。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
 - **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**不要内嵌 `ssc install`** —— 但原因不是「损坏 DLL」。实测（Stata 19.5 MP，macOS）：`ssc install` 是网络阻塞调用，同一个包耗时在 **3–13s 间波动**，慢/不可达网络下更久；它整段独占 `_stata_lock` 阻塞整个 server。**看门狗超时对它是生效的**：装超过 timeout 时 `SetBreak` 会**干净中断**（实测 rdrobust 在 10s 下限被 break，返回超时提示，会话健康、包不残留半装状态；`timeout=1/2` 的 fre/mdesc 没被 break 只是它们在 10s 下限前就装完了）。**全程无 DLL 损坏**——多场景复现，break 后 `display`/`summarize`/`regress` 全正常。真正的问题只是：内嵌进分析步骤时，一个几秒到十几秒的网络阻塞会意外冻结整个流程。故包安装走专用的 `stata_install_package`（用户可控时机、`timeout` 参数真实兜底）。
-- **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（60s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。
+- **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前的缓解是串行锁、较低的默认超时（60s）与一次二次确认；本条此前还写有「连续 break 熔断」，代码中并不存在，已删除。**二次确认的窗口并未完全闭合**：主线程在 `StataSO_Execute` 返回后还要走完 `RedirectOutput.__exit__` 与临时文件清理才 `set()` 事件，看门狗恰在这段间隙做确认时仍读到未完成，于是 break 可能落在命令结束之后并被下一条命令消费（表现为无关的 rc=1）。建议长命令显式拆分或使用更大的 timeout 参数。
 - **工具错误语义**：错误结果（Stata 返回码非 0、输入验证失败、DLL 崩溃）通过 `ToolResult(is_error=True)` 告知 MCP 客户端。成功工具结果仍以普通字符串返回。若使用 `mcp.list_tools` 或类似客户端，需注意区分返回类型。

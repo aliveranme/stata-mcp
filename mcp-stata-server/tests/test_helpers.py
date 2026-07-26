@@ -1,6 +1,8 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from server import (
     _cleanup_temp_block,
     _file_written_since,
@@ -79,8 +81,42 @@ def test_format_error_known_rc():
 
     result = _format_error(198, "regress bad", "var not found")
     assert "[返回码: 198]" in result
-    assert "命令语法错误" in result
+    assert "语法无效" in result
     assert "var not found" in result
+
+
+@pytest.mark.parametrize(
+    ("rc", "keyword"),
+    [
+        # 真机（Stata 19.5 MP）逐条触发核对过的释义，防止再次凭印象改写。
+        # 括号内是 Stata 自己的原文与触发方式。
+        (4, "未保存"),        # no; dataset in memory has changed since last saved
+        (5, "排序"),          # not sorted
+        (9, "assert"),        # assertion is false ← 旧表误标为「变量类型不匹配」
+        (109, "类型不匹配"),   # type mismatch ← 「变量类型不匹配」实际属于这里
+        (110, "已存在"),       # variable already defined
+        (111, "未找到"),       # variable not found
+        (199, "命令不存在"),   # command is unrecognized ← 旧表误标为「选项语法错误」
+        (459, "唯一识别"),     # does not uniquely identify the observations（isid）
+        (601, "文件不存在"),   # file not found
+        (2000, "没有观测值"),  # no observations
+    ],
+)
+def test_format_error_rc_messages_match_real_stata(rc, keyword):
+    from server import _format_error
+
+    assert keyword in _format_error(rc, "cmd", "")
+
+
+def test_format_error_drops_unverified_codes():
+    """未经真机核对的返回码应退化为「未知返回码」，其后紧跟 Stata 原文。
+
+    给错方向比不给更糟：释义拼在 Stata 报错**之前**，是 Agent 首先读到的一行。
+    """
+    from server import _format_error
+
+    for rc in (6, 8, 10, 20, 99):
+        assert f"未知返回码({rc})" in _format_error(rc, "cmd", "")
 
 
 def test_format_error_unknown_rc():

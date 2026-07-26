@@ -416,3 +416,36 @@ def test_execute_single_timeout_message_names_the_timeout(exec_mocks):
     _rc, out = _execute_single("forvalues i=1/1e9 {", timeout=0)
     assert "超过 0s 上限已被中断" in out
     assert "timeout" in out
+
+
+def test_extract_ssc_installs_skips_block_interior():
+    """`{ }` 块内的 ssc install 不得被拆出预装 —— 它是**有条件**执行的。
+
+    docstring 与 CLAUDE.md 都声称块内安装「不特殊处理，仍随块内联执行」，但
+    此前代码没有任何块跟踪：``if _rc != 0 { ssc install foo }`` 会被提到脚本
+    之前**无条件**安装，改变了 do 文件的语义。文档描述的才是安全行为。
+    """
+    from server import _extract_ssc_installs
+
+    text = 'sysuse auto, clear\nif 1 {\n    ssc install estout\n}\nsummarize price'
+    cleaned, installs = _extract_ssc_installs(text)
+    assert installs == []
+    assert cleaned == text
+
+
+def test_extract_ssc_installs_still_hoists_top_level():
+    from server import _extract_ssc_installs
+
+    text = "ssc install estout\nqui ssc install fre, replace\nsysuse auto, clear"
+    cleaned, installs = _extract_ssc_installs(text)
+    assert installs == [("estout", False), ("fre", True)]
+    assert "已移出单独安装" in cleaned
+    assert cleaned.count("\n") == text.count("\n")
+
+
+def test_extract_ssc_installs_resumes_after_block_closes():
+    from server import _extract_ssc_installs
+
+    text = "forvalues i=1/2 {\n    display `i'\n}\nssc install estout"
+    _, installs = _extract_ssc_installs(text)
+    assert installs == [("estout", False)]
