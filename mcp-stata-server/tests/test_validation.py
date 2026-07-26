@@ -87,6 +87,14 @@ def test_has_unsafe_brace_allows_balanced_or_none():
     assert _has_unsafe_brace("capture noisily { scatter price weight }") is False
 
 
+def test_has_unsafe_brace_flags_unclosed_opening():
+    """自带未闭合 { 的命令会让 Stata 进入等待输入状态并挂死会话，SetBreak 救不回。"""
+    from server import _has_unsafe_brace
+
+    assert _has_unsafe_brace("forvalues i=1/3 {") is True
+    assert _has_unsafe_brace("scatter price weight {") is True
+
+
 def test_has_unsafe_brace_allows_brace_inside_string():
     from server import _has_unsafe_brace
 

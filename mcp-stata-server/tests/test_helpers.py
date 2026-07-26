@@ -1,4 +1,5 @@
 import os
+from unittest.mock import patch
 
 from server import (
     _cleanup_temp_block,
@@ -6,6 +7,7 @@ from server import (
     _format_size,
     _graph_size_options,
     _materialize_block,
+    _mtime_ns,
     _normalize_path,
     _paginate,
 )
@@ -205,10 +207,84 @@ def test_graph_size_vector_keeps_inch_values():
     assert note == ""
 
 
-def test_graph_size_vector_covers_common_extensions():
-    for ext in (".pdf", ".eps", ".ps", ".svg", ".emf", ".wmf"):
+def test_graph_size_inch_formats_drop_pixel_values():
+    """英寸制格式（pdf 及 Windows 的 emf/wmf）不能收到像素值。"""
+    for ext in (".pdf", ".emf", ".wmf"):
         opts, _ = _graph_size_options(f"/tmp/a{ext}", 800, 0)
-        assert opts == "", f"{ext} 应按矢量格式忽略像素宽度"
+        assert opts == "", f"{ext} 按英寸计，应忽略像素宽度"
+
+
+def test_graph_size_svg_uses_pixels_not_inches():
+    """实测 Stata 19.5 MP：svg 输出头写作 width="800px"，width() 是像素。
+
+    把 svg 当英寸会两头错：合法的 800 被丢弃；而 width=6 会产出 6 像素的废图，
+    文件却写出成功 —— 静默失败。
+    """
+    opts, note = _graph_size_options("/tmp/a.svg", 800, 600)
+    assert opts == "width(800) height(600)"
+    assert note == ""
+
+
+def test_graph_size_postscript_rejects_size_options():
+    """实测：eps/ps 传任何 width()/height() 都是 option width() not allowed → r(198)。"""
+    for ext in (".eps", ".ps"):
+        opts, note = _graph_size_options(f"/tmp/a{ext}", 800, 600)
+        assert opts == "", f"{ext} 不支持尺寸选项"
+        assert "不支持" in note, f"{ext} 丢弃参数必须告知调用方"
+
+
+def test_graph_size_postscript_silent_when_no_size_requested():
+    opts, note = _graph_size_options("/tmp/a.eps", 0, 0)
+    assert opts == ""
+    assert note == "", "没传尺寸就没什么可提示的"
+
+
+def test_graph_size_vector_keeps_upper_bound():
+    """20 英寸是 Stata 允许的上界，不能连同越界值一起丢掉。"""
+    opts, note = _graph_size_options("/tmp/a.pdf", 20, 0)
+    assert opts == "width(20)"
+    assert note == ""
+
+
+def test_graph_size_vector_drops_just_over_upper_bound():
+    opts, note = _graph_size_options("/tmp/a.pdf", 21, 0)
+    assert opts == ""
+    assert "width=21" in note
+
+
+def test_graph_size_vector_keeps_lower_bound():
+    """int 参数下 1 是能表达的最小合法英寸值。"""
+    opts, note = _graph_size_options("/tmp/a.pdf", 1, 0)
+    assert opts == "width(1)"
+    assert note == ""
+
+
+def test_graph_size_vector_names_every_dropped_dimension():
+    """只报 width 会让调用方以为 height 生效了。"""
+    opts, note = _graph_size_options("/tmp/a.pdf", 800, 600)
+    assert opts == ""
+    assert "width=800" in note
+    assert "height=600" in note
+
+
+def test_graph_size_matches_extension_case_insensitively():
+    """.PDF 若被当成位图会收到像素值 → r(198)。"""
+    opts, note = _graph_size_options("/tmp/A.PDF", 800, 0)
+    assert opts == ""
+    assert "英寸" in note
+
+
+def test_graph_size_without_extension_falls_back_to_pixels():
+    """无扩展名时 Stata 按默认位图处理，尺寸单位仍是像素。"""
+    opts, note = _graph_size_options("/tmp/noext", 800, 600)
+    assert opts == "width(800) height(600)"
+    assert note == ""
+
+
+def test_graph_size_inch_format_omits_options_when_all_unset():
+    opts, note = _graph_size_options("/tmp/a.pdf", 0, 0)
+    assert opts == ""
+    assert note == "", "没传尺寸就不该有「已忽略」的提示"
 
 
 # --- 写入判定与大小格式 ------------------------------------------------------
@@ -255,6 +331,25 @@ def test_format_size_kilobytes(tmp_path):
 
 def test_format_size_missing_file_is_graceful(tmp_path):
     assert _format_size(str(tmp_path / "gone.png")) == "大小未知"
+
+
+def test_format_size_megabytes():
+    """大图导出常在 MB 级；不走 MB 分支会显示成四位数 KB。"""
+    with patch("server.os.path.getsize", return_value=3 * 1024 * 1024 + 512 * 1024):
+        assert _format_size("/tmp/big.png") == "3.5 MB"
+
+
+def test_mtime_ns_returns_none_for_missing_file(tmp_path):
+    assert _mtime_ns(str(tmp_path / "gone.png")) is None
+
+
+def test_file_written_since_treats_stat_race_as_written(tmp_path):
+    """isfile 之后文件被替换 → 拿不到 mtime。宁可报成功，也不把成功的导出报成失败。"""
+    p = tmp_path / "fig.png"
+    p.write_bytes(b"x")
+    before = os.stat(p).st_mtime_ns
+    with patch("server._mtime_ns", return_value=None):
+        assert _file_written_since(str(p), before) is True
 
 
 # ============================================================================
@@ -308,3 +403,94 @@ def test_extract_ssc_ignores_non_install_ssc():
     """ssc describe / uninstall 不是安装，不应被拆出。"""
     _cleaned, installs = _extract_ssc_installs("ssc describe estout\nssc uninstall foo")
     assert installs == []
+
+
+def test_graph_size_emf_has_no_override_options():
+    """实测 `help emf_options` 不存在，graph export 的 override_options 表也无 emf。
+
+    旧实现把 .emf 归入英寸组，会把 width(6) 传下去 —— emf 不接受任何尺寸选项。
+    """
+    opts, note = _graph_size_options("/tmp/a.emf", 6, 4)
+    assert opts == ""
+    assert "不支持" in note
+
+
+def test_graph_size_wmf_is_not_an_official_format():
+    """.wmf 根本不在 graph export 的格式表里，同样不该收到尺寸选项。"""
+    opts, note = _graph_size_options("/tmp/a.wmf", 6, 4)
+    assert opts == ""
+    assert "不支持" in note
+
+
+# --- 格式专属导出选项（quality / mag / fontface）------------------------------
+# 依据各 [G-3] *_options 条目并在 Stata 19.5 MP 实测：
+#   quality() 仅 jpg（1–100）；png/pdf 报 option quality() not allowed
+#   mag()     仅 pdf/eps/ps（1–10000）；png/jpg/svg 报 option mag() not allowed
+#   fontface() 仅 pdf/eps/ps/svg
+from server import _graph_format_options  # noqa: E402
+
+
+def test_graph_format_quality_only_for_jpg():
+    opts, note = _graph_format_options("/tmp/a.jpg", quality=60, mag=0, fontface="")
+    assert opts == "quality(60)"
+    assert note == ""
+
+
+def test_graph_format_quality_dropped_for_other_formats():
+    """png 传 quality 会 option quality() not allowed，错误又被复合块 capture 吞掉。"""
+    for ext in (".png", ".pdf", ".svg"):
+        opts, note = _graph_format_options(f"/tmp/a{ext}", quality=60, mag=0, fontface="")
+        assert opts == "", f"{ext} 不支持 quality()"
+        assert "quality" in note and "不支持" in note
+
+
+def test_graph_format_mag_for_postscript_family():
+    for ext in (".pdf", ".eps", ".ps"):
+        opts, note = _graph_format_options(f"/tmp/a{ext}", quality=0, mag=150, fontface="")
+        assert opts == "mag(150)", f"{ext} 支持 mag()"
+        assert note == ""
+
+
+def test_graph_format_mag_dropped_for_bitmap_and_svg():
+    for ext in (".png", ".jpg", ".svg"):
+        opts, note = _graph_format_options(f"/tmp/a{ext}", quality=0, mag=150, fontface="")
+        assert opts == "", f"{ext} 不支持 mag()"
+        assert "mag" in note
+
+
+def test_graph_format_fontface_quoted_for_vector_formats():
+    """字体名可能含空格（Times New Roman），必须用双引号包裹。"""
+    for ext in (".pdf", ".eps", ".ps", ".svg"):
+        opts, note = _graph_format_options(
+            f"/tmp/a{ext}", quality=0, mag=0, fontface="Times New Roman"
+        )
+        assert opts == 'fontface("Times New Roman")', ext
+        assert note == ""
+
+
+def test_graph_format_fontface_dropped_for_bitmap():
+    opts, note = _graph_format_options("/tmp/a.png", quality=0, mag=0, fontface="Helvetica")
+    assert opts == ""
+    assert "fontface" in note
+
+
+def test_graph_format_combines_applicable_options():
+    opts, note = _graph_format_options(
+        "/tmp/a.pdf", quality=0, mag=150, fontface="Helvetica"
+    )
+    assert opts == 'mag(150) fontface("Helvetica")'
+    assert note == ""
+
+
+def test_graph_format_silent_when_nothing_requested():
+    for ext in (".png", ".pdf", ".jpg"):
+        opts, note = _graph_format_options(f"/tmp/a{ext}", quality=0, mag=0, fontface="")
+        assert opts == ""
+        assert note == ""
+
+
+def test_graph_format_jpeg_suffix_is_not_official():
+    """实测 .jpeg → translator Graph2jpeg not found；官方后缀表只有 jpg。"""
+    opts, note = _graph_format_options("/tmp/a.jpeg", quality=60, mag=0, fontface="")
+    assert opts == "", ".jpeg 不是官方后缀，不该当 jpg 处理"
+    assert "quality" in note

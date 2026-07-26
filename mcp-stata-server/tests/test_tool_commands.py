@@ -6,6 +6,8 @@ from fastmcp.tools.base import ToolResult
 from server import (
     _ESTOUT_PROBE_CMD,
     _HELP_TOPIC_RE,
+    _make_error_result,
+    _normalize_path,
     stata_codebook,
     stata_correlate,
     stata_describe,
@@ -77,11 +79,12 @@ def test_ttest_with_byvar_and_condition():
         assert cmd == "ttest price if !missing(price), by(foreign) unequal"
 
 
-def test_ttest_without_byvar():
+def test_ttest_one_sample_with_options():
+    """单样本形式必须带 `== #` —— 实测裸 `ttest price, level(90)` 会 r(100)。"""
     with patch("server._run_stata_command") as mock_run:
-        stata_ttest("price", options="level(90)")
+        stata_ttest("price", compare_to="5000", options="level(90)")
         cmd = mock_run.call_args[0][0]
-        assert cmd == "ttest price, level(90)"
+        assert cmd == "ttest price == 5000, level(90)"
 
 
 def test_summarize_with_condition_and_detail():
@@ -730,10 +733,20 @@ def test_describe_with_varlist():
         assert mock_run.call_args[0][0] == "describe price mpg"
 
 
-def test_describe_simple_overrides_varlist():
-    """simple 与 varlist 同时给出时 varlist 被丢弃 —— 固化当前行为以便发现回归。"""
+def test_describe_simple_keeps_varlist():
+    """官方语法是 `describe [varlist] [, options]`，二者本就可共存。
+
+    实测 `describe price mpg, simple` 只列这两个变量；旧实现在 simple=True 时
+    丢弃 varlist，用户拿到的是**全部**变量清单，与请求不符。
+    """
     with patch("server._run_stata_command") as mock_run:
         stata_describe("price mpg", simple=True)
+        assert mock_run.call_args[0][0] == "describe price mpg, simple"
+
+
+def test_describe_simple_without_varlist():
+    with patch("server._run_stata_command") as mock_run:
+        stata_describe(simple=True)
         assert mock_run.call_args[0][0] == "describe, simple"
 
 
@@ -890,10 +903,15 @@ def test_ttest_rejects_empty_varname():
     mock_run.assert_not_called()
 
 
-def test_ttest_still_allows_empty_optional_byvar():
+def test_ttest_bare_form_is_refused_not_emitted():
+    """旧实现在只给 varname 时发出 `ttest price` —— 实测 r(100) by() required。
+
+    单元测试当年只比对字符串，命令是否合法完全没验，直到真机 E2E 才暴露。
+    """
     with patch("server._run_stata_command") as mock_run:
-        stata_ttest("price")
-        assert mock_run.call_args[0][0] == "ttest price"
+        result = stata_ttest("price")
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
 
 
 # ============================================================================
@@ -1122,3 +1140,1472 @@ def test_describe_package_rejects_empty():
     with patch("server._run_stata_command") as mock_run:
         assert getattr(stata_describe_package(""), "is_error", False)
         mock_run.assert_not_called()
+
+
+# ============================================================================
+# 图形绘制与导出 — 命令形状、清理动作、失败透传
+# ============================================================================
+
+
+def _writes(target, output="file written in PNG format"):
+    """让 mock 的 _run_stata_command 真的落盘，以通过 mtime 写入判定。"""
+
+    def _run(*_a, **_kw):
+        target.write_bytes(b"binary payload")
+        return output
+
+    return _run
+
+
+# --- 输入护栏 ----------------------------------------------------------------
+
+
+def test_graph_rejects_newline_in_command():
+    """换行会把第二条命令带进复合块；且复合块是原子执行，出错难定位。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_graph("scatter price weight\nhistogram price")
+    assert getattr(result, "is_error", False)
+    assert "非法控制字符" in _result_text(result)
+    mock_run.assert_not_called()
+
+
+def test_graph_rejects_null_byte_in_command():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_graph("scatter price\x00 weight")
+    assert getattr(result, "is_error", False)
+    assert "非法控制字符" in _result_text(result)
+    mock_run.assert_not_called()
+
+
+def test_graph_rejects_illegal_export_path():
+    """export 路径直接进 graph export "..."，分号可提前闭合并追加命令。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_graph(
+            "scatter price weight", export=abs_path("out", "fig.png; shell evil")
+        )
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_graph_surfaces_internal_exception_instead_of_crashing():
+    """工具内部异常必须变成 isError 结果，不能让 MCP 连接收到裸 traceback。"""
+    with patch("server._normalize_path", side_effect=RuntimeError("boom")):
+        result = stata_graph("scatter price weight", export=abs_path("out", "fig.png"))
+    assert getattr(result, "is_error", False)
+    text = _result_text(result)
+    assert "图形生成失败" in text
+    assert "RuntimeError" in text, "应保留异常类型，便于定位"
+
+
+# --- 命令形状 ----------------------------------------------------------------
+
+
+def test_graph_without_export_only_sets_scheme_then_plots():
+    with patch("server._run_stata_command") as mock_run:
+        stata_graph("histogram price", scheme="s2mono")
+    cmd = mock_run.call_args[0][0]
+    assert cmd == "set scheme s2mono\nhistogram price"
+    assert "capture noisily" not in cmd, "无导出时不该套复合块，错误定位更清晰"
+
+
+def test_graph_uses_extended_timeout():
+    """图形渲染比普通命令慢，默认 60s 容易误判超时。"""
+    for kwargs in ({}, {"export": abs_path("out", "fig.png")}):
+        with patch("server._run_stata_command", return_value="ok") as mock_run:
+            stata_graph("scatter price weight", **kwargs)
+        assert mock_run.call_args[1]["timeout"] == 120
+
+
+def test_graph_export_block_disables_graphics_for_headless():
+    """headless 下第三方绘图包会试图开图窗并挂起，必须先关图形显示。"""
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", export=abs_path("out", "fig.png"))
+    cmd = mock_run.call_args[0][0]
+    assert "set graphics off" in cmd
+    assert cmd.index("set graphics off") < cmd.index("scatter price weight")
+
+
+def test_graph_export_drops_cached_graphs_outside_the_block():
+    """graph drop 必须在复合块外：块内命令出错时它会被一起跳过，图形对象泄漏。"""
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", export=abs_path("out", "fig.png"))
+    cmd = mock_run.call_args[0][0]
+    assert cmd.rstrip().endswith("capture noisily graph drop _all")
+    assert cmd.index("}") < cmd.index("graph drop _all")
+
+
+def test_graph_export_omits_replace_by_default():
+    """replace 默认 False：安全优先，不能悄悄覆盖用户已有的图。"""
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", export=abs_path("out", "fig.png"))
+    assert "replace" not in mock_run.call_args[0][0]
+
+
+def test_graph_export_omits_size_options_when_unset():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph(
+            "scatter price weight", export=abs_path("out", "fig.png"), width=0, height=0
+        )
+    cmd = mock_run.call_args[0][0]
+    assert "width(" not in cmd
+    assert "height(" not in cmd
+
+
+def test_graph_export_resolves_relative_path_to_absolute():
+    """相对路径必须先规范化，否则 Stata cwd 与 Python cwd 不一致时写错地方。"""
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", export="out/fig.png")
+    cmd = mock_run.call_args[0][0]
+    assert f'graph export "{_normalize_path("out/fig.png")}"' in cmd
+
+
+def test_graph_export_success_message_reports_file_size(tmp_path):
+    target = tmp_path / "fig.png"
+    with patch("server._run_stata_command", side_effect=_writes(target)):
+        result = stata_graph(
+            "scatter price weight", export=str(target), replace=True
+        )
+    text = _result_text(result)
+    assert not getattr(result, "is_error", False)
+    assert str(target) in text
+    assert "B)" in text, "导出确认要带体积，0 字节的失败才看得出来"
+
+
+def test_graph_export_passes_through_upstream_error(tmp_path):
+    """_run_stata_command 已判错时直接透传，不能再叠一句「图形已导出」。"""
+    target = tmp_path / "fig.png"
+    target.write_bytes(b"stale")
+    with patch(
+        "server._run_stata_command",
+        return_value=_make_error_result("Stata 无响应，请重启 MCP Server"),
+    ):
+        result = stata_graph("scatter price weight", export=str(target), replace=True)
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "重启 MCP Server" in text
+    assert "图形已导出" not in text
+
+
+# --- 数据导出 ----------------------------------------------------------------
+
+
+def test_export_excel_rejects_illegal_filepath():
+    """filepath 直接进 export excel using "..."，分号可提前闭合并追加命令。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_export_excel(abs_path("out", "d.xlsx; shell evil"))
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_export_excel_without_varlist_exports_all_columns(tmp_path):
+    target = tmp_path / "data.xlsx"
+    with patch("server._run_stata_command", side_effect=_writes(target)) as mock_run:
+        stata_export_excel(str(target), replace=True)
+    cmd = mock_run.call_args[0][0]
+    assert cmd.startswith(f'export excel using "{target}"')
+    assert "firstrow(variables)" in cmd
+    assert 'sheet("Sheet1")' in cmd
+
+
+def test_export_excel_success_message_reports_size_and_path(tmp_path):
+    target = tmp_path / "data.xlsx"
+    with patch("server._run_stata_command", side_effect=_writes(target)):
+        result = stata_export_excel(str(target), replace=True)
+    text = _result_text(result)
+    assert not getattr(result, "is_error", False)
+    assert f"-> {target}" in text
+
+
+def test_export_excel_passes_through_upstream_error(tmp_path):
+    target = tmp_path / "data.xlsx"
+    target.write_bytes(b"stale")
+    with patch(
+        "server._run_stata_command",
+        return_value=_make_error_result("Stata 无响应，请重启 MCP Server"),
+    ):
+        result = stata_export_excel(str(target), replace=True)
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "已导出" not in text
+
+
+# --- 回归结果导出 -------------------------------------------------------------
+
+
+def test_export_results_builds_esttab_command(tmp_path):
+    target = tmp_path / "res.csv"
+    with (
+        patch("server._execute_safe", return_value=(0, "estout installed")),
+        patch("server._run_stata_command", side_effect=_writes(target)) as mock_run,
+    ):
+        stata_export_excel(str(target), results=True, replace=True)
+    cmd = mock_run.call_args[0][0]
+    assert cmd.startswith(f'esttab using "{target}", csv replace')
+    assert "plain nogaps nomtitles nonumber" in cmd
+
+
+def test_export_results_keeps_csv_path_without_extra_notice(tmp_path):
+    """路径本就是 .csv 时不该冒出「已改用 CSV」的提示，那会让人以为改了参数。"""
+    target = tmp_path / "res.csv"
+    with (
+        patch("server._execute_safe", return_value=(0, "estout installed")),
+        patch("server._run_stata_command", side_effect=_writes(target)),
+    ):
+        result = stata_export_excel(str(target), results=True, replace=True)
+    assert "已自动改用" not in _result_text(result)
+
+
+def test_export_results_rewrites_non_csv_extension(tmp_path):
+    """esttab 只出 CSV；.txt 同样要改扩展名并说明，不能静默写成 .txt。"""
+    csv_target = tmp_path / "res.csv"
+    with (
+        patch("server._execute_safe", return_value=(0, "estout installed")),
+        patch("server._run_stata_command", side_effect=_writes(csv_target)) as mock_run,
+    ):
+        result = stata_export_excel(
+            str(tmp_path / "res.txt"), results=True, replace=True
+        )
+    assert f'esttab using "{csv_target}"' in mock_run.call_args[0][0]
+    assert "已导出为 CSV" in _result_text(result)
+
+
+def test_export_results_never_leaks_varlist_into_esttab(tmp_path):
+    """varlist 只对数据导出有效；漏进 esttab 串会把 using 路径整段挪位。"""
+    target = tmp_path / "res.csv"
+    with (
+        patch("server._execute_safe", return_value=(0, "estout installed")),
+        patch("server._run_stata_command", side_effect=_writes(target)) as mock_run,
+    ):
+        stata_export_excel(str(target), varlist="mpg price", results=True, replace=True)
+    cmd = mock_run.call_args[0][0]
+    assert "mpg" not in cmd
+    assert cmd.startswith(f'esttab using "{target}"')
+
+
+# ============================================================================
+# 与官方能力边界对齐 —— scheme 主题 / 格式选项
+# ============================================================================
+
+
+def test_graph_does_not_override_user_scheme_by_default():
+    """不传 scheme 就不该动主题。
+
+    Stata 19 的默认 scheme 是 stcolor（实测 c(scheme)）；旧实现硬编码
+    scheme="s2color" 并每次执行 `set scheme s2color`，等于每次绘图都把用户的
+    主题悄悄改回老配色，且调用结束后不还原 —— 这是覆盖，不是设定。
+    """
+    with patch("server._run_stata_command") as mock_run:
+        stata_graph("scatter price weight")
+    cmd = mock_run.call_args[0][0]
+    assert "set scheme" not in cmd
+    assert cmd == "scatter price weight"
+
+
+def test_graph_export_does_not_override_user_scheme_by_default():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", export=abs_path("out", "f.png"))
+    cmd = mock_run.call_args[0][0]
+    assert "set scheme" not in cmd
+    assert "set graphics off" in cmd, "headless 防挂起不受影响"
+
+
+def test_graph_still_applies_scheme_when_asked():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", scheme="economist",
+                    export=abs_path("out", "f.png"))
+    cmd = mock_run.call_args[0][0]
+    assert "set scheme economist" in cmd
+    assert cmd.index("set scheme") < cmd.index("scatter price weight")
+
+
+# --- 主题设定 stata_scheme ---------------------------------------------------
+
+
+def test_scheme_list_uses_graph_query():
+    """列出可用方案走官方的 graph query, schemes（本机实测 26 个内置）。"""
+    from server import stata_scheme
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_scheme()
+    assert mock_run.call_args[0][0] == "graph query, schemes"
+
+
+def test_scheme_get_reads_creturn_not_bare_set():
+    """查当前方案用 c(scheme)；裸 `set scheme` 不是查询命令。"""
+    from server import stata_scheme
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_scheme(action="get")
+    assert mock_run.call_args[0][0] == "display c(scheme)"
+
+
+def test_scheme_set_applies_named_scheme():
+    from server import stata_scheme
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_scheme(action="set", scheme="economist")
+    assert mock_run.call_args[0][0] == "set scheme economist"
+
+
+def test_scheme_set_supports_permanently():
+    from server import stata_scheme
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_scheme(action="set", scheme="stcolor", permanently=True)
+    assert mock_run.call_args[0][0] == "set scheme stcolor, permanently"
+
+
+def test_scheme_set_requires_a_name():
+    """action=set 却不给名字会拼出裸 `set scheme`，改变语义而非报错。"""
+    from server import stata_scheme
+
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_scheme(action="set")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_scheme_rejects_injected_name():
+    from server import stata_scheme
+
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_scheme(action="set", scheme="stcolor, permanently")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_scheme_rejects_unknown_action():
+    from server import stata_scheme
+
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_scheme(action="delete", scheme="stcolor")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+# --- fontface 校验 -----------------------------------------------------------
+
+
+def test_graph_accepts_fontface_with_spaces():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", export=abs_path("out", "f.pdf"),
+                    width=0, fontface="Times New Roman")
+    assert 'fontface("Times New Roman")' in mock_run.call_args[0][0]
+
+
+def test_graph_rejects_fontface_closing_the_option():
+    """fontface 被双引号包裹后拼入；`"` 与 `)` 能提前闭合并追加选项。"""
+    for bad in ['Helvetica") shell evil //', "Helvetica) x", "He;llo", "He`v", "He$v"]:
+        with patch("server._run_stata_command") as mock_run:
+            result = stata_graph("scatter price weight",
+                                 export=abs_path("out", "f.pdf"), fontface=bad)
+        assert getattr(result, "is_error", False), f"应拒绝: {bad}"
+        mock_run.assert_not_called()
+
+
+def test_graph_drops_quality_for_non_jpg_and_says_so():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", export=abs_path("out", "f.png"), quality=60)
+    assert "quality(" not in mock_run.call_args[0][0], "png 传 quality 会 r(198)"
+
+
+def test_graph_applies_quality_for_jpg():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_graph("scatter price weight", export=abs_path("out", "f.jpg"), quality=60)
+    assert "quality(60)" in mock_run.call_args[0][0]
+
+
+def test_graph_rejects_negative_quality_and_mag():
+    for kwargs in ({"quality": -1}, {"mag": -5}):
+        with patch("server._run_stata_command") as mock_run:
+            result = stata_graph("histogram price", **kwargs)
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+# ============================================================================
+# 数据导出 —— 对齐 export excel / export delimited 的官方选项
+# ============================================================================
+
+
+def test_export_excel_sheet_mode_resolves_worksheet_conflict():
+    """官方对 worksheet 已存在的解法就是 sheet(..., modify|replace)。
+
+    实测拒绝覆盖时 Stata 提示 "specify option sheet(..., modify) or
+    option sheet(..., replace)" —— 旧实现没暴露这个选项，用户无路可走。
+
+    注意不能叠加文件级 replace，二者互斥（见
+    test_export_excel_rejects_sheet_mode_combined_with_file_replace）。
+    """
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_excel(abs_path("out", "d.xlsx"), sheet="Data",
+                           sheet_mode="replace")
+    assert 'sheet("Data", replace)' in mock_run.call_args[0][0]
+
+
+def test_export_excel_rejects_unknown_sheet_mode():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_export_excel(abs_path("out", "d.xlsx"), sheet_mode="clobber")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_export_excel_applies_if_and_in_before_comma():
+    """[if] [in] 属于命令的另一个语法位置，必须在逗号之前。"""
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_excel(abs_path("out", "d.xlsx"), condition="foreign == 1",
+                           in_range="1/20", replace=True)
+    cmd = mock_run.call_args[0][0]
+    assert "if foreign == 1 in 1/20," in cmd
+    assert cmd.index("if foreign") < cmd.index(",")
+
+
+def test_export_excel_firstrow_varlabels():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_excel(abs_path("out", "d.xlsx"), firstrow="varlabels", replace=True)
+    assert "firstrow(varlabels)" in mock_run.call_args[0][0]
+
+
+def test_export_excel_firstrow_none_omits_option():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_excel(abs_path("out", "d.xlsx"), firstrow="none", replace=True)
+    assert "firstrow(" not in mock_run.call_args[0][0]
+
+
+def test_export_excel_rejects_unknown_firstrow():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_export_excel(abs_path("out", "d.xlsx"), firstrow="header")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_export_excel_supports_cell_and_nolabel():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_excel(abs_path("out", "d.xlsx"), cell="B3", nolabel=True,
+                           replace=True)
+    cmd = mock_run.call_args[0][0]
+    assert "cell(B3)" in cmd
+    assert "nolabel" in cmd
+
+
+def test_export_excel_options_escape_hatch_covers_long_tail():
+    """keepcellfmt / datestring() / locale() 等长尾选项走 options 自由文本。"""
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_excel(abs_path("out", "d.xlsx"), replace=True,
+                           options='keepcellfmt missing("NA")')
+    cmd = mock_run.call_args[0][0]
+    assert 'keepcellfmt missing("NA")' in cmd
+
+
+def test_export_excel_rejects_injected_options():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_export_excel(abs_path("out", "d.xlsx"), options="replace; shell evil")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+# --- export delimited --------------------------------------------------------
+
+
+def test_export_delimited_defaults_to_comma_separated():
+    from server import stata_export_delimited
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_delimited(abs_path("out", "d.csv"), replace=True)
+    cmd = mock_run.call_args[0][0]
+    assert cmd.startswith(f'export delimited using "{abs_path("out", "d.csv")}"')
+    assert "replace" in cmd
+    assert "delimiter(" not in cmd, "默认逗号，不必显式指定"
+
+
+def test_export_delimited_tab_uses_keyword_not_literal():
+    """官方语法是 delimiter(tab) —— tab 是关键字，不能写成引号里的字面量。"""
+    from server import stata_export_delimited
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_delimited(abs_path("out", "d.txt"), delimiter="tab", replace=True)
+    assert "delimiter(tab)" in mock_run.call_args[0][0]
+
+
+def test_export_delimited_custom_char_is_quoted():
+    from server import stata_export_delimited
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_delimited(abs_path("out", "d.txt"), delimiter=";", replace=True)
+    assert 'delimiter(";")' in mock_run.call_args[0][0]
+
+
+def test_export_delimited_rejects_multichar_delimiter():
+    from server import stata_export_delimited
+
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_export_delimited(abs_path("out", "d.txt"), delimiter="||")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_export_delimited_supports_official_flags():
+    from server import stata_export_delimited
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_delimited(abs_path("out", "d.csv"), novarnames=True, nolabel=True,
+                               datafmt=True, quote=True, replace=True)
+    cmd = mock_run.call_args[0][0]
+    for flag in ("novarnames", "nolabel", "datafmt", "quote", "replace"):
+        assert flag in cmd, flag
+
+
+def test_export_delimited_applies_varlist_and_filters():
+    from server import stata_export_delimited
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_delimited(abs_path("out", "d.csv"), varlist="make price",
+                               condition="foreign == 1", in_range="1/10", replace=True)
+    cmd = mock_run.call_args[0][0]
+    assert cmd.startswith("export delimited make price using")
+    assert "if foreign == 1 in 1/10," in cmd
+
+
+def test_export_delimited_reports_failure_when_not_written(tmp_path):
+    """与其他导出一致：以文件是否被本次调用写入为准，不看返回码。"""
+    from server import stata_export_delimited
+
+    target = tmp_path / "d.csv"
+    target.write_bytes(b"stale")
+    with patch("server._run_stata_command", return_value="file already exists\nr(602);"):
+        result = stata_export_delimited(str(target))
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "replace=True" in text
+
+
+def test_export_excel_rejects_sheet_mode_combined_with_file_replace():
+    """实测 Stata：option sheet(...,replace) may not be combined with option replace。
+
+    二者语义冲突：文件级 replace 重建整个文件（不可能有工作表冲突），
+    sheet_mode 则是针对已存在文件里的某张工作表。
+    """
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_export_excel(abs_path("out", "d.xlsx"),
+                                    sheet_mode="replace", replace=True)
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "不能同时" in text
+    mock_run.assert_not_called()
+
+
+def test_export_excel_allows_sheet_mode_without_file_replace():
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_export_excel(abs_path("out", "d.xlsx"), sheet="Data", sheet_mode="modify")
+    cmd = mock_run.call_args[0][0]
+    assert 'sheet("Data", modify)' in cmd
+    assert not cmd.rstrip().endswith("replace")
+
+
+def test_export_excel_explains_empty_selection():
+    """筛选后 0 条观测时 Stata 报的是 Excel 行数上限，与真实原因无关。
+
+    实测 `if foreign == 1 in 1/10`（auto 前 10 条全为国产车）→
+    "observations must be between 1 and 1048576"，用户完全看不出是筛选没命中。
+    """
+    stata_err = _make_error_result(
+        "[返回码: 198] 命令语法错误 — export excel ...\n"
+        "observations must be between 1 and 1048576\nr(198);"
+    )
+    with patch("server._run_stata_command", return_value=stata_err):
+        result = stata_export_excel(abs_path("out", "d.xlsx"),
+                                    condition="foreign == 1", in_range="1/10")
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "未匹配到任何观测" in text
+    assert "前 n 条观测里" in text, "if+in 叠加的语义陷阱要点明"
+
+
+def test_export_excel_empty_selection_hint_only_when_filtered():
+    """没传筛选条件时不该冒出「筛选未命中」的猜测。"""
+    stata_err = _make_error_result("observations must be between 1 and 1048576\nr(198);")
+    with patch("server._run_stata_command", return_value=stata_err):
+        result = stata_export_excel(abs_path("out", "d.xlsx"))
+    assert "未匹配到任何观测" not in _result_text(result)
+
+
+def test_export_delimited_explains_empty_selection():
+    from server import stata_export_delimited
+
+    stata_err = _make_error_result("observations must be between 1 and 1048576\nr(198);")
+    with patch("server._run_stata_command", return_value=stata_err):
+        result = stata_export_delimited(abs_path("out", "d.csv"), condition="price > 1e9")
+    assert "未匹配到任何观测" in _result_text(result)
+
+
+# ============================================================================
+# 语法位置对齐 —— 官方支持 [in] / [if] / 选项的工具都要能表达
+# ============================================================================
+# 实测确认下列命令均接受 [in]（`test` 例外：它作用于已估计模型，本就不接受）。
+
+
+def test_estimation_tools_support_in_range():
+    """估计命令官方语法是 `cmd depvar indepvars [if] [in] [weight] [, options]`。"""
+    cases = [
+        (stata_regress, ("price", "weight"), "regress"),
+        (stata_logistic, ("foreign", "weight"), "logistic"),
+        (stata_probit, ("foreign", "weight"), "probit"),
+        (stata_poisson, ("rep78", "weight"), "poisson"),
+        (stata_xtreg, ("price", "weight"), "xtreg"),
+    ]
+    for fn, args, name in cases:
+        with patch("server._run_stata_command") as mock_run:
+            fn(*args, in_range="1/40")
+        cmd = mock_run.call_args[0][0]
+        assert " in 1/40" in cmd, f"{name} 应支持 in_range: {cmd}"
+
+
+def test_in_range_follows_if_and_precedes_comma():
+    with patch("server._run_stata_command") as mock_run:
+        stata_regress("price", "weight", condition="foreign == 1",
+                      in_range="1/40", options="robust")
+    cmd = mock_run.call_args[0][0]
+    assert cmd == "regress price weight if foreign == 1 in 1/40, robust"
+
+
+def test_exploration_tools_support_in_range():
+    cases = [
+        (stata_summarize, ("price",), "summarize"),
+        (stata_codebook, ("price",), "codebook"),
+        (stata_tabulate, ("rep78",), "tabulate"),
+        (stata_correlate, ("price mpg",), "correlate"),
+    ]
+    for fn, args, name in cases:
+        with patch("server._run_stata_command") as mock_run:
+            fn(*args, in_range="1/40")
+        cmd = mock_run.call_args[0][0]
+        assert " in 1/40" in cmd, f"{name} 应支持 in_range: {cmd}"
+
+
+def test_data_creation_tools_support_in_range():
+    """generate/egen/predict 官方都接受 [in]，用于只对部分观测赋值。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_generate("flag", "1", in_range="1/40")
+    assert " in 1/40" in mock_run.call_args[0][0]
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_egen("grp_mean", "mean(price)", in_range="1/40")
+    assert " in 1/40" in mock_run.call_args[0][0]
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_predict("yhat", in_range="1/40")
+    assert " in 1/40" in mock_run.call_args[0][0]
+
+
+def test_margins_supports_if_and_in():
+    """margins 官方语法含 [if] [in]，旧实现连 condition 都没有。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_margins("foreign", condition="price > 5000", in_range="1/40")
+    cmd = mock_run.call_args[0][0]
+    assert "if price > 5000" in cmd
+    assert "in 1/40" in cmd
+
+
+def test_ttest_and_ivregress_support_in_range():
+    with patch("server._run_stata_command") as mock_run:
+        stata_ttest("price", compare_to="5000", in_range="1/40")
+    assert " in 1/40" in mock_run.call_args[0][0]
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_ivregress("price", "weight", "length", in_range="1/40")
+    assert " in 1/40" in mock_run.call_args[0][0]
+
+
+def test_use_dataset_supports_conditional_load():
+    """`use file if exp in range, clear` 是官方语法，可只载入子集。"""
+    with patch("server._run_stata_command") as mock_run, \
+         patch("server.os.path.isfile", return_value=True):
+        stata_use_dataset(abs_path("data", "auto.dta"), condition="foreign == 1",
+                          in_range="1/40")
+    cmd = mock_run.call_args[0][0]
+    assert "if foreign == 1 in 1/40" in cmd
+    assert cmd.index("if foreign") < cmd.index(", clear")
+
+
+def test_exploration_tools_have_options_escape_hatch():
+    """长尾官方选项（noobs/clean/separator()/missing/row/column…）需有出口。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_list("price", options="noobs clean")
+    assert "noobs clean" in mock_run.call_args[0][0]
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_tabulate("rep78", options="missing nolabel")
+    assert "missing nolabel" in mock_run.call_args[0][0]
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_summarize("price", options="separator(0)")
+    assert "separator(0)" in mock_run.call_args[0][0]
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_codebook("price", options="tabulate(5)")
+    assert "tabulate(5)" in mock_run.call_args[0][0]
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_describe("price", options="fullnames")
+    assert "fullnames" in mock_run.call_args[0][0]
+
+
+def test_options_escape_hatch_rejects_injection():
+    for fn, args in ((stata_list, ("price",)), (stata_tabulate, ("rep78",)),
+                     (stata_summarize, ("price",)), (stata_describe, ("price",))):
+        with patch("server._run_stata_command") as mock_run:
+            result = fn(*args, options="clean; shell evil")
+        assert getattr(result, "is_error", False), fn.__name__
+        mock_run.assert_not_called()
+
+
+def test_in_range_is_validated_against_injection():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_regress("price", "weight", in_range="1/40; shell evil")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_list_emits_in_clause_exactly_once():
+    """stata_list 自带 in/n 逻辑，不能与通用的 _filter_clause 叠加出两个 in。
+
+    旧断言只查 "in 1/20" 是否出现，`list … in 1/20 in 1/20` 照样通过 ——
+    这里改为计数。
+    """
+    with patch("server._run_stata_command") as mock_run:
+        stata_list("price", n=10, in_range="1/20", condition="foreign==1")
+    cmd = mock_run.call_args[0][0]
+    assert cmd == "list price if foreign==1 in 1/20", cmd
+    assert cmd.count(" in ") == 1
+
+
+def test_list_falls_back_to_n_when_no_in_range():
+    with patch("server._run_stata_command") as mock_run:
+        stata_list("price", n=5)
+    assert mock_run.call_args[0][0] == "list price in 1/5"
+
+
+def test_generate_and_egen_support_storage_type():
+    """官方语法是 `generate [type] newvar = exp`；float 默认会损失精度。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_generate("logp", "ln(price)", vartype="double")
+    assert mock_run.call_args[0][0].startswith("generate double logp =")
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_egen("m", "mean(price)", vartype="double")
+    assert "egen double m = mean(price)" in mock_run.call_args[0][0]
+
+
+def test_generate_rejects_unknown_storage_type():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_generate("x", "1", vartype="decimal")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_generate_and_egen_have_options_escape_hatch():
+    with patch("server._run_stata_command") as mock_run:
+        stata_generate("x", "1", options="before(price)")
+    assert mock_run.call_args[0][0].endswith(", before(price)")
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_egen("r", "rank(price)", options="field")
+    assert mock_run.call_args[0][0].endswith(", field")
+
+
+def test_test_tool_has_options_escape_hatch():
+    """test 的官方选项：mtest / accumulate / notest / common / df()。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_test("weight mpg", options="mtest")
+    assert mock_run.call_args[0][0] == "test weight mpg, mtest"
+
+
+def test_use_and_save_have_options_escape_hatch():
+    with patch("server._run_stata_command") as mock_run, \
+         patch("server.os.path.isfile", return_value=True):
+        stata_use_dataset(abs_path("d", "a.dta"), options="nolabel")
+    assert "nolabel" in mock_run.call_args[0][0]
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_save_dataset(abs_path("d", "a.dta"), replace=True, options="orphans")
+    cmd = mock_run.call_args[0][0]
+    assert "replace" in cmd and "orphans" in cmd
+
+
+def test_new_options_are_validated_against_injection():
+    with patch("server._run_stata_command") as mock_run:
+        assert getattr(stata_test("weight", options="mtest; shell x"), "is_error", False)
+        assert getattr(stata_generate("x", "1", options="a; shell x"), "is_error", False)
+        assert getattr(stata_egen("y", "mean(p)", options="a; shell x"), "is_error", False)
+        mock_run.assert_not_called()
+
+
+# --- ttest 的四种官方形式 -----------------------------------------------------
+# 实测：裸 `ttest price` 报 by() option required → r(100)。旧实现在不传 byvar
+# 时正是生成这种非法命令，而单元测试只比对字符串，完全没发现。
+
+
+def test_ttest_one_sample_against_value():
+    """单样本：`ttest varname == # [if] [in]`。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_ttest("price", compare_to="5000")
+    assert mock_run.call_args[0][0] == "ttest price == 5000"
+
+
+def test_ttest_paired_against_variable():
+    """配对：`ttest varname1 == varname2`。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_ttest("price", compare_to="mpg")
+    assert mock_run.call_args[0][0] == "ttest price == mpg"
+
+
+def test_ttest_unpaired_two_sample():
+    with patch("server._run_stata_command") as mock_run:
+        stata_ttest("price", compare_to="mpg", options="unpaired")
+    assert mock_run.call_args[0][0] == "ttest price == mpg, unpaired"
+
+
+def test_ttest_by_group_still_works():
+    with patch("server._run_stata_command") as mock_run:
+        stata_ttest("price", byvar="foreign", in_range="1/40")
+    assert mock_run.call_args[0][0] == "ttest price in 1/40, by(foreign)"
+
+
+def test_ttest_requires_byvar_or_compare_to():
+    """两者都不给会拼出 `ttest price` —— Stata 报 by() option required。
+
+    与其把非法命令发出去，不如在入口说明该给什么。
+    """
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_ttest("price")
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "compare_to" in text and "byvar" in text
+    mock_run.assert_not_called()
+
+
+def test_ttest_rejects_byvar_with_compare_to():
+    """两种形式互斥，同时给出会拼出无效语法。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_ttest("price", byvar="foreign", compare_to="5000")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_ttest_rejects_injected_compare_to():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_ttest("price", compare_to="5000; shell evil")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+# ============================================================================
+# 会话状态感知 —— stata_status 的覆盖面
+# ============================================================================
+
+
+def _status_cmd():
+    from server import stata_status
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_status()
+    return mock_run.call_args[0][0]
+
+
+def test_status_reports_panel_and_timeseries_setting():
+    """stata_xtreg 要求先 xtset，Agent 必须能查到设定状态。
+
+    裸 `xtset` 在未设定时报 r(459)，故必须 capture —— 但要 noisily 保留
+    "panel variable not set" 这句诊断，它本身就是有用的状态信息。
+
+    只发 xtset：实测它对纯时序数据也照报 "Time variable: …"，与 tsset 的输出
+    逐字相同，两条都发只会把同一段打两遍。
+    """
+    cmd = _status_cmd()
+    assert "capture noisily xtset" in cmd
+    assert "tsset" not in cmd, "与 xtset 输出重复，不该同时发"
+
+
+def test_status_reports_frames():
+    """Stata 16+ 可同时持有多个数据集；只报「当前数据集」会漏掉其余。"""
+    cmd = _status_cmd()
+    assert "frame dir" in cmd
+    assert "c(frame)" in cmd
+
+
+def test_status_reports_stored_estimates():
+    """margins / test / predict 都依赖已存在的估计结果。"""
+    cmd = _status_cmd()
+    assert "estimates dir" in cmd
+    assert "e(cmd)" in cmd
+
+
+def test_status_still_reports_dataset_and_cwd():
+    cmd = _status_cmd()
+    assert "describe, short" in cmd
+    assert "c(pwd)" in cmd
+
+
+def test_status_never_uses_bare_cd():
+    """裸 cd 会切到 home 目录 —— 标注只读的工具不能悄悄改工作目录。"""
+    cmd = _status_cmd()
+    for line in cmd.splitlines():
+        assert line.strip() != "cd", f"出现裸 cd: {cmd}"
+
+
+# ============================================================================
+# stata_import —— 与 export 对称的导入命令族
+# ============================================================================
+
+
+def _import(**kw):
+    from server import stata_import
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run, \
+         patch("server.os.path.isfile", return_value=True):
+        result = stata_import(**kw)
+    return result, (mock_run.call_args[0][0] if mock_run.call_args else None)
+
+
+def test_import_detects_format_from_extension():
+    """扩展名 → 官方命令的映射（[D] import 的方法表）。"""
+    cases = [
+        ("data.xlsx", "import excel"), ("data.xls", "import excel"),
+        ("data.csv", "import delimited"), ("data.tsv", "import delimited"),
+        ("data.txt", "import delimited"),
+        ("data.sas7bdat", "import sas"), ("data.sav", "import spss"),
+        ("data.zsav", "import spss"), ("data.dbf", "import dbase"),
+        ("data.parquet", "import parquet"),
+    ]
+    for fname, expected in cases:
+        _r, cmd = _import(filepath=abs_path("d", fname))
+        assert cmd.startswith(expected), f"{fname} 应走 {expected}，实际 {cmd}"
+
+
+def test_import_dta_points_to_use_dataset():
+    """.dta 不属于 import 命令族 —— 该用 use，明确指路而不是拼个错命令。"""
+    result, cmd = _import(filepath=abs_path("d", "a.dta"))
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "stata_use_dataset" in text
+    assert cmd is None
+
+
+def test_import_rejects_unknown_extension():
+    result, cmd = _import(filepath=abs_path("d", "a.zzz"))
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_import_explicit_format_overrides_extension():
+    _r, cmd = _import(filepath=abs_path("d", "weird.dat"), format="delimited")
+    assert cmd.startswith("import delimited")
+
+
+def test_import_excel_options():
+    _r, cmd = _import(filepath=abs_path("d", "a.xlsx"), sheet="Q1",
+                      cellrange="A1:C10", firstrow=True, case="lower")
+    assert 'sheet("Q1")' in cmd
+    assert "cellrange(A1:C10)" in cmd
+    assert "firstrow" in cmd
+    assert "case(lower)" in cmd
+
+
+def test_import_delimited_options():
+    _r, cmd = _import(filepath=abs_path("d", "a.csv"), delimiter=";",
+                      varnames="1", encoding="utf-8")
+    assert 'delimiters(";")' in cmd
+    assert "varnames(1)" in cmd
+    assert 'encoding("utf-8")' in cmd
+
+
+def test_import_delimited_tab_keyword():
+    _r, cmd = _import(filepath=abs_path("d", "a.tsv"), delimiter="tab")
+    assert "delimiters(tab)" in cmd
+
+
+def test_import_drops_options_not_applicable_to_format():
+    """firstrow 只属于 excel，delimiters 只属于 delimited —— 传错会 r(198)。"""
+    result, cmd = _import(filepath=abs_path("d", "a.csv"), firstrow=True)
+    assert "firstrow" not in cmd
+    assert "firstrow" in _result_text(result) and "不支持" in _result_text(result)
+
+    result2, cmd2 = _import(filepath=abs_path("d", "a.xlsx"), delimiter=";")
+    assert "delimiters" not in cmd2
+    assert "delimiter" in _result_text(result2)
+
+
+def test_import_clear_defaults_true_and_can_be_disabled():
+    _r, cmd = _import(filepath=abs_path("d", "a.csv"))
+    assert "clear" in cmd
+    _r2, cmd2 = _import(filepath=abs_path("d", "a.csv"), clear=False)
+    assert "clear" not in cmd2
+
+
+def test_import_sas_and_spss_support_namelist_and_filters():
+    """官方语法：`import sas [namelist] [if] [in] using filename`。
+
+    注意 [if] [in] 在 **using 之前** —— 与 export 命令族相反。
+    """
+    for fname, head in (("a.sas7bdat", "import sas"), ("a.sav", "import spss")):
+        _r, cmd = _import(filepath=abs_path("d", fname), varlist="id wage",
+                          condition="wage > 0", in_range="1/100")
+        assert cmd.startswith(f"{head} id wage if wage > 0 in 1/100 using"), cmd
+
+
+def test_import_varlist_is_not_applied_to_excel_or_delimited():
+    """同一语法位置在 excel/delimited 是 extvarlist（给列**命名**），不是筛选。
+
+    当筛选用会静默导入错的数据，故丢弃并说明语义差异。
+    """
+    for fname in ("a.xlsx", "a.csv"):
+        result, cmd = _import(filepath=abs_path("d", fname), varlist="id wage")
+        assert "id wage" not in cmd, cmd
+        assert "extvarlist" in _result_text(result)
+
+
+def test_import_validates_path_and_options():
+    result, cmd = _import(filepath=abs_path("d", "a.csv; shell evil"))
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+    result2, cmd2 = _import(filepath=abs_path("d", "a.csv"), options="clear; shell evil")
+    assert getattr(result2, "is_error", False)
+    assert cmd2 is None
+
+
+def test_import_rejects_bad_case_and_missing_file():
+    result, _cmd = _import(filepath=abs_path("d", "a.csv"), case="Title")
+    assert getattr(result, "is_error", False)
+
+    # 文件存在性交给 require_file 在锁内用 Stata cwd 权威解析，
+    # 与 stata_use_dataset / stata_run_do_file 同一机制。
+    from server import stata_import
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run, \
+         patch("server.os.path.isfile", return_value=True):
+        stata_import(filepath=abs_path("d", "a.csv"))
+    assert mock_run.call_args.kwargs.get("require_file") == abs_path("d", "a.csv")
+
+
+# ============================================================================
+# stata_xtset —— stata_xtreg 的前提条件
+# ============================================================================
+
+
+def _xtset(**kw):
+    from server import stata_xtset
+
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        result = stata_xtset(**kw)
+    return result, (mock_run.call_args[0][0] if mock_run.call_args else None)
+
+
+def test_xtset_declares_panel():
+    _r, cmd = _xtset(panelvar="idcode", timevar="year")
+    assert cmd == "xtset idcode year"
+
+
+def test_xtset_panel_without_time_is_valid():
+    """只声明面板维度（不含时间）也是官方允许的形式。"""
+    _r, cmd = _xtset(panelvar="idcode")
+    assert cmd == "xtset idcode"
+
+
+def test_tsset_when_only_timevar_given():
+    """纯时序数据用 tsset —— 没有面板维度时 xtset 语义不对。"""
+    _r, cmd = _xtset(timevar="date")
+    assert cmd == "tsset date"
+
+
+def test_xtset_show_queries_current_setting():
+    """裸 xtset 是查询；未设定时报 r(459)，故须 capture noisily 保留诊断。"""
+    _r, cmd = _xtset(action="show")
+    assert cmd == "capture noisily xtset"
+
+
+def test_xtset_clear_removes_declaration():
+    _r, cmd = _xtset(action="clear")
+    assert cmd == "xtset, clear"
+
+
+def test_xtset_supports_delta_and_format():
+    _r, cmd = _xtset(panelvar="id", timevar="t", options="delta(1) format(%ty)")
+    assert cmd == "xtset id t, delta(1) format(%ty)"
+
+
+def test_xtset_requires_at_least_one_variable():
+    result, cmd = _xtset()
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "panelvar" in text and "timevar" in text
+    assert cmd is None
+
+
+def test_xtset_rejects_bad_identifiers_and_action():
+    for kw in ({"panelvar": "id; shell x"}, {"timevar": "t | evil"},
+               {"panelvar": "id", "options": "delta(1); shell x"}):
+        result, cmd = _xtset(**kw)
+        assert getattr(result, "is_error", False), kw
+        assert cmd is None
+    result, cmd = _xtset(action="destroy")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+# ============================================================================
+# P1 —— estat 诊断族 / estimates 结果管理 / 示例数据集
+# ============================================================================
+
+
+def _call(tool_name, **kw):
+    import server
+
+    fn = getattr(server, tool_name)
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        result = fn(**kw)
+    return result, (mock_run.call_args[0][0] if mock_run.call_args else None)
+
+
+def test_estat_builds_subcommand():
+    for sub in ("vif", "hettest", "ovtest", "ic", "summarize", "firststage"):
+        _r, cmd = _call("stata_estat", subcommand=sub)
+        assert cmd == f"estat {sub}"
+
+
+def test_estat_passes_options():
+    _r, cmd = _call("stata_estat", subcommand="hettest", options="rhs iid")
+    assert cmd == "estat hettest, rhs iid"
+
+
+def test_estat_rejects_empty_and_injected_subcommand():
+    for sub in ("", "vif; shell evil", "vif | x"):
+        result, cmd = _call("stata_estat", subcommand=sub)
+        assert getattr(result, "is_error", False), sub
+        assert cmd is None
+
+
+def test_estimates_store_and_restore():
+    _r, cmd = _call("stata_estimates", action="store", name="m1")
+    assert cmd == "estimates store m1"
+    _r, cmd = _call("stata_estimates", action="restore", name="m1")
+    assert cmd == "estimates restore m1"
+
+
+def test_estimates_table_accepts_multiple_names():
+    _r, cmd = _call("stata_estimates", action="table", name="m1 m2 m3",
+                    options="star stats(N r2)")
+    assert cmd == "estimates table m1 m2 m3, star stats(N r2)"
+
+
+def test_estimates_dir_and_clear_take_no_name():
+    _r, cmd = _call("stata_estimates", action="dir")
+    assert cmd == "estimates dir"
+    _r, cmd = _call("stata_estimates", action="clear")
+    assert cmd == "estimates clear"
+
+
+def test_estimates_store_requires_name():
+    result, cmd = _call("stata_estimates", action="store")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_estimates_rejects_unknown_action():
+    result, cmd = _call("stata_estimates", action="publish", name="m1")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_use_example_sysuse_and_webuse():
+    _r, cmd = _call("stata_use_example", name="auto")
+    assert cmd == "sysuse auto, clear"
+    _r, cmd = _call("stata_use_example", name="nlswork", source="webuse")
+    assert cmd == "webuse nlswork, clear"
+
+
+def test_use_example_can_keep_existing_data():
+    _r, cmd = _call("stata_use_example", name="auto", clear=False)
+    assert cmd == "sysuse auto"
+
+
+def test_use_example_lists_available_datasets():
+    """sysuse dir 列出随 Stata 分发的数据集；webuse 没有 dir 子命令。"""
+    _r, cmd = _call("stata_use_example", action="list")
+    assert cmd == "sysuse dir"
+
+
+def test_use_example_rejects_bad_source_and_name():
+    result, cmd = _call("stata_use_example", name="auto", source="ftp")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+    result, cmd = _call("stata_use_example", name="auto; shell evil")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+# ============================================================================
+# P2 —— 数据重构四大件 / 返回值列表
+# ============================================================================
+
+
+def test_merge_builds_official_syntax():
+    """官方：`merge 1:1|m:1|1:m|m:m varlist using filename [, options]`。"""
+    _r, cmd = _call("stata_merge", kind="1:1", keyvars="id year",
+                    using=abs_path("d", "b.dta"))
+    assert cmd == f'merge 1:1 id year using "{abs_path("d", "b.dta")}"'
+
+
+def test_merge_supports_all_official_kinds():
+    for kind in ("1:1", "m:1", "1:m", "m:m"):
+        _r, cmd = _call("stata_merge", kind=kind, keyvars="id",
+                        using=abs_path("d", "b.dta"))
+        assert cmd.startswith(f"merge {kind} id using")
+
+
+def test_merge_by_observation_uses_underscore_n():
+    """官方还支持按观测号合并：`merge 1:1 _n using filename`。"""
+    _r, cmd = _call("stata_merge", kind="1:1", keyvars="_n",
+                    using=abs_path("d", "b.dta"))
+    assert "merge 1:1 _n using" in cmd
+
+
+def test_merge_options_and_keep_filter():
+    _r, cmd = _call("stata_merge", kind="m:1", keyvars="id",
+                    using=abs_path("d", "b.dta"),
+                    keepusing="wage educ", options="keep(match master) nogenerate")
+    assert "keepusing(wage educ)" in cmd
+    assert "keep(match master) nogenerate" in cmd
+
+
+def test_merge_rejects_unknown_kind():
+    result, cmd = _call("stata_merge", kind="1:n", keyvars="id",
+                        using=abs_path("d", "b.dta"))
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_merge_requires_keyvars_and_using():
+    for kw in ({"kind": "1:1", "keyvars": "", "using": abs_path("d", "b.dta")},
+               {"kind": "1:1", "keyvars": "id", "using": ""}):
+        result, cmd = _call("stata_merge", **kw)
+        assert getattr(result, "is_error", False), kw
+        assert cmd is None
+
+
+def test_append_accepts_multiple_files():
+    a, b = abs_path("d", "a.dta"), abs_path("d", "b.dta")
+    _r, cmd = _call("stata_append", using=f"{a} {b}", options="generate(src)")
+    assert f'append using "{a}" "{b}"' in cmd
+    assert "generate(src)" in cmd
+
+
+def test_append_requires_using():
+    result, cmd = _call("stata_append", using="")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_reshape_long_and_wide():
+    _r, cmd = _call("stata_reshape", direction="long", stub="inc",
+                    i="id", j="year")
+    assert cmd == "reshape long inc, i(id) j(year)"
+    _r, cmd = _call("stata_reshape", direction="wide", stub="inc",
+                    i="id", j="year")
+    assert cmd == "reshape wide inc, i(id) j(year)"
+
+
+def test_reshape_j_optional_for_wide_when_string():
+    _r, cmd = _call("stata_reshape", direction="long", stub="inc", i="id",
+                    j="year", options="string")
+    assert cmd == "reshape long inc, i(id) j(year) string"
+
+
+def test_reshape_requires_direction_stub_and_i():
+    for kw in ({"direction": "sideways", "stub": "inc", "i": "id"},
+               {"direction": "long", "stub": "", "i": "id"},
+               {"direction": "long", "stub": "inc", "i": ""}):
+        result, cmd = _call("stata_reshape", **kw)
+        assert getattr(result, "is_error", False), kw
+        assert cmd is None
+
+
+def test_collapse_builds_stat_list():
+    _r, cmd = _call("stata_collapse", clist="(mean) price (sd) mpg", by="foreign")
+    assert cmd == "collapse (mean) price (sd) mpg, by(foreign)"
+
+
+def test_collapse_supports_filters_and_options():
+    _r, cmd = _call("stata_collapse", clist="(sum) sales", by="firm year",
+                    condition="year >= 2000", in_range="1/500", options="cw")
+    assert cmd == ("collapse (sum) sales if year >= 2000 in 1/500, "
+                   "by(firm year) cw")
+
+
+def test_collapse_requires_clist():
+    result, cmd = _call("stata_collapse", clist="")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_return_list_covers_three_namespaces():
+    for kind, expected in (("r", "return list"), ("e", "ereturn list"),
+                           ("c", "creturn list")):
+        _r, cmd = _call("stata_return_list", kind=kind)
+        assert cmd == expected
+
+
+def test_return_list_defaults_to_r_and_rejects_unknown():
+    _r, cmd = _call("stata_return_list")
+    assert cmd == "return list"
+    result, cmd = _call("stata_return_list", kind="x")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+# ============================================================================
+# P3 —— frames 管理 / 数据校验族
+# ============================================================================
+
+
+def test_frame_dir_and_current():
+    _r, cmd = _call("stata_frame", action="dir")
+    assert cmd == "frames dir"
+    _r, cmd = _call("stata_frame", action="current")
+    assert cmd == "frame pwf"
+
+
+def test_frame_create_change_drop():
+    _r, cmd = _call("stata_frame", action="create", name="alt")
+    assert cmd == "frame create alt"
+    _r, cmd = _call("stata_frame", action="change", name="alt")
+    assert cmd == "frame change alt"
+    _r, cmd = _call("stata_frame", action="drop", name="alt")
+    assert cmd == "frame drop alt"
+
+
+def test_frame_copy_and_rename_need_two_names():
+    _r, cmd = _call("stata_frame", action="copy", name="a", newname="b")
+    assert cmd == "frame copy a b"
+    _r, cmd = _call("stata_frame", action="rename", name="a", newname="b")
+    assert cmd == "frame rename a b"
+
+
+def test_frame_actions_requiring_name_are_checked():
+    for action in ("create", "change", "drop"):
+        result, cmd = _call("stata_frame", action=action)
+        assert getattr(result, "is_error", False), action
+        assert cmd is None
+    for action in ("copy", "rename"):
+        result, cmd = _call("stata_frame", action=action, name="a")
+        assert getattr(result, "is_error", False), action
+        assert cmd is None
+
+
+def test_frame_rejects_unknown_action_and_injected_name():
+    result, cmd = _call("stata_frame", action="merge", name="a")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+    result, cmd = _call("stata_frame", action="create", name="a; shell evil")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_verify_count_is_default():
+    _r, cmd = _call("stata_verify")
+    assert cmd == "count"
+
+
+def test_verify_count_with_filters():
+    _r, cmd = _call("stata_verify", check="count", condition="price > 10000",
+                    in_range="1/100")
+    assert cmd == "count if price > 10000 in 1/100"
+
+
+def test_verify_duplicates_defaults_to_report():
+    _r, cmd = _call("stata_verify", check="duplicates", varlist="id year")
+    assert cmd == "duplicates report id year"
+
+
+def test_verify_duplicates_subcommand_can_be_chosen():
+    _r, cmd = _call("stata_verify", check="duplicates", varlist="id",
+                    options="list")
+    assert cmd == "duplicates list id"
+
+
+def test_verify_isid_and_misstable():
+    _r, cmd = _call("stata_verify", check="isid", varlist="id year")
+    assert cmd == "isid id year"
+    _r, cmd = _call("stata_verify", check="missing", varlist="price mpg")
+    assert cmd == "misstable summarize price mpg"
+
+
+def test_verify_assert_needs_an_expression():
+    _r, cmd = _call("stata_verify", check="assert", expression="price > 0")
+    assert cmd == "assert price > 0"
+    result, cmd = _call("stata_verify", check="assert")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_verify_isid_needs_varlist():
+    result, cmd = _call("stata_verify", check="isid")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_verify_rejects_unknown_check_and_injection():
+    result, cmd = _call("stata_verify", check="checksum")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+    result, cmd = _call("stata_verify", check="assert", expression="1; shell evil")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+# ============================================================================
+# 包搜索 —— net search 的官方选项
+# ============================================================================
+
+
+def test_find_package_default_is_plain_net_search():
+    _r, cmd = _call("stata_find_package", keyword="binscatter")
+    assert cmd == "net search binscatter"
+
+
+def test_find_package_scope_narrows_results():
+    """实测广词查询默认 94K 字符 / 24 页，scope="toc" 收窄到 12K。"""
+    _r, cmd = _call("stata_find_package", keyword="did", scope="toc")
+    assert cmd == "net search did, toc"
+
+
+def test_find_package_supports_all_official_scopes():
+    for scope in ("toc", "pkg", "tocpkg", "everywhere", "filenames"):
+        _r, cmd = _call("stata_find_package", keyword="iv", scope=scope)
+        assert cmd == f"net search iv, {scope}"
+
+
+def test_find_package_match_any_and_exclude_sj():
+    _r, cmd = _call("stata_find_package", keyword="panel data",
+                    match_any=True, exclude_sj=True)
+    assert "or" in cmd.split(", ")[1].split()
+    assert "nosj" in cmd
+
+
+def test_find_package_error_on_no_match_is_opt_in():
+    """默认无匹配返回 isError=False（搜不到不是错误）；errnone 才转 rc=111。"""
+    _r, cmd = _call("stata_find_package", keyword="zzz", error_if_none=True)
+    assert "errnone" in cmd
+
+
+def test_find_package_rejects_unknown_scope():
+    result, cmd = _call("stata_find_package", keyword="iv", scope="deep")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
+
+
+def test_find_package_still_rejects_injection_and_empty():
+    for kw in ("", "iv; shell evil"):
+        result, cmd = _call("stata_find_package", keyword=kw)
+        assert getattr(result, "is_error", False), kw
+        assert cmd is None

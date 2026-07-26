@@ -530,6 +530,42 @@ def _validate_scheme_name(scheme: str) -> str | None:
     return None
 
 
+# generate/egen 的 [type] 位置：官方允许的存储类型（str# / strL 亦合法）。
+# 用白名单而非黑名单 —— 该值直接拼进命令的关键字位置，不容许任何自由文本。
+_STORAGE_TYPE_RE = re.compile(r"^(byte|int|long|float|double|str[0-9]{1,4}|strL)$")
+
+
+def _validate_storage_type(vartype: str) -> str | None:
+    """校验 generate/egen 的存储类型。返回错误文本或 None。"""
+    if not vartype.strip():
+        return None
+    if not _STORAGE_TYPE_RE.match(vartype.strip()):
+        return (
+            "错误: vartype 只能是 byte/int/long/float/double/str#/strL"
+            f"（收到 {vartype!r}）"
+        )
+    return None
+
+
+def _validate_fontface(fontface: str) -> str | None:
+    """校验 graph export 的 ``fontface()`` 字体名。
+
+    字体名常含空格（"Times New Roman"），故用双引号包裹后传给 Stata；因此必须
+    拒绝能提前闭合的字符：``"`` 结束字符串、``)`` 结束选项、``;`` 起新命令，
+    以及宏展开用的 `` ` `` 与 ``$``。
+
+    返回错误文本或 None。
+    """
+    if not fontface.strip():
+        return "错误: fontface 为空"
+    if len(fontface) > 128:
+        return "错误: fontface 过长（上限 128 字符）"
+    bad = [c for c in ('"', ")", "(", ";", "`", "$", "\n", "\r", "\x00") if c in fontface]
+    if bad:
+        return f"错误: fontface 含非法字符 {bad!r}"
+    return None
+
+
 def _check_abs_path_safety(abs_path: str) -> str | None:
     """对一个已规范化的绝对路径做权威安全校验。
 
@@ -1564,6 +1600,16 @@ def stata_run(command: str, page: int = 1, timeout: int = 60) -> str | ToolResul
     - 执行前自动检测 Stata DLL 存活（ping）
     - 若 DLL 无响应，返回明确错误信息而非崩溃
     - 若命令超时，自动中断返回而非挂起
+    - 拦截行首的危险前缀（``!``、``shell``、``winexec``、``python``、``mata``）
+
+    **路径沙箱不覆盖本工具**：``STATA_ALLOWED_ROOTS`` 只校验其他工具的**路径
+    参数**（如 ``stata_use_dataset(filepath=…)``）。本工具接受自由文本命令，
+    其中的路径不做沙箱校验 —— 实测配置白名单后 ``stata_use_dataset`` 会拒绝
+    越界路径，而 ``stata_run('use "越界路径"')`` 照常执行。
+    这是刻意的边界而非遗漏：路径可能出现在 ``use`` / ``save`` / ``import`` /
+    ``export`` / ``graph export`` / ``log using`` / ``merge … using`` /
+    ``include`` 等任意位置，还能由宏在运行时拼出，做部分校验只会给出虚假的
+    安全感。需要强制隔离时，请在操作系统层面限制本进程可访问的目录。
 
     使用示例：
     - 单条命令: "summarize mpg"
@@ -1733,25 +1779,56 @@ def stata_run_do_file(filepath: str, timeout: int = 300) -> str | ToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_use_dataset(filepath: str, clear: bool = True) -> str | ToolResult:
+def stata_use_dataset(
+    filepath: str,
+    clear: bool = True,
+    varlist: str = "",
+    condition: str = "",
+    in_range: str = "",
+    options: str = "",
+) -> str | ToolResult:
     """加载 Stata 数据集 (.dta 文件) 到内存中。
 
     加载后可使用 stata_describe、stata_summarize 等工具查看数据。
 
+    官方语法允许**只载入子集**（``use [varlist] using file [if] [in]``），
+    大数据集上先筛再载比全量载入后 drop 省内存。
+
     Args:
         filepath: .dta 文件的绝对路径。
         clear: 是否先清除内存中的已有数据（默认 True）。
+        varlist: 只载入这些变量（空格分隔），留空 = 全部。
+        condition: if 条件子句（可选）—— 只载入满足条件的观测。
+        in_range: 观测范围（可选），如 "1/1000"。
 
     Returns:
         数据集加载确认信息及变量列表。
     """
+    if err := _validate_varlist(varlist, "varlist"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
     normalized = _normalize_path(filepath)
-    suffix = ", clear" if clear else ""
-    return _run_stata_command(f'use "{normalized}"{suffix}', require_file=filepath)
+    # 指定 varlist 时官方语法要求写成 `use <varlist> using "file"`。
+    if varlist.strip():
+        cmd = f'use {varlist.strip()} using "{normalized}"'
+    else:
+        cmd = f'use "{normalized}"'
+    cmd += _filter_clause(condition, in_range)
+    opts = " ".join(p for p in ("clear" if clear else "", options.strip()) if p)
+    if opts:
+        cmd += f", {opts}"
+    return _run_stata_command(cmd, require_file=filepath)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_save_dataset(filepath: str, replace: bool = False) -> str | ToolResult:
+def stata_save_dataset(
+    filepath: str, replace: bool = False, options: str = ""
+) -> str | ToolResult:
     """将当前内存中的数据集保存为 .dta 文件。
 
     Args:
@@ -1763,8 +1840,11 @@ def stata_save_dataset(filepath: str, replace: bool = False) -> str | ToolResult
     """
     if err := _validate_path(filepath):
         return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
     normalized = _normalize_path(filepath)
-    suffix = ", replace" if replace else ""
+    opts = " ".join(p for p in ("replace" if replace else "", options.strip()) if p)
+    suffix = f", {opts}" if opts else ""
     return _run_stata_command(f'save "{normalized}"{suffix}')
 
 
@@ -1788,6 +1868,9 @@ def stata_generate(
     newvar: str,
     expression: str,
     condition: str = "",
+    in_range: str = "",
+    vartype: str = "",
+    options: str = "",
 ) -> str | ToolResult:
     """创建新变量（generate）。
 
@@ -1811,9 +1894,17 @@ def stata_generate(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
-    cmd = f"generate {newvar} = {expression.strip()}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
+    if err := _validate_storage_type(vartype):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    type_part = f"{vartype.strip()} " if vartype.strip() else ""
+    cmd = f"generate {type_part}{newvar} = {expression.strip()}"
+    cmd += _filter_clause(condition, in_range)
+    if options.strip():
+        cmd += f", {options.strip()}"
     return _run_stata_command(cmd)
 
 
@@ -1823,6 +1914,9 @@ def stata_egen(
     fcn: str,
     by: str = "",
     condition: str = "",
+    in_range: str = "",
+    vartype: str = "",
+    options: str = "",
 ) -> str | ToolResult:
     """用扩展生成函数创建新变量（egen）。
 
@@ -1849,10 +1943,18 @@ def stata_egen(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
+    if err := _validate_storage_type(vartype):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
     prefix = f"bysort {by.strip()}: " if by.strip() else ""
-    cmd = f"{prefix}egen {newvar} = {fcn.strip()}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    type_part = f"{vartype.strip()} " if vartype.strip() else ""
+    cmd = f"{prefix}egen {type_part}{newvar} = {fcn.strip()}"
+    cmd += _filter_clause(condition, in_range)
+    if options.strip():
+        cmd += f", {options.strip()}"
     return _run_stata_command(cmd)
 
 
@@ -1861,6 +1963,7 @@ def stata_predict(
     newvar: str,
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """在估计后生成预测值 / 残差等（predict，后估计命令）。
 
@@ -1882,9 +1985,10 @@ def stata_predict(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     cmd = f"predict {newvar}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    cmd += _filter_clause(condition, in_range)
     if options.strip():
         cmd += f", {options.strip()}"
     return _run_stata_command(cmd)
@@ -1896,7 +2000,9 @@ def stata_predict(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_describe(varlist: str = "", simple: bool = False) -> str | ToolResult:
+def stata_describe(
+    varlist: str = "", simple: bool = False, options: str = ""
+) -> str | ToolResult:
     """描述当前数据集的变量信息。
 
     显示变量名、存储类型、显示格式、变量标签和值标签。
@@ -1911,12 +2017,12 @@ def stata_describe(varlist: str = "", simple: bool = False) -> str | ToolResult:
     """
     if err := _validate_varlist(varlist, "varlist"):
         return _result_or_error(err)
-    if simple:
-        cmd = "describe, simple"
-    elif varlist.strip():
-        cmd = f"describe {varlist}"
-    else:
-        cmd = "describe"
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    cmd = f"describe {varlist}".strip()
+    opts = " ".join(p for p in ("simple" if simple else "", options.strip()) if p)
+    if opts:
+        cmd += f", {opts}"
     return _run_stata_command(cmd)
 
 
@@ -1925,6 +2031,8 @@ def stata_summarize(
     varlist: str = "",
     detail: bool = False,
     condition: str = "",
+    in_range: str = "",
+    options: str = "",
 ) -> str | ToolResult:
     """计算变量的摘要统计量。
 
@@ -1943,11 +2051,15 @@ def stata_summarize(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
     cmd = f"summarize {varlist}".strip()
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
-    if detail:
-        cmd += ", detail"
+    cmd += _filter_clause(condition, in_range)
+    opts = " ".join(p for p in ("detail" if detail else "", options.strip()) if p)
+    if opts:
+        cmd += f", {opts}"
     return _run_stata_command(cmd)
 
 
@@ -1957,6 +2069,7 @@ def stata_list(
     n: int = 10,
     in_range: str = "",
     condition: str = "",
+    options: str = "",
 ) -> str | ToolResult:
     """列出当前数据集中的数据值。
 
@@ -1974,6 +2087,7 @@ def stata_list(
             叠加时的语义见上。
         in_range: 观测范围如 "1/20" 或 "1/l"。给出时优先于 n。
         condition: if 条件子句（可选）。
+        options: 额外的官方选项，如 "noobs clean"、"separator(0)"、"abbreviate(12)"。
 
     Returns:
         数据表格。
@@ -1984,17 +2098,22 @@ def stata_list(
         return _result_or_error(err)
     if err := _validate_no_injection(in_range, "in_range"):
         return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
     if n < 0:
         return _make_error_result("错误: n 不能为负数")
     cmd = "list"
     if varlist.strip():
         cmd += f" {varlist}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    # in 子句由下面的 in_range/n 逻辑负责，故这里只交 condition 给 _filter_clause，
+    # 否则会拼出 `list … in 1/20 in 1/20`。
+    cmd += _filter_clause(condition, "")
     if in_range.strip():
-        cmd += f" in {in_range}"
+        cmd += f" in {in_range.strip()}"
     elif n > 0:
         cmd += f" in 1/{n}"
+    if options.strip():
+        cmd += f", {options.strip()}"
     return _run_stata_command(cmd)
 
 
@@ -2003,6 +2122,8 @@ def stata_codebook(
     varlist: str = "",
     compact: bool = False,
     condition: str = "",
+    in_range: str = "",
+    options: str = "",
 ) -> str | ToolResult:
     """生成数据集的 Codebook（变量字典）。
 
@@ -2021,11 +2142,15 @@ def stata_codebook(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
     cmd = f"codebook {varlist}".strip()
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
-    if compact:
-        cmd += ", compact"
+    cmd += _filter_clause(condition, in_range)
+    opts = " ".join(p for p in ("compact" if compact else "", options.strip()) if p)
+    if opts:
+        cmd += f", {opts}"
     return _run_stata_command(cmd)
 
 
@@ -2035,6 +2160,8 @@ def stata_tabulate(
     byvar: str = "",
     chi2: bool = False,
     condition: str = "",
+    in_range: str = "",
+    options: str = "",
 ) -> str | ToolResult:
     """创建频数分布表或交叉表。
 
@@ -2057,13 +2184,20 @@ def stata_tabulate(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
     cmd = f"tabulate {varname}"
     if byvar.strip():
         cmd += f" {byvar}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
-    if byvar.strip() and chi2:
-        cmd += ", chi2"
+    cmd += _filter_clause(condition, in_range)
+    # chi2 是 twoway 专属选项，单变量表传了会 r(198)
+    opts = " ".join(
+        p for p in ("chi2" if (byvar.strip() and chi2) else "", options.strip()) if p
+    )
+    if opts:
+        cmd += f", {opts}"
     return _run_stata_command(cmd)
 
 
@@ -2096,6 +2230,7 @@ def stata_regress(
     indepvars: str,
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """运行线性回归分析 (OLS)。
 
@@ -2116,11 +2251,12 @@ def stata_regress(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
     cmd = f"regress {depvar} {indepvars}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    cmd += _filter_clause(condition, in_range)
     if options.strip():
         cmd += f", {options}"
     return _run_stata_command(cmd)
@@ -2132,6 +2268,7 @@ def stata_logistic(
     indepvars: str,
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """运行 Logistic 回归分析。
 
@@ -2154,11 +2291,12 @@ def stata_logistic(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
     cmd = f"logistic {depvar} {indepvars}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    cmd += _filter_clause(condition, in_range)
     if options.strip():
         cmd += f", {options}"
     return _run_stata_command(cmd)
@@ -2168,20 +2306,33 @@ def stata_logistic(
 def stata_ttest(
     varname: str,
     byvar: str = "",
+    compare_to: str = "",
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
-    """运行单样本或独立样本 t 检验。
+    """运行 t 检验（单样本 / 按组两样本 / 配对 / 非配对）。
 
-    ``varname`` 只接受单个变量名，因此**不支持配对 t 检验**（其语法为
-    ``ttest var1 == var2``）。需要配对检验时请直接用
-    ``stata_run("ttest before == after")``。
+    官方的四种数据形式都能表达 —— **裸 `ttest varname` 不是合法命令**
+    （实测报 ``by() option required`` → r(100)），必须二选一：
+
+    ==================================  ================================
+    形式                                 参数
+    ==================================  ================================
+    单样本 ``ttest v == #``              ``compare_to="5000"``
+    按组两样本 ``ttest v, by(g)``        ``byvar="foreign"``
+    配对 ``ttest v1 == v2``              ``compare_to="after"``
+    非配对 ``ttest v1 == v2, unpaired``  ``compare_to="v2", options="unpaired"``
+    ==================================  ================================
 
     Args:
         varname: 要检验的变量名（单个）。
-        byvar: 分组变量（可选）。给出时做独立样本 t 检验，否则做单样本检验。
-        options: 额外选项，如 "unequal"、"level(90)"。
+        byvar: 分组变量 —— 做按组两样本检验。与 compare_to 互斥。
+        compare_to: 比较对象 —— 数值（单样本，检验均值是否等于它）或另一个
+            变量名（配对；加 options="unpaired" 则为非配对）。与 byvar 互斥。
+        options: 额外选项，如 "unequal"、"welch"、"level(90)"、"unpaired"。
         condition: if 条件子句（可选）。例："!missing(price)".
+        in_range: 观测范围（可选），如 "1/100"。
 
     Returns:
         t 检验结果表。
@@ -2190,23 +2341,38 @@ def stata_ttest(
         return _result_or_error(err)
     if err := _validate_identifier(byvar, "byvar"):
         return _result_or_error(err)
+    if err := _validate_no_injection(compare_to, "compare_to"):
+        return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
-    if byvar.strip():
-        cmd = f"ttest {varname}"
-        if condition.strip():
-            cmd += f" if {condition.strip()}"
-        cmd += f", by({byvar})"
-        if options.strip():
-            cmd += f" {options}"
-    else:
-        cmd = f"ttest {varname}"
-        if condition.strip():
-            cmd += f" if {condition.strip()}"
-        if options.strip():
-            cmd += f", {options}"
+
+    if byvar.strip() and compare_to.strip():
+        return _make_error_result(
+            "错误: byvar 与 compare_to 互斥 —— 前者是按组两样本检验"
+            "（ttest v, by(g)），后者是单样本/配对检验（ttest v == x）。"
+        )
+    if not byvar.strip() and not compare_to.strip():
+        # 裸 `ttest v` 会 r(100)；与其把非法命令发给 Stata，不如说明该给什么。
+        return _make_error_result(
+            "错误: 必须给出 byvar 或 compare_to 之一（裸 `ttest 变量` 不是合法命令）。\n"
+            '  · 单样本检验均值是否等于某值 → compare_to="5000"\n'
+            '  · 按组比较两样本         → byvar="foreign"\n'
+            '  · 配对/非配对比较两变量   → compare_to="另一变量"'
+            "（非配对再加 options=\"unpaired\"）"
+        )
+
+    lhs = f"{varname} == {compare_to.strip()}" if compare_to.strip() else varname
+    cmd = f"ttest {lhs}"
+    cmd += _filter_clause(condition, in_range)
+    opts = " ".join(
+        p for p in (f"by({byvar.strip()})" if byvar.strip() else "", options.strip()) if p
+    )
+    if opts:
+        cmd += f", {opts}"
     return _run_stata_command(cmd)
 
 
@@ -2217,6 +2383,7 @@ def stata_probit(
     marginal_effects: bool = False,
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """运行 Probit 回归（二元因变量）。
 
@@ -2237,11 +2404,12 @@ def stata_probit(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
     cmd = f"probit {depvar} {indepvars}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    cmd += _filter_clause(condition, in_range)
     if options.strip():
         cmd += f", {options}"
     if marginal_effects:
@@ -2256,6 +2424,7 @@ def stata_poisson(
     irr: bool = False,
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """运行 Poisson 回归（计数因变量）。
 
@@ -2275,11 +2444,12 @@ def stata_poisson(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
     cmd = f"poisson {depvar} {indepvars}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    cmd += _filter_clause(condition, in_range)
     opt_parts = [p for p in (("irr" if irr else ""), options.strip()) if p]
     if opt_parts:
         cmd += f", {' '.join(opt_parts)}"
@@ -2297,6 +2467,7 @@ def stata_xtreg(
     effects: str = "fe",
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """运行面板数据回归（xtreg）。
 
@@ -2320,6 +2491,8 @@ def stata_xtreg(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
     eff = effects.strip().lower()
@@ -2328,8 +2501,7 @@ def stata_xtreg(
             f"错误: effects 只能是 {', '.join(sorted(_XTREG_EFFECTS))} 之一，收到 '{effects}'"
         )
     cmd = f"xtreg {depvar} {indepvars}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    cmd += _filter_clause(condition, in_range)
     opt_parts = [p for p in (eff, options.strip()) if p]
     cmd += f", {' '.join(opt_parts)}"
     return _run_stata_command(cmd)
@@ -2348,6 +2520,7 @@ def stata_ivregress(
     estimator: str = "2sls",
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """运行工具变量回归（ivregress，2SLS/LIML/GMM）。
 
@@ -2381,6 +2554,8 @@ def stata_ivregress(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
     est = estimator.strip().lower()
@@ -2390,8 +2565,7 @@ def stata_ivregress(
         )
     exog = f" {exogenous.strip()}" if exogenous.strip() else ""
     cmd = f"ivregress {est} {depvar}{exog} ({endogenous.strip()} = {instruments.strip()})"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    cmd += _filter_clause(condition, in_range)
     if options.strip():
         cmd += f", {options}"
     return _run_stata_command(cmd)
@@ -2403,6 +2577,7 @@ def stata_correlate(
     pairwise: bool = False,
     options: str = "",
     condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """计算相关系数矩阵。
 
@@ -2421,14 +2596,15 @@ def stata_correlate(
         return _result_or_error(err)
     if err := _validate_no_injection(condition, "condition"):
         return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
     base = "pwcorr" if pairwise else "correlate"
     cmd = base
     if varlist.strip():
         cmd += f" {varlist}"
-    if condition.strip():
-        cmd += f" if {condition.strip()}"
+    cmd += _filter_clause(condition, in_range)
     if options.strip():
         cmd += f", {options}"
     return _run_stata_command(cmd)
@@ -2440,6 +2616,8 @@ def stata_margins(
     dydx: str = "",
     at: str = "",
     options: str = "",
+    condition: str = "",
+    in_range: str = "",
 ) -> str | ToolResult:
     """估计边际效应 / 预测边际（margins，后估计命令）。
 
@@ -2451,6 +2629,8 @@ def stata_margins(
         dydx: 求哪些变量的边际效应，如 "price"、"*"（全部）。
         at: 在何处求值，如 "(mean) _all"、"age=(20 40 60)"。
         options: 额外选项，如 "atmeans"、"vce(unconditional)"。
+        condition: if 条件子句（可选）—— 只在满足条件的子样本上求边际。
+        in_range: 观测范围（可选），如 "1/100"。
 
     Returns:
         边际效应表。
@@ -2463,9 +2643,14 @@ def stata_margins(
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
     cmd = "margins"
     if marginlist.strip():
         cmd += f" {marginlist.strip()}"
+    cmd += _filter_clause(condition, in_range)
     opt_parts = []
     if dydx.strip():
         opt_parts.append(f"dydx({dydx.strip()})")
@@ -2479,16 +2664,20 @@ def stata_margins(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_test(spec: str) -> str | ToolResult:
+def stata_test(spec: str, options: str = "") -> str | ToolResult:
     """对上一个估计结果做 Wald 检验（test，后估计命令）。
 
-    **前提**：先运行过一个估计命令。
+    **前提**：先运行过一个估计命令。``test`` 作用于已存储的估计结果，
+    因此**不接受** ``if`` / ``in``（实测传了会 r(198)）—— 要限定子样本，
+    请在估计命令上加 ``condition`` / ``in_range`` 后重新估计。
 
     Args:
         spec: 检验设定。例：
             - "weight mpg"        联合显著性：weight=0 且 mpg=0
             - "weight = mpg"      系数相等
             - "weight = 0.5"      系数等于某值
+        options: 官方选项，如 "mtest"（多重比较校正）、"accumulate"（累积
+            前次检验）、"notest"（只累积不输出）、"common"、"df(#)"。
 
     Returns:
         Wald 检验结果（F 或 chi2 统计量与 p 值）。
@@ -2497,22 +2686,17 @@ def stata_test(spec: str) -> str | ToolResult:
         return _make_error_result("错误: 请提供检验设定，如 'weight mpg' 或 'weight = mpg'")
     if err := _validate_no_injection(spec, "spec"):
         return _result_or_error(err)
-    return _run_stata_command(f"test {spec.strip()}")
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    cmd = f"test {spec.strip()}"
+    if options.strip():
+        cmd += f", {options.strip()}"
+    return _run_stata_command(cmd)
 
 
 # =============================================================================
 # MCP 工具 — 图形 (readOnlyHint=True)
 # =============================================================================
-
-GRAPH_SCHEMES = {
-    "s2color": "Stata 默认彩色",
-    "s2mono": "黑白/灰度",
-    "s2manual": "Stata 手册风格",
-    "economist": "The Economist 杂志风格（需安装）",
-    "cleanplots": "简洁出版风格（需安装）",
-    "plottig": "Tufte/Edward 风格（需安装）",
-}
-
 
 def _has_unsafe_brace(cmd: str) -> bool:
     """检查 graph command 中是否存在会破坏外层 { } 复合块的右花括号。
@@ -2531,44 +2715,144 @@ def _has_unsafe_brace(cmd: str) -> bool:
     return len(blocks) != 1
 
 
-# 矢量图格式：graph export 的 width()/height() 以英寸计（0.5–20），
-# 位图格式则以像素计。把像素值传给矢量格式会直接 r(198)。
-_VECTOR_GRAPH_EXTS = frozenset({".pdf", ".eps", ".ps", ".svg", ".emf", ".wmf"})
+# graph export 的 width()/height() 语义按格式分三类，「矢量 vs 位图」的二分是错的。
+# 依据 [G-2] graph export 的 override_options 表与各 [G-3] *_options 条目，
+# 并在 Stata 19.5 MP（macOS）上逐条实测：
+#   .png/.tif/.gif/.jpg —— 像素（png_options 等写作 "width of graph in pixels"）。
+#     Stata 自己校验 8–16000，越界报 "must be an integer between 8 and 16,000"，
+#     诊断比我们能写的更精确，故不在此预校验。
+#   .svg —— svg_options 写作 width(#px|#in)，**像素与英寸都支持**，无后缀默认 px
+#     （实测 width(800) → 输出头 width="800px"；width(6in) 也接受）。
+#     曾被误归入英寸组：合法的 800 被丢弃，而 6 产出 6 像素的废图且导出「成功」。
+#   .pdf —— 英寸（pdf_options: "width of graph in inches"），0.5–20。
+#   .eps/.ps —— 官方选项表里**没有** width()/height()（ps 只有 pagewidth()，且仅
+#     pagesize(custom) 时相关）。实测传任何值都是 "option width() not allowed"
+#     → r(198)，错误又被复合块的 capture 吞掉，表现为导出无声失败。
+#   .emf/.wmf —— `help emf_options` **不存在**，override_options 表里也没有 emf；
+#     wmf 更是根本不在 graph export 的格式表中。两者不接受任何尺寸选项。
+_INCH_GRAPH_EXTS = frozenset({".pdf"})
+_NO_SIZE_GRAPH_EXTS = frozenset({".eps", ".ps", ".emf", ".wmf"})
 
 
 def _graph_size_options(export_path: str, width: int, height: int) -> tuple[str, str]:
     """按导出格式生成 graph export 的尺寸选项，并说明被忽略的取值。
 
-    实测：对 .pdf 传 ``width(800)`` 会失败并输出
-    "width() must be a number between 0.5 and 20" —— 因为矢量格式的单位是英寸。
-    故矢量格式下超出英寸范围的取值一律丢弃，并把这一决定回报给调用方，
-    避免「悄悄改了参数」。
+    参数被丢弃时一律回报给调用方，避免「悄悄改了参数」。
 
     Returns:
         (选项串, 说明文本)；无需说明时说明文本为空串。
     """
     ext = os.path.splitext(export_path)[1].lower()
-    if ext not in _VECTOR_GRAPH_EXTS:
-        opts = [f"width({width})"] if width > 0 else []
-        if height > 0:
-            opts.append(f"height({height})")
-        return " ".join(opts), ""
+    requested = [(label, v) for label, v in (("width", width), ("height", height)) if v > 0]
 
-    kept, dropped = [], []
-    for label, value in (("width", width), ("height", height)):
-        if value <= 0:
-            continue
-        if 1 <= value <= 20:
-            kept.append(f"{label}({value})")
-        else:
-            dropped.append(f"{label}={value}")
+    if ext in _NO_SIZE_GRAPH_EXTS:
+        if not requested:
+            return "", ""
+        dropped = ", ".join(f"{label}={v}" for label, v in requested)
+        return "", (
+            f"提示：{ext} 不支持 width()/height()（Stata 报 option width() not allowed），"
+            f"已忽略 {dropped}，改用 Stata 默认尺寸。"
+        )
+
+    if ext not in _INCH_GRAPH_EXTS:
+        # 位图与 svg：像素，原样下传，越界由 Stata 报错（信息比我们能写的更精确）
+        return " ".join(f"{label}({v})" for label, v in requested), ""
+
+    kept = [f"{label}({v})" for label, v in requested if 1 <= v <= 20]
+    dropped = [f"{label}={v}" for label, v in requested if not 1 <= v <= 20]
     note = ""
     if dropped:
         note = (
-            f"提示：{ext} 为矢量格式，width()/height() 单位是英寸（0.5–20），"
+            f"提示：{ext} 的 width()/height() 单位是英寸（0.5–20），"
             f"已忽略像素取值 {', '.join(dropped)}，改用 Stata 默认尺寸。"
         )
     return " ".join(kept), note
+
+
+# 格式专属的 override_options，依据各 [G-3] *_options 条目并在 19.5 MP 实测：
+#   quality()  仅 jpg_options 有（1–100，默认 90）；png/pdf 传了报
+#              "option quality() not allowed"。.jpeg 不是官方后缀（实测
+#              "translator Graph2jpeg not found"），不能当 jpg 处理。
+#   mag()      仅 pdf/eps/ps_options 有（1–10000，默认 100）；png/jpg/svg 报
+#              "option mag() not allowed"。
+#   fontface() pdf/eps/ps/svg_options 都有；位图格式没有。
+# 取值范围一律交给 Stata 校验 —— 它的诊断更精确，也不会随版本漂移。
+_QUALITY_EXTS = frozenset({".jpg"})
+_MAG_EXTS = frozenset({".pdf", ".eps", ".ps"})
+_FONTFACE_EXTS = frozenset({".pdf", ".eps", ".ps", ".svg"})
+
+
+# 导出命令对「筛选后 0 条观测」报的是 Excel 行数上限（下界是 1，故 0 条也越界），
+# 与真实原因毫无关系。实测 auto 数据集：`if foreign == 1 in 1/10` 因前 10 条全为
+# 国产车而选中 0 条 → "observations must be between 1 and 1048576"。
+_EMPTY_SELECTION_MARKER = "observations must be between 1 and"
+
+
+def _empty_selection_hint(text: str, condition: str, in_range: str) -> str:
+    """把 Stata 那句谈行数上限的错误翻译成「筛选没命中」。
+
+    仅在**确实传了筛选条件**时附加 —— 否则就成了对无关错误的臆测。
+    """
+    if _EMPTY_SELECTION_MARKER not in text:
+        return ""
+    if not (condition.strip() or in_range.strip()):
+        return ""
+    hint = "\n提示：筛选条件未匹配到任何观测（Stata 对空选择报的是行数上限错误）。"
+    if condition.strip() and in_range.strip():
+        hint += (
+            "\n注意 `if` 与 `in` 叠加的语义是「**前 n 条观测里**满足条件的」，"
+            "而非「满足条件的前 n 条」；先用 stata_tabulate / stata_summarize 确认规模。"
+        )
+    return hint
+
+
+def _filter_clause(condition: str, in_range: str) -> str:
+    """拼出 ``[if <cond>] [in <range>]`` 子句（含前导空格；都为空时返回空串）。
+
+    ``[if]`` / ``[in]`` 与选项分属命令的两个语法位置，必须拼在逗号**之前**；
+    拼到逗号后面 Stata 会当成未知选项报 r(198)。
+    """
+    parts = []
+    if condition.strip():
+        parts.append(f"if {condition.strip()}")
+    if in_range.strip():
+        parts.append(f"in {in_range.strip()}")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _graph_format_options(
+    export_path: str, quality: int, mag: int, fontface: str
+) -> tuple[str, str]:
+    """按导出格式生成 quality()/mag()/fontface()，并说明被忽略的取值。
+
+    不适用的选项必须在此丢弃：传给 Stata 会 r(198)，而复合块的 ``capture`` 会把
+    错误吞掉，表现为导出无声失败。
+
+    Returns:
+        (选项串, 说明文本)；无需说明时说明文本为空串。
+    """
+    ext = os.path.splitext(export_path)[1].lower()
+    opts, dropped = [], []
+
+    for label, value, allowed, rendered in (
+        ("quality", quality, _QUALITY_EXTS, f"quality({quality})"),
+        ("mag", mag, _MAG_EXTS, f"mag({mag})"),
+        ("fontface", fontface, _FONTFACE_EXTS, f'fontface("{fontface}")'),
+    ):
+        if not value:
+            continue
+        if ext in allowed:
+            opts.append(rendered)
+        else:
+            dropped.append(f"{label}={value}")
+
+    note = ""
+    if dropped:
+        note = (
+            f"提示：{ext or '该格式'} 不支持 {', '.join(dropped)}"
+            f"（Stata 会报 option ... not allowed），已忽略。"
+        )
+    return " ".join(opts), note
 
 
 def _mtime_ns(path: str) -> int | None:
@@ -2618,31 +2902,42 @@ def _format_size(path: str) -> str:
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def stata_graph(
     command: str,
-    scheme: str = "s2color",
+    scheme: str = "",
     export: str = "",
     width: int = 800,
     height: int = 0,
     replace: bool = False,
+    quality: int = 0,
+    mag: int = 0,
+    fontface: str = "",
 ) -> str | ToolResult:
     """生成 Stata 图形并可选导出为文件。
 
-    自动在命令前设置图形方案（scheme）。
     当指定 export 时,使用 { } 复合块将 graph + export 包装在单次
     StataSO_Execute 调用中,避免图形窗口在 headless 环境中丢失。
 
-    支持两种导出方式（推荐使用第一种）：
-    1. export 参数 — 自动生成 { } 复合块，无需临时文件
-    2. 或在 command 中手动写 capture noisily { ... }
+    **不适用于目标格式的选项会被丢弃并在返回信息中说明** —— 传给 Stata 会
+    r(198)，而复合块的 capture 会吞掉错误，表现为导出无声失败。
+
+    官方支持的后缀（[G-2] graph export）：ps eps svg emf pdf png tif gif jpg。
+    可用性依运行环境而变：emf 仅 Windows、gif 仅 Mac GUI、tif 不支持 console 模式；
+    本 MCP 以 headless console 运行，实测仅 png/jpg/pdf/svg/eps/ps 可用。
 
     Args:
         command: 图形命令(scatter mpg weight, histogram price 等)。
-        scheme: 图形方案(默认 's2color')。常用方案:
-                s2color(默认彩色), s2mono(灰度), s2manual(手册风格)。
-        export: 导出图形文件路径（留空不导出）。支持 .png/.pdf/.svg/.emf/.wmf 等格式；
-                Stata 按扩展名自动推断格式。例:"C:/output/scatter.png"。
-        width: 导出图片宽度(像素,默认 800)。
-        height: 导出图片高度(像素,默认 0 表示不指定)。
+        scheme: 图形方案。**留空（默认）= 不改变当前 scheme**，沿用 Stata 或用户
+                的设置（Stata 19 默认为 stcolor）。传值才会 `set scheme`，且不会
+                在调用后还原。用 stata_scheme() 可列出全部可用方案。
+        export: 导出图形文件路径（留空不导出）；Stata 按扩展名推断格式。
+        width: 导出宽度（默认 800）。单位随格式而变：.png/.jpg/.tif/.gif 与 .svg
+               是**像素**（位图 8–16000）；.pdf 是**英寸**（0.5–20）；
+               .eps/.ps/.emf/.wmf **不支持**尺寸选项。
+        height: 导出高度，单位同 width（默认 0 表示不指定）。
         replace: 是否覆盖已有文件(默认 False)。
+        quality: JPEG 压缩质量 1–100（默认 0 = 不指定，Stata 默认 90）。**仅 .jpg**。
+        mag: 缩放百分比 1–10000（默认 0 = 不指定，Stata 默认 100）。
+             **仅 .pdf/.eps/.ps**。
+        fontface: 默认字体名（默认空 = 不指定）。**仅 .pdf/.eps/.ps/.svg**。
 
     Returns:
         图形生成确认信息。
@@ -2656,11 +2951,18 @@ def stata_graph(
         # 同样要校验解析后的块：`sh/*x*/ell …` 在原始文本里不含 shell 一词。
         if reason := _precheck_command(command):
             return _make_error_result(reason)
-        if err := _validate_scheme_name(scheme):
+        if scheme and (err := _validate_scheme_name(scheme)):
+            return _result_or_error(err)
+        if fontface and (err := _validate_fontface(fontface)):
             return _result_or_error(err)
         # 负值会被原样拼成 width(-100) 交给 Stata；实测虽因图形命令先失败而未暴露，
         # 但语义上无意义，应在入口拒绝而不是依赖下游偶然报错。
-        for label, value in (("width", width), ("height", height)):
+        for label, value in (
+            ("width", width),
+            ("height", height),
+            ("quality", quality),
+            ("mag", mag),
+        ):
             if value < 0:
                 return _make_error_result(f"错误: {label} 不能为负数（{value}）")
         if export:
@@ -2672,13 +2974,19 @@ def stata_graph(
                     "请避免在 command 中使用未转义的右花括号（字符串内除外）"
                 )
 
+        # scheme 留空时不发 `set scheme` —— 那会把用户当前的主题（Stata 19 默认
+        # 是 stcolor）悄悄改掉且不还原，是覆盖而非设定。
+        scheme_line = f"set scheme {scheme}\n" if scheme else ""
+
         if not export:
-            return _run_stata_command(f"set scheme {scheme}\n{command}", timeout=120)
+            return _run_stata_command(f"{scheme_line}{command}", timeout=120)
 
         # 导出模式：使用 { } 复合块确保 graph + export 原子执行
         export_path = _normalize_path(export)
         replace_opt = "replace" if replace else ""
         size_opts, size_note = _graph_size_options(export_path, width, height)
+        fmt_opts, fmt_note = _graph_format_options(export_path, quality, mag, fontface)
+        export_opts = " ".join(p for p in (replace_opt, size_opts, fmt_opts) if p)
 
         # 复合块内的错误被 capture 吞掉（rc 恒为 0），无法据此判断成败；
         # 改以「文件是否被这次调用新写入」为准，故先记录调用前的状态。
@@ -2689,9 +2997,9 @@ def stata_graph(
         compound = (
             f"capture noisily {{\n"
             f"    set graphics off\n"
-            f"    set scheme {scheme}\n"
+            f"{'    ' + scheme_line if scheme_line else ''}"
             f"    {command}\n"
-            f'    graph export "{export_path}", {replace_opt} {size_opts}\n'
+            f'    graph export "{export_path}", {export_opts}\n'
             f"}}\n"
             f"capture noisily graph drop _all"
         )
@@ -2712,12 +3020,55 @@ def stata_graph(
             )
 
         result += f"\n(图形已导出: {export_path}, {_format_size(export_path)})"
-        if size_note:
-            result += f"\n{size_note}"
+        for note in (size_note, fmt_note):
+            if note:
+                result += f"\n{note}"
         return result
 
     except Exception as e:
         return _make_error_result(f"图形生成失败: {type(e).__name__}: {e}")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+def stata_scheme(
+    action: str = "list", scheme: str = "", permanently: bool = False
+) -> str | ToolResult:
+    """查询或设置 Stata 图形主题（scheme）。
+
+    scheme 决定配色、字体、坐标轴与图例的整体外观。Stata 19 的默认是 ``stcolor``
+    （实测 ``c(scheme)``），本机内置 26 个方案；``ssc install`` 的第三方方案
+    （cleanplots、plottig、schemepack 等）装好后也会出现在列表里。
+
+    Args:
+        action: ``list``（默认，列出全部可用方案）/ ``get``（当前方案）/
+                ``set``（切换方案）。
+        scheme: 方案名，仅 action="set" 时必填。
+        permanently: 是否写入 Stata 配置、跨会话保留（默认 False，仅本会话生效）。
+
+    Returns:
+        方案清单、当前方案名，或设置确认。
+    """
+    if action not in ("list", "get", "set"):
+        return _make_error_result(
+            f'错误: action 只能是 "list" / "get" / "set"（收到 {action!r}）'
+        )
+
+    if action == "list":
+        # 官方查询命令；ssc 没有对应子命令，`graph query, schemes` 是唯一入口。
+        return _run_stata_command("graph query, schemes")
+
+    if action == "get":
+        # 不能用裸 `set scheme` 查询 —— 那是设置命令，不带参数时行为不同。
+        return _run_stata_command("display c(scheme)")
+
+    if not scheme.strip():
+        # 空值会拼出裸 `set scheme`，改变命令语义而非报错。
+        return _make_error_result('错误: action="set" 时必须提供 scheme 名')
+    if err := _validate_scheme_name(scheme):
+        return _result_or_error(err)
+
+    suffix = ", permanently" if permanently else ""
+    return _run_stata_command(f"set scheme {scheme.strip()}{suffix}")
 
 
 # =============================================================================
@@ -2732,8 +3083,15 @@ def stata_export_excel(
     sheet: str = "Sheet1",
     replace: bool = False,
     results: bool = False,
+    sheet_mode: str = "",
+    cell: str = "",
+    firstrow: str = "variables",
+    nolabel: bool = False,
+    condition: str = "",
+    in_range: str = "",
+    options: str = "",
 ) -> str | ToolResult:
-    """将当前数据集导出为 Excel (.xlsx) 文件，或将回归结果导出为 CSV。
+    """将当前数据集导出为 Excel (.xlsx/.xls) 文件，或将回归结果导出为 CSV。
 
     使用 Stata 的 export excel 命令导出数据。
     当 results=True 时，使用 esttab 导出回归结果表；esttab 不支持 xlsx
@@ -2743,9 +3101,22 @@ def stata_export_excel(
     Args:
         filepath: 导出路径（数据导出建议 .xlsx；回归结果导出会改为 .csv）。
         varlist: 要导出的变量列表（空格分隔），留空 = 全部变量。
+                 仅用于数据导出；results=True 时 esttab 按已存储的估计结果出表，
+                 该参数会被忽略。
         sheet: Excel 工作表名（默认 "Sheet1"，仅用于数据导出）。
-        replace: 是否覆盖已有文件（默认 False）。
+        replace: 是否覆盖已有**文件**（默认 False）。
         results: 若为 True，将当前存储的回归结果导出为 CSV 表格而非原始数据。
+        sheet_mode: 目标**工作表**已存在时的处理 —— "modify"（保留其他表，改写本表）
+                    或 "replace"（清空本表重写）。留空则沿用 Stata 默认：工作表
+                    已存在时报 r(602)。注意这与 ``replace``（针对整个文件）不同。
+        cell: 起始单元格（左上角），如 "B3"。留空 = 从 A1 开始。
+        firstrow: 首行内容 —— "variables"（默认，变量名）、"varlabels"（变量标签）
+                  或 "none"（不写首行）。
+        nolabel: 导出数值本身而非值标签（默认 False）。
+        condition: if 条件子句（可选），如 "foreign == 1"。
+        in_range: 观测范围（可选），如 "1/100"。
+        options: 其余官方选项的自由文本逃生舱，如
+                 ``'keepcellfmt missing("NA") datestring("%td")'``。
 
     Returns:
         导出确认信息。
@@ -2756,10 +3127,35 @@ def stata_export_excel(
         return _result_or_error(err)
     if err := _validate_sheet_name(sheet):
         return _result_or_error(err)
+    if err := _validate_no_injection(condition, "condition"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(in_range, "in_range"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(cell, "cell"):
+        return _result_or_error(err)
+    if sheet_mode and sheet_mode not in ("modify", "replace"):
+        return _make_error_result(
+            f'错误: sheet_mode 只能是 "modify" 或 "replace"（收到 {sheet_mode!r}）'
+        )
+    if sheet_mode and replace and not results:
+        # 实测 Stata：invalid syntax; option sheet(...,replace) may not be combined
+        # with option replace。二者语义冲突 —— 文件级 replace 重建整个文件，
+        # 不可能有工作表冲突；sheet_mode 则是针对已存在文件里的某张表。
+        return _make_error_result(
+            "错误: sheet_mode 与 replace 不能同时使用（Stata 会 r(198)）。\n"
+            "  · 想重建整个文件 → 只传 replace=True\n"
+            f'  · 想保留文件、改写其中一张表 → 只传 sheet_mode="{sheet_mode}"'
+        )
+    if firstrow not in ("variables", "varlabels", "none"):
+        return _make_error_result(
+            f'错误: firstrow 只能是 "variables" / "varlabels" / "none"（收到 {firstrow!r}）'
+        )
 
     export_path = _normalize_path(filepath)
     replace_opt = "replace" if replace else ""
-    firstrow_opt = "firstrow(variables)"
+    firstrow_opt = "" if firstrow == "none" else f"firstrow({firstrow})"
 
     if results:
         # esttab 不支持 xlsx/sheet，统一输出 CSV
@@ -2811,16 +3207,26 @@ def stata_export_excel(
         )
     else:
         changed_msg = ""
-        # 导出数据集为 Excel
+        # 导出数据集为 Excel。[if] [in] 属于命令的另一个语法位置，必须在逗号之前。
+        sheet_opt = f'sheet("{sheet}", {sheet_mode})' if sheet_mode else f'sheet("{sheet}")'
+        opts = " ".join(
+            p
+            for p in (
+                replace_opt,
+                firstrow_opt,
+                sheet_opt,
+                f"cell({cell.strip()})" if cell.strip() else "",
+                "nolabel" if nolabel else "",
+                options.strip(),
+            )
+            if p
+        )
+        cmd = "export excel"
         if varlist.strip():
-            cmd = (
-                f'export excel {varlist} using "{export_path}", '
-                f'{replace_opt} {firstrow_opt} sheet("{sheet}")'
-            )
-        else:
-            cmd = (
-                f'export excel using "{export_path}", {replace_opt} {firstrow_opt} sheet("{sheet}")'
-            )
+            cmd += f" {varlist.strip()}"
+        cmd += f' using "{export_path}"'
+        cmd += _filter_clause(condition, in_range)
+        cmd += f", {opts}"
 
     # 导出成败以「文件是否被这次调用写入」为准，不能只看文件是否存在：
     # 上次运行留下的同名文件会把失败伪装成成功。实测 rc=997（崩溃已恢复、
@@ -2829,8 +3235,11 @@ def stata_export_excel(
 
     result = _run_stata_command(cmd, timeout=120)
 
-    # 若 _run_stata_command 已标记错误，直接透传
+    # 若 _run_stata_command 已标记错误，透传；空选择这类误导性诊断补一句解释。
     if isinstance(result, ToolResult):
+        raw = result.content[0].text if result.content else ""
+        if hint := _empty_selection_hint(raw, condition, in_range):
+            return _make_error_result(raw + hint)
         return result
 
     if not _file_written_since(export_path, before_ns):
@@ -2842,6 +3251,834 @@ def stata_export_excel(
         )
 
     return f"{changed_msg}已导出 {_format_size(export_path)} -> {export_path}\n{result}"
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_export_delimited(
+    filepath: str,
+    varlist: str = "",
+    delimiter: str = "",
+    novarnames: bool = False,
+    nolabel: bool = False,
+    datafmt: bool = False,
+    quote: bool = False,
+    replace: bool = False,
+    condition: str = "",
+    in_range: str = "",
+    options: str = "",
+) -> str | ToolResult:
+    """将当前数据集导出为分隔文本文件（CSV / TSV / 自定义分隔符）。
+
+    对应官方的 ``export delimited``。相比 Excel，它无依赖、体积小、任何工具都能读，
+    是跨程序交换数据的首选；文件名不带扩展名时 Stata 默认按 ``.csv`` 处理。
+
+    Args:
+        filepath: 导出路径（如 "out/data.csv"）。
+        varlist: 要导出的变量列表（空格分隔），留空 = 全部变量。
+        delimiter: 分隔符 —— 留空 = 逗号（Stata 默认）；``"tab"`` 用制表符；
+                   或单个字符如 ``";"``、``"|"``。
+        novarnames: 不写变量名首行（默认 False，即写）。
+        nolabel: 导出数值本身而非值标签（默认 False）。
+        datafmt: 按变量的显示格式导出（默认 False）。
+        quote: 字符串一律用双引号包裹（默认 False，仅必要时包裹）。
+        replace: 是否覆盖已有文件（默认 False）。
+        condition: if 条件子句（可选）。
+        in_range: 观测范围（可选），如 "1/100"。
+        options: 其余官方选项的自由文本逃生舱。
+
+    Returns:
+        导出确认信息。
+    """
+    if err := _validate_path(filepath):
+        return _result_or_error(err)
+    if err := _validate_varlist(varlist, "varlist"):
+        return _result_or_error(err)
+    for value, label in (
+        (condition, "condition"),
+        (in_range, "in_range"),
+        (options, "options"),
+    ):
+        if err := _validate_no_injection(value, label):
+            return _result_or_error(err)
+
+    # delimiter 拼进 delimiter("<c>")，双引号会提前闭合；tab 是关键字不加引号。
+    # 实测 Stata 对 delimiter("tab") 与 delimiter(tab) 一视同仁（都产出制表符，
+    # 不会把 "tab" 当三字符分隔符），此处取官方文档的无引号写法。
+    delim_opt = ""
+    if delimiter:
+        if delimiter == "tab":
+            delim_opt = "delimiter(tab)"
+        elif len(delimiter) != 1:
+            return _make_error_result(
+                f'错误: delimiter 只能是单个字符或关键字 "tab"（收到 {delimiter!r}）'
+            )
+        elif delimiter in ('"', "`", "$", "\\"):
+            return _make_error_result(f"错误: delimiter 不能是 {delimiter!r}")
+        else:
+            delim_opt = f'delimiter("{delimiter}")'
+
+    export_path = _normalize_path(filepath)
+    opts = " ".join(
+        p
+        for p in (
+            delim_opt,
+            "novarnames" if novarnames else "",
+            "nolabel" if nolabel else "",
+            "datafmt" if datafmt else "",
+            "quote" if quote else "",
+            "replace" if replace else "",
+            options.strip(),
+        )
+        if p
+    )
+
+    cmd = "export delimited"
+    if varlist.strip():
+        cmd += f" {varlist.strip()}"
+    cmd += f' using "{export_path}"'
+    cmd += _filter_clause(condition, in_range)
+    if opts:
+        cmd += f", {opts}"
+
+    # 与 stata_graph / stata_export_excel 一致：以文件是否被本次调用写入为准。
+    # 只判断「文件存在」会把上次留下的同名文件当成本次成功。
+    before_ns = _mtime_ns(export_path) if os.path.isfile(export_path) else None
+
+    result = _run_stata_command(cmd, timeout=120)
+    if isinstance(result, ToolResult):
+        raw = result.content[0].text if result.content else ""
+        if hint := _empty_selection_hint(raw, condition, in_range):
+            return _make_error_result(raw + hint)
+        return result
+
+    if not _file_written_since(export_path, before_ns):
+        hint = ""
+        if before_ns is not None and not replace:
+            hint = "\n提示：目标文件已存在且 replace=False，如需覆盖请传 replace=True。"
+        return _make_error_result(
+            f"错误: 导出失败，未写入文件 {export_path}{hint}\n{result.strip()}"
+        )
+
+    return f"已导出 {_format_size(export_path)} -> {export_path}\n{result}"
+
+
+_FRAME_ACTIONS = frozenset(
+    {"dir", "current", "create", "change", "drop", "copy", "rename"}
+)
+_FRAME_NEED_NAME = frozenset({"create", "change", "drop", "copy", "rename"})
+_FRAME_NEED_NEWNAME = frozenset({"copy", "rename"})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_frame(
+    action: str = "dir", name: str = "", newname: str = ""
+) -> str | ToolResult:
+    """管理数据 frame —— 在内存中同时持有多个数据集（Stata 16+）。
+
+    合并前把两份数据各放一个 frame、或一边建模一边保留原始数据时用得上。
+    当前有哪些 frame 也可从 ``stata_status`` 看到。
+
+    Args:
+        action: ``dir``（默认，列出全部）/ ``current``（当前 frame 名）/
+            ``create`` / ``change`` / ``drop``（均需 name）/
+            ``copy`` / ``rename``（需 name 与 newname）。
+        name: 目标 frame 名。
+        newname: copy / rename 的新名字。
+
+    Returns:
+        frame 清单或操作确认。
+    """
+    if action not in _FRAME_ACTIONS:
+        return _make_error_result(
+            f"错误: action 只能是 {sorted(_FRAME_ACTIONS)}（收到 {action!r}）"
+        )
+    if err := _validate_identifier(name, "name"):
+        return _result_or_error(err)
+    if err := _validate_identifier(newname, "newname"):
+        return _result_or_error(err)
+    if action in _FRAME_NEED_NAME and not name.strip():
+        return _make_error_result(f'错误: action="{action}" 必须提供 name')
+    if action in _FRAME_NEED_NEWNAME and not newname.strip():
+        return _make_error_result(f'错误: action="{action}" 必须提供 newname')
+
+    if action == "dir":
+        return _run_stata_command("frames dir")
+    if action == "current":
+        # `frame pwf` = print working frame，与 c(frame) 等价但更自解释。
+        return _run_stata_command("frame pwf")
+    if action in _FRAME_NEED_NEWNAME:
+        return _run_stata_command(f"frame {action} {name.strip()} {newname.strip()}")
+    return _run_stata_command(f"frame {action} {name.strip()}")
+
+
+# 数据校验：各自是独立命令，但都在回答「数据对不对」，故合成一个工具。
+_VERIFY_CHECKS = frozenset({"count", "assert", "duplicates", "isid", "missing"})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_verify(
+    check: str = "count",
+    varlist: str = "",
+    expression: str = "",
+    condition: str = "",
+    in_range: str = "",
+    options: str = "",
+) -> str | ToolResult:
+    """数据完整性检查（``count`` / ``assert`` / ``duplicates`` / ``isid`` /
+    ``misstable``）。
+
+    分析前先跑一遍能挡掉大部分「结果诡异」的根因：重复键、缺失值、
+    标识变量不唯一。
+
+    Args:
+        check: ``count``（默认，计数）/ ``assert``（断言，不成立即报错）/
+            ``duplicates``（重复观测）/ ``isid``（varlist 是否唯一标识）/
+            ``missing``（缺失值汇总，走 ``misstable summarize``）。
+        varlist: 变量列表 —— ``duplicates`` / ``isid`` / ``missing`` 用。
+            ``isid`` 必填。
+        expression: ``assert`` 的断言表达式，如 "price > 0"。
+        condition: if 条件子句 —— ``count`` / ``assert`` / ``duplicates`` 用。
+        in_range: 观测范围（同上）。
+        options: ``duplicates`` 的子命令（``report`` 默认 / ``list`` /
+            ``examples`` / ``tag(newvar)`` / ``drop``），或其他官方选项。
+
+    Returns:
+        检查结果；``assert`` 不成立时以错误结果返回。
+    """
+    if check not in _VERIFY_CHECKS:
+        return _make_error_result(
+            f"错误: check 只能是 {sorted(_VERIFY_CHECKS)}（收到 {check!r}）"
+        )
+    if err := _validate_varlist(varlist, "varlist"):
+        return _result_or_error(err)
+    for value, label in ((expression, "expression"), (condition, "condition"),
+                         (in_range, "in_range"), (options, "options")):
+        if err := _validate_no_injection(value, label):
+            return _result_or_error(err)
+
+    if check == "count":
+        return _run_stata_command("count" + _filter_clause(condition, in_range))
+
+    if check == "assert":
+        if not expression.strip():
+            return _make_error_result('错误: check="assert" 必须提供 expression')
+        cmd = f"assert {expression.strip()}" + _filter_clause(condition, in_range)
+        if options.strip():
+            cmd += f", {options.strip()}"
+        return _run_stata_command(cmd)
+
+    if check == "duplicates":
+        # duplicates 的第一个词是子命令而非选项，故从 options 取，缺省 report。
+        sub = options.strip() or "report"
+        cmd = f"duplicates {sub}"
+        if varlist.strip():
+            cmd += f" {varlist.strip()}"
+        cmd += _filter_clause(condition, in_range)
+        return _run_stata_command(cmd)
+
+    if check == "isid":
+        if not varlist.strip():
+            return _make_error_result(
+                '错误: check="isid" 必须提供 varlist（要检验唯一性的变量）'
+            )
+        cmd = f"isid {varlist.strip()}"
+        if options.strip():
+            cmd += f", {options.strip()}"
+        return _run_stata_command(cmd)
+
+    cmd = "misstable summarize"
+    if varlist.strip():
+        cmd += f" {varlist.strip()}"
+    cmd += _filter_clause(condition, in_range)
+    if options.strip():
+        cmd += f", {options.strip()}"
+    return _run_stata_command(cmd)
+
+
+# merge 的匹配基数（[D] merge）。m:m 官方明确不推荐，但仍是合法形式。
+_MERGE_KINDS = ("1:1", "m:1", "1:m", "m:m")
+
+
+def _split_using_paths(using: str) -> tuple[list[str], str | None]:
+    """把空格分隔的多个路径逐个校验并规范化。
+
+    每个路径都要过 ``_validate_path`` —— append 可以一次接多个文件，
+    只校验第一个等于给后面的留了口子。
+
+    Returns:
+        (规范化路径列表, 错误文本)；成功时错误为 None。
+    """
+    paths = [p for p in using.split() if p]
+    if not paths:
+        return [], "错误: 请提供至少一个 .dta 文件路径"
+    out = []
+    for p in paths:
+        if err := _validate_path(p):
+            return [], err
+        out.append(_normalize_path(p))
+    return out, None
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_merge(
+    kind: str,
+    keyvars: str,
+    using: str,
+    keepusing: str = "",
+    condition: str = "",
+    in_range: str = "",
+    options: str = "",
+) -> str | ToolResult:
+    """横向合并数据集（``merge``）。
+
+    官方语法：``merge 1:1|m:1|1:m|m:m varlist using filename [, options]``。
+    合并结果记在 ``_merge`` 变量里（1=仅主数据、2=仅使用数据、3=两边都有），
+    合并后用 ``stata_tabulate("_merge")`` 检查匹配情况。
+
+    Args:
+        kind: 匹配基数 —— "1:1" / "m:1" / "1:m" / "m:m"（官方不推荐 m:m）。
+        keyvars: 匹配键变量（空格分隔）；按观测号合并时传 "_n"。
+        using: 被合并的 .dta 文件路径。
+        keepusing: 只从使用数据中带入这些变量（留空 = 全部）。
+        condition: if 条件子句（可选）。
+        in_range: 观测范围（可选）。
+        options: 官方选项，如 "nogenerate"、"keep(match)"、"assert(match)"、
+            "update replace"、"force"、"noreport"。
+
+    Returns:
+        合并结果的匹配汇总表。
+    """
+    if kind not in _MERGE_KINDS:
+        return _make_error_result(
+            f"错误: kind 只能是 {list(_MERGE_KINDS)}（收到 {kind!r}）"
+        )
+    if not keyvars.strip():
+        return _make_error_result('错误: 请提供匹配键变量（按观测号合并传 "_n"）')
+    if err := _validate_varlist(keyvars, "keyvars"):
+        return _result_or_error(err)
+    if err := _validate_varlist(keepusing, "keepusing"):
+        return _result_or_error(err)
+    for value, label in ((condition, "condition"), (in_range, "in_range"),
+                         (options, "options")):
+        if err := _validate_no_injection(value, label):
+            return _result_or_error(err)
+    paths, err = _split_using_paths(using)
+    if err:
+        return _result_or_error(err)
+    if len(paths) != 1:
+        return _make_error_result("错误: merge 一次只能接一个 using 文件")
+
+    cmd = f'merge {kind} {keyvars.strip()} using "{paths[0]}"'
+    cmd += _filter_clause(condition, in_range)
+    opts = " ".join(
+        p for p in (
+            f"keepusing({keepusing.strip()})" if keepusing.strip() else "",
+            options.strip(),
+        ) if p
+    )
+    if opts:
+        cmd += f", {opts}"
+    return _run_stata_command(cmd, timeout=120, require_file=using.split()[0])
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_append(using: str, options: str = "") -> str | ToolResult:
+    """纵向追加数据集（``append``）。
+
+    官方语法：``append using filename [filename …] [, options]`` —— 可一次
+    接多个文件。变量按名字对齐，缺的补缺失值。
+
+    Args:
+        using: 一个或多个 .dta 文件路径（空格分隔）。
+        options: 官方选项，如 "generate(src)"（标记来源）、"keep(varlist)"、
+            "nolabel"、"nonotes"、"force"（允许字符/数值类型不一致）。
+
+    Returns:
+        追加确认信息。
+    """
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    paths, err = _split_using_paths(using)
+    if err:
+        return _result_or_error(err)
+
+    cmd = "append using " + " ".join(f'"{p}"' for p in paths)
+    if options.strip():
+        cmd += f", {options.strip()}"
+    return _run_stata_command(cmd, timeout=120, require_file=using.split()[0])
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_reshape(
+    direction: str, stub: str, i: str, j: str = "", options: str = ""
+) -> str | ToolResult:
+    """长宽表互转（``reshape``）。
+
+    官方语法：``reshape long|wide stub, i(i) j(j)``。
+    面板分析（``xtreg`` 等）要求**长表**：每个个体-时点一行。
+
+    ``long``：宽转长，把 ``inc1980 inc1981`` 合成 ``inc`` 加一列 ``year``。
+    ``wide``：长转宽，反向操作。
+
+    Args:
+        direction: "long" 或 "wide"。
+        stub: 变量名前缀，如 "inc"（对应 inc1980、inc1981 …）。可给多个。
+        i: 个体标识变量（转换前后都唯一标识一行/一组）。
+        j: 区分列的变量 —— long 方向是**新建**的，wide 方向是**已存在**的。
+        options: 官方选项，如 "string"（j 是字符串）、"atwl(_)"。
+
+    Returns:
+        转换前后的形态汇总。
+    """
+    if direction not in ("long", "wide"):
+        return _make_error_result(
+            f'错误: direction 只能是 "long" 或 "wide"（收到 {direction!r}）'
+        )
+    if not stub.strip():
+        return _make_error_result('错误: 请提供变量名前缀 stub，如 "inc"')
+    if not i.strip():
+        return _make_error_result("错误: 请提供个体标识变量 i")
+    if err := _validate_varlist(stub, "stub"):
+        return _result_or_error(err)
+    if err := _validate_varlist(i, "i"):
+        return _result_or_error(err)
+    if err := _validate_varlist(j, "j"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+
+    cmd = f"reshape {direction} {stub.strip()}, i({i.strip()})"
+    if j.strip():
+        cmd += f" j({j.strip()})"
+    if options.strip():
+        cmd += f" {options.strip()}"
+    return _run_stata_command(cmd, timeout=120)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_collapse(
+    clist: str,
+    by: str = "",
+    condition: str = "",
+    in_range: str = "",
+    options: str = "",
+) -> str | ToolResult:
+    """按组聚合，把数据集**就地替换**为汇总结果（``collapse``）。
+
+    官方语法：``collapse clist [if] [in] [weight] [, by(varlist) options]``。
+    **原始数据会被替换** —— 需要保留请先 ``stata_save_dataset`` 或用
+    ``stata_run("preserve")`` / ``restore``。
+
+    Args:
+        clist: 聚合表达式，如 ``"(mean) price (sd) mpg"``、
+            ``"(sum) sales (max) peak=price"``（可给目标变量名）。
+            统计量：mean（默认）/ median / sd / sum / count / min / max /
+            first / last / p1–p99 等。
+        by: 分组变量（空格分隔），留空 = 整体聚合成一行。
+        condition: if 条件子句（可选）。
+        in_range: 观测范围（可选）。
+        options: 官方选项，如 "cw"（成列删除缺失）、"fast"（不 preserve）。
+
+    Returns:
+        聚合确认信息。
+    """
+    if not clist.strip():
+        return _make_error_result(
+            '错误: 请提供聚合表达式 clist，如 "(mean) price (sd) mpg"'
+        )
+    if err := _validate_varlist(by, "by"):
+        return _result_or_error(err)
+    for value, label in ((clist, "clist"), (condition, "condition"),
+                         (in_range, "in_range"), (options, "options")):
+        if err := _validate_no_injection(value, label):
+            return _result_or_error(err)
+
+    cmd = f"collapse {clist.strip()}"
+    cmd += _filter_clause(condition, in_range)
+    opts = " ".join(
+        p for p in (f"by({by.strip()})" if by.strip() else "", options.strip()) if p
+    )
+    if opts:
+        cmd += f", {opts}"
+    return _run_stata_command(cmd, timeout=120)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_return_list(kind: str = "r") -> str | ToolResult:
+    """一次列出全部返回值（``return`` / ``ereturn`` / ``creturn list``）。
+
+    比 ``stata_display("r(mean)")`` 逐个取高效得多 —— Agent 通常先看有哪些值
+    再决定取哪个。
+
+    Args:
+        kind: ``r``（默认，``r()``：summarize/tabulate 等一般命令的返回值）、
+            ``e``（``e()``：估计命令的结果，如 e(N)、e(r2)、e(b)）、
+            ``c``（``c()``：系统常量与设置，如 c(pwd)、c(N)、c(scheme)）。
+
+    Returns:
+        返回值清单（名称 = 值）。
+    """
+    prefix = {"r": "return", "e": "ereturn", "c": "creturn"}.get(kind)
+    if not prefix:
+        return _make_error_result(
+            f'错误: kind 只能是 "r" / "e" / "c"（收到 {kind!r}）'
+        )
+    return _run_stata_command(f"{prefix} list")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def stata_estat(subcommand: str, options: str = "") -> str | ToolResult:
+    """运行后估计诊断（``estat``）。
+
+    **前提**：先运行过一个估计命令（可用 ``stata_status`` 确认「当前活跃」）。
+    可用子命令随模型而变，用 ``stata_help("<估计命令> postestimation")`` 查全。
+
+    常用：``vif``（方差膨胀因子）、``hettest``（Breusch–Pagan 异方差）、
+    ``ovtest``（Ramsey RESET 遗漏变量）、``ic``（AIC/BIC）、``summarize``
+    （估计样本的描述统计）、``firststage``（IV 第一阶段）、``imtest``。
+
+    Args:
+        subcommand: estat 子命令名，如 "vif"、"hettest"。
+        options: 该子命令的官方选项，如 "rhs iid"、"all"。
+
+    Returns:
+        诊断结果表。
+    """
+    if not subcommand.strip():
+        return _make_error_result('错误: 请提供 estat 子命令，如 "vif"、"hettest"')
+    if err := _validate_identifier(subcommand, "subcommand", required=True):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    cmd = f"estat {subcommand.strip()}"
+    if options.strip():
+        cmd += f", {options.strip()}"
+    return _run_stata_command(cmd)
+
+
+# estimates 的子命令。store/restore/save/use/drop 需要名字；dir/clear/table/stats
+# 不需要（table/stats 的名字可选，留空即用当前活跃估计）。
+_ESTIMATES_ACTIONS = frozenset(
+    {"store", "restore", "table", "stats", "dir", "drop", "clear", "describe", "replay"}
+)
+_ESTIMATES_NEED_NAME = frozenset({"store", "restore", "drop"})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def stata_estimates(
+    action: str = "dir", name: str = "", options: str = ""
+) -> str | ToolResult:
+    """管理已存储的估计结果（``estimates``）。
+
+    典型用法：跑完多个模型后逐个 ``store``，再用 ``table`` 并排比较。
+    当前已存了哪些可用 ``stata_status`` 或 ``action="dir"`` 查看。
+
+    Args:
+        action: ``store`` / ``restore`` / ``drop``（均需 name）、
+            ``table`` / ``stats`` / ``describe`` / ``replay``（name 可选）、
+            ``dir`` / ``clear``（无需 name）。
+        name: 估计结果名；``table`` / ``stats`` 可给多个（空格分隔）。
+        options: 官方选项，如 "star stats(N r2)"（table）、"aic bic"（stats）。
+
+    Returns:
+        操作确认或比较表。
+    """
+    if action not in _ESTIMATES_ACTIONS:
+        return _make_error_result(
+            f"错误: action 只能是 {sorted(_ESTIMATES_ACTIONS)}（收到 {action!r}）"
+        )
+    if err := _validate_varlist(name, "name"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    if action in _ESTIMATES_NEED_NAME and not name.strip():
+        return _make_error_result(f'错误: action="{action}" 必须提供 name')
+
+    cmd = f"estimates {action}"
+    if name.strip():
+        cmd += f" {name.strip()}"
+    if options.strip():
+        cmd += f", {options.strip()}"
+    return _run_stata_command(cmd)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_use_example(
+    name: str = "", source: str = "sysuse", clear: bool = True, action: str = "load"
+) -> str | ToolResult:
+    """加载 Stata 官方示例数据集（``sysuse`` / ``webuse``）。
+
+    ``sysuse`` 用随 Stata 分发的本地数据集（auto、census、nlsw88 …，无需联网）；
+    ``webuse`` 从 Stata Press 取（nlswork、lbw、grunfeld …，**需联网**）。
+    验证分析流程或复现手册示例时最常用。
+
+    Args:
+        name: 数据集名，不含 .dta（如 "auto"、"nlswork"）。
+        source: ``sysuse``（默认，本地）或 ``webuse``（联网）。
+        clear: 加载前清空内存数据（默认 True）。
+        action: ``load``（默认）或 ``list`` —— 列出本地可用示例
+            （``sysuse dir``；webuse 没有对应子命令）。
+
+    Returns:
+        加载确认与数据集概览。
+    """
+    if source not in ("sysuse", "webuse"):
+        return _make_error_result(
+            f'错误: source 只能是 "sysuse" 或 "webuse"（收到 {source!r}）'
+        )
+    if action not in ("load", "list"):
+        return _make_error_result(
+            f'错误: action 只能是 "load" 或 "list"（收到 {action!r}）'
+        )
+    if action == "list":
+        # webuse 没有 dir 子命令，列表一律走本地 sysuse dir。
+        return _run_stata_command("sysuse dir")
+    if not name.strip():
+        return _make_error_result('错误: 请提供数据集名，如 name="auto"')
+    if err := _validate_identifier(name, "name", required=True):
+        return _result_or_error(err)
+
+    cmd = f"{source} {name.strip()}"
+    if clear:
+        cmd += ", clear"
+    # webuse 要联网取数，给足超时。
+    return _run_stata_command(cmd, timeout=120 if source == "webuse" else 60)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def stata_xtset(
+    panelvar: str = "",
+    timevar: str = "",
+    action: str = "set",
+    options: str = "",
+) -> str | ToolResult:
+    """声明面板 / 时间序列结构（``xtset`` / ``tsset``）。
+
+    这是 ``stata_xtreg`` 与全部 ``xt*`` / ``ts*`` 命令的**前提**：未声明时它们
+    报 r(459) "panel variable not set"。当前设定也可用 ``stata_status`` 查看。
+
+    按给出的变量自动选命令：给 ``panelvar`` 走 ``xtset``（面板），只给
+    ``timevar`` 走 ``tsset``（纯时序）。
+
+    Args:
+        panelvar: 面板（个体）标识变量，如 "idcode"、"firm_id"。
+        timevar: 时间变量，如 "year"、"date"。面板数据可省略（只声明个体维度）。
+        action: ``set``（默认，声明）/ ``show``（查询当前设定）/ ``clear``（清除）。
+        options: 官方选项，如 "delta(1)"、"format(%ty)"、"yearly"、"daily"。
+
+    Returns:
+        设定确认（含 Panel/Time variable 与 Delta），或当前设定。
+    """
+    if action not in ("set", "show", "clear"):
+        return _make_error_result(
+            f'错误: action 只能是 "set" / "show" / "clear"（收到 {action!r}）'
+        )
+    if action == "show":
+        # 裸 xtset 是查询，但未设定时报 r(459)；capture noisily 既不中断
+        # 命令链，又保留 "panel variable not set" 这句有用的诊断。
+        # 实测 xtset 对纯时序数据也照报 "Time variable: …"，无需再发 tsset。
+        return _run_stata_command("capture noisily xtset")
+    if action == "clear":
+        return _run_stata_command("xtset, clear")
+
+    if err := _validate_identifier(panelvar, "panelvar"):
+        return _result_or_error(err)
+    if err := _validate_identifier(timevar, "timevar"):
+        return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
+    if not panelvar.strip() and not timevar.strip():
+        return _make_error_result(
+            "错误: 至少要给出 panelvar 或 timevar。\n"
+            '  · 面板数据 → panelvar="个体变量"（可再加 timevar="时间变量"）\n'
+            '  · 纯时序   → timevar="时间变量"'
+        )
+
+    if panelvar.strip():
+        cmd = f"xtset {panelvar.strip()}"
+        if timevar.strip():
+            cmd += f" {timevar.strip()}"
+    else:
+        cmd = f"tsset {timevar.strip()}"
+    if options.strip():
+        cmd += f", {options.strip()}"
+    return _run_stata_command(cmd)
+
+
+# 扩展名 → 官方 import 子命令（依据 [D] import 的方法表）。
+# .dta 不在此列 —— 它走 `use`，不属于 import 命令族。
+_IMPORT_FORMAT_BY_EXT = {
+    ".xlsx": "excel", ".xls": "excel",
+    ".csv": "delimited", ".tsv": "delimited", ".txt": "delimited", ".dat": "delimited",
+    ".sas7bdat": "sas",
+    ".sav": "spss", ".zsav": "spss",
+    ".dbf": "dbase",
+    ".parquet": "parquet",
+}
+_IMPORT_FORMATS = frozenset(_IMPORT_FORMAT_BY_EXT.values())
+# 各选项的适用格式（实测：传给不适用的格式一律 r(198)）。
+_IMPORT_EXCEL_ONLY = frozenset({"excel"})
+_IMPORT_DELIMITED_ONLY = frozenset({"delimited"})
+# case() 除 parquet 外各格式都有。
+_IMPORT_CASE_FORMATS = frozenset({"excel", "delimited", "sas", "spss", "dbase"})
+# [if] [in] 只有 sas / spss 有（`import sas [namelist] [if] [in] using file`）。
+_IMPORT_FILTER_FORMATS = frozenset({"sas", "spss"})
+# varlist 位置的**语义随格式而变**，不能统一映射：
+#   sas/spss 的 namelist 与 parquet 的 columnlist 是「只导入这些列」（筛选）；
+#   excel/delimited 的 extvarlist 却是「给导入的列命名」（重命名）。
+# 把重命名当筛选用会静默导入错的数据，故只对筛选语义的三种格式放行。
+_IMPORT_SELECT_FORMATS = frozenset({"sas", "spss", "parquet"})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def stata_import(
+    filepath: str,
+    format: str = "auto",
+    clear: bool = True,
+    sheet: str = "",
+    cellrange: str = "",
+    firstrow: bool = False,
+    delimiter: str = "",
+    varnames: str = "",
+    encoding: str = "",
+    case: str = "",
+    varlist: str = "",
+    condition: str = "",
+    in_range: str = "",
+    options: str = "",
+) -> str | ToolResult:
+    """导入非 .dta 格式的数据文件（与 stata_export_* 对称）。
+
+    覆盖官方 ``import`` 命令族：excel / delimited / sas / spss / dbase / parquet。
+    ``.dta`` 请用 ``stata_use_dataset``（它属于 ``use``，不是 import）。
+
+    **不适用于目标格式的选项会被丢弃并说明** —— 实测传错会 r(198)：
+    ``firstrow`` / ``sheet`` / ``cellrange`` 仅 excel；``delimiter`` /
+    ``varnames`` / ``encoding`` 仅 delimited；``[namelist] [if] [in]`` 仅 sas。
+
+    Args:
+        filepath: 数据文件路径。
+        format: 留空/``"auto"`` 时按扩展名推断；也可显式指定
+            excel / delimited / sas / spss / dbase / parquet。
+        clear: 导入前清空内存中的数据（默认 True）。
+        sheet: Excel 工作表名。**仅 excel**。
+        cellrange: Excel 单元格范围，如 "A1:C10"。**仅 excel**。
+        firstrow: 用首行作变量名。**仅 excel**（delimited 用 varnames）。
+        delimiter: 分隔符 —— 单字符或关键字 ``"tab"``。**仅 delimited**。
+        varnames: 变量名所在行号，或 ``"nonames"``。**仅 delimited**。
+        encoding: 文件编码，如 "utf-8"、"gbk"。**仅 delimited**。
+        case: 变量名大小写 —— preserve / lower / upper。excel 与 delimited 均支持。
+        varlist: 只导入这些变量。**仅 sas**。
+        condition: if 条件子句。**仅 sas**。
+        in_range: 观测范围。**仅 sas**。
+        options: 其余官方选项的自由文本逃生舱。
+
+    Returns:
+        导入确认信息（含变量与观测数概览）。
+    """
+    if err := _validate_path(filepath):
+        return _result_or_error(err)
+    if err := _validate_varlist(varlist, "varlist"):
+        return _result_or_error(err)
+    for value, label in (
+        (condition, "condition"), (in_range, "in_range"), (options, "options"),
+        (sheet, "sheet"), (cellrange, "cellrange"), (varnames, "varnames"),
+        (encoding, "encoding"),
+    ):
+        if err := _validate_no_injection(value, label):
+            return _result_or_error(err)
+    if case and case not in ("preserve", "lower", "upper"):
+        return _make_error_result(
+            f'错误: case 只能是 "preserve" / "lower" / "upper"（收到 {case!r}）'
+        )
+
+    ext = os.path.splitext(filepath)[1].lower()
+    if format in ("", "auto"):
+        if ext == ".dta":
+            return _make_error_result(
+                "错误: .dta 不属于 import 命令族，请改用 "
+                'stata_use_dataset("路径")（底层是 `use`）。'
+            )
+        fmt = _IMPORT_FORMAT_BY_EXT.get(ext)
+        if not fmt:
+            return _make_error_result(
+                f"错误: 无法从扩展名 {ext or '(无)'} 推断导入格式。"
+                f"请显式指定 format={sorted(_IMPORT_FORMATS)}，"
+                "或用 stata_run 执行官方 import 命令。"
+            )
+    elif format not in _IMPORT_FORMATS:
+        return _make_error_result(
+            f"错误: format 只能是 {sorted(_IMPORT_FORMATS)}（收到 {format!r}）"
+        )
+    else:
+        fmt = format
+
+    import_path = _normalize_path(filepath)
+    opts, dropped = [], []
+
+    def _take(value, allowed, label, rendered):
+        if not value:
+            return
+        if fmt in allowed:
+            opts.append(rendered)
+        else:
+            dropped.append(label)
+
+    _take(sheet, _IMPORT_EXCEL_ONLY, "sheet", f'sheet("{sheet}")')
+    _take(cellrange, _IMPORT_EXCEL_ONLY, "cellrange", f"cellrange({cellrange.strip()})")
+    _take(firstrow, _IMPORT_EXCEL_ONLY, "firstrow", "firstrow")
+    if delimiter:
+        if fmt not in _IMPORT_DELIMITED_ONLY:
+            dropped.append("delimiter")
+        elif delimiter == "tab":
+            opts.append("delimiters(tab)")
+        elif len(delimiter) != 1 or delimiter in ('"', "`", "$", "\\"):
+            return _make_error_result(
+                f'错误: delimiter 只能是单个字符或关键字 "tab"（收到 {delimiter!r}）'
+            )
+        else:
+            opts.append(f'delimiters("{delimiter}")')
+    _take(varnames, _IMPORT_DELIMITED_ONLY, "varnames", f"varnames({varnames.strip()})")
+    _take(encoding, _IMPORT_DELIMITED_ONLY, "encoding", f'encoding("{encoding.strip()}")')
+    _take(case, _IMPORT_CASE_FORMATS, "case", f"case({case})")
+    if clear:
+        opts.append("clear")
+    if options.strip():
+        opts.append(options.strip())
+
+    cmd = f"import {fmt}"
+    extra_note = ""
+    if varlist.strip():
+        if fmt in _IMPORT_SELECT_FORMATS:
+            cmd += f" {varlist.strip()}"
+        else:
+            dropped.append("varlist")
+            # 不能顺手拼上去：excel/delimited 的同一语法位置是 extvarlist
+            # （给导入列**命名**），当筛选用会静默导入错的数据。
+            extra_note = (
+                f"\n注意：{fmt} 在该语法位置上是 extvarlist（给导入的列命名），"
+                "与 varlist 的「只导入这些列」语义不同，故未套用。"
+                "确需重命名请走 options。"
+            )
+    if fmt in _IMPORT_FILTER_FORMATS:
+        cmd += _filter_clause(condition, in_range)
+    else:
+        for value, label in ((condition, "condition"), (in_range, "in_range")):
+            if value.strip():
+                dropped.append(label)
+    cmd += f' using "{import_path}"'
+    if opts:
+        cmd += f", {' '.join(opts)}"
+
+    result = _run_stata_command(cmd, timeout=120, require_file=filepath)
+    if isinstance(result, ToolResult):
+        return result
+    if dropped:
+        result += (
+            f"\n提示：{fmt} 格式不支持 {', '.join(dropped)}"
+            "（Stata 会报 option ... not allowed），已忽略。"
+        )
+    return result + extra_note
 
 
 # =============================================================================
@@ -2947,27 +4184,64 @@ def stata_describe_package(package: str, source: str = "installed") -> str | Too
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def stata_find_package(keyword: str) -> str | ToolResult:
+def stata_find_package(
+    keyword: str,
+    scope: str = "",
+    match_any: bool = False,
+    exclude_sj: bool = False,
+    error_if_none: bool = False,
+    options: str = "",
+) -> str | ToolResult:
     """搜索可安装的 Stata 扩展包（联网）。
 
     使用 ``net search``，覆盖 SSC 与 Stata Journal 等 net 资源，返回包名、
-    来源 URL 与简介；拿到包名后可交给 ``stata_install_package`` 安装。
+    来源 URL 与简介；拿到包名后用 ``stata_describe_package`` 看详情、
+    ``stata_install_package`` 安装。
 
-    注意：本工具会访问 www.stata.com（实测约 1 秒）。若网络不可达，命令会等到
-    超时为止。仅需查看某个已知包的详情时，用 ``stata_run("ssc describe <包名>")``
-    更快；仅需搜索本机已安装的帮助文件时，用 ``stata_run("search <词>, local")``。
+    访问 www.stata.com，实测单次 0.6–2 秒。**宽泛的多词查询输出很大** ——
+    实测 "difference in differences" 默认返回 94K 字符（24 页），用
+    ``scope="toc"`` 可收窄到 12K。仅搜本机已装帮助用
+    ``stata_run("search <词>, local")``。
 
     Args:
-        keyword: 搜索关键词（如 "panel"、"binscatter"、"iv"）。
+        keyword: 搜索关键词，可多词（默认要求**全部**命中）。
+        scope: 搜索范围 —— ``toc``（只搜目录，最省输出）/ ``pkg``（只搜包）/
+            ``tocpkg``（默认，两者都搜）/ ``everywhere`` / ``filenames``。
+        match_any: 命中**任一**关键词即可（官方 ``or`` 选项）。
+            **实测显著变慢**：同一查询默认 2.3s，加 or 后 30s。
+        exclude_sj: 排除 Stata Journal 来源，只看 SSC 等（官方 ``nosj``）。
+        error_if_none: 无匹配时返回错误结果而非普通文本（官方 ``errnone``，
+            rc=111）。默认 False —— 搜不到东西本身不是错误。
+        options: 其余官方选项的自由文本逃生舱。
 
     Returns:
         匹配的包列表及简要描述。
     """
     if err := _validate_no_injection(keyword, "keyword"):
         return _result_or_error(err)
+    if err := _validate_no_injection(options, "options"):
+        return _result_or_error(err)
     if not keyword.strip():
         return _make_error_result("错误：请提供搜索关键词。")
-    return _run_stata_command(f"net search {keyword.strip()}", timeout=120)
+    if scope and scope not in ("toc", "pkg", "tocpkg", "everywhere", "filenames"):
+        return _make_error_result(
+            '错误: scope 只能是 "toc" / "pkg" / "tocpkg" / "everywhere" / '
+            f'"filenames"（收到 {scope!r}）'
+        )
+
+    opts = " ".join(
+        p for p in (
+            scope,
+            "or" if match_any else "",
+            "nosj" if exclude_sj else "",
+            "errnone" if error_if_none else "",
+            options.strip(),
+        ) if p
+    )
+    cmd = f"net search {keyword.strip()}"
+    if opts:
+        cmd += f", {opts}"
+    return _run_stata_command(cmd, timeout=120)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -3050,7 +4324,11 @@ def stata_more(page: int = 0, page_size: int = 0) -> str | ToolResult:
 def stata_status() -> str | ToolResult:
     """获取当前 Stata 会话状态。
 
-    显示当前加载的数据集、变量数量、观测数量、工作目录和内存使用情况。
+    覆盖 Agent 决策所需的全部会话前提：数据集概览、工作目录、内存、**当前与
+    其余 frame**、**面板 / 时序设定**、**已存与当前活跃的估计结果**。
+
+    这些前提此前只能靠试错发现 —— 例如 ``stata_xtreg`` 要求先 ``xtset``，
+    ``stata_margins`` / ``stata_test`` / ``stata_predict`` 要求已有估计结果。
     变量清单请用 ``stata_describe``，此处只给概览。
 
     Returns:
@@ -3060,7 +4338,31 @@ def stata_status() -> str | ToolResult:
     # **切换**到 home 目录（同 Unix shell）并把新目录打印出来，看着像查询实为修改。
     # 曾因此让本工具在 readOnlyHint=True 的情况下悄悄重置用户 set_cwd 的结果，
     # 使后续相对路径全部指向 home。
-    return _run_stata_command("describe, short\ndisplay c(pwd)\nmemory")
+    #
+    # xtset 不带参数是**查询**，未设定时报 r(459)。用 `capture noisily` 既不让
+    # 整条链中断，又保留 "panel variable not set" 那句诊断 —— 它本身就是状态。
+    # 只发 xtset 不发 tsset：实测二者对**已设定**状态的报告逐字相同（纯时序数据
+    # 下 xtset 也照报 "Time variable: …"），同时发只会把同一段输出打两遍。
+    return _run_stata_command(
+        "\n".join(
+            [
+                'display "===== 数据集 ====="',
+                "describe, short",
+                'display "===== 工作目录 ====="',
+                "display c(pwd)",
+                'display "===== Frame ====="',
+                'display "当前 frame: " c(frame)',
+                "frame dir",
+                'display "===== 面板 / 时序设定 ====="',
+                "capture noisily xtset",
+                'display "===== 估计结果 ====="',
+                'display "当前活跃: " e(cmd)',
+                "estimates dir",
+                'display "===== 内存 ====="',
+                "memory",
+            ]
+        )
+    )
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))

@@ -18,7 +18,7 @@ description: >
 结果输出全流程。
 
 **MCP Server 信息：**
-- 名称：`stata`，35 个工具覆盖数据管理/生成、探索、估计、后估计、图形导出、包管理与帮助、会话控制；`stata_run` + `stata_help` 覆盖全部内置命令
+- 名称：`stata`，49 个工具覆盖数据管理/生成、探索、估计、后估计、图形导出、包管理与帮助、会话控制；`stata_run` + `stata_help` 覆盖全部内置命令
 - Stata 版本：StataNow 19 / Stata 18+（取决于安装的版本）
 - 连接方式：本地 stdio，通过 pystata 直接调用 DLL
 - **会话持久**：Stata 在服务器启动时初始化一次，所有命令共享同一会话。
@@ -83,7 +83,16 @@ description: >
 ### 数据管理
 | 工具 | 用途 | destructiveHint |
 |------|------|:---:|
-| `stata_use_dataset` | 加载 .dta 文件 | ✓ |
+| `stata_use_dataset` | 加载 .dta 文件；可用 `varlist`/`condition`/`in_range` 只载入子集 | ✓ |
+| `stata_import` | 导入 excel/csv/sas/spss/dbase/parquet（按扩展名推断；不适用的选项会被丢弃并说明） | ✓ |
+| `stata_xtset` | 声明面板(`xtset`)/时序(`tsset`)结构 —— **`stata_xtreg` 的前提**；`action="show"` 查当前设定 | 改会话 |
+| `stata_use_example` | 加载官方示例数据：`sysuse`(本地) / `source="webuse"`(联网)；`action="list"` 列出可用 | ✓ |
+| `stata_merge` | 横向合并：`kind` = 1:1/m:1/1:m/m:m，`keyvars` 键变量，`keepusing` 限定带入变量。合并后查 `_merge` | ✓ |
+| `stata_append` | 纵向追加，`using` 可空格分隔多个文件；`options="generate(src)"` 标记来源 | ✓ |
+| `stata_reshape` | 长宽转换：`direction`=long/wide，`stub` 前缀，`i` 个体，`j` 区分列。面板分析要长表 | ✓ |
+| `stata_collapse` | 按组聚合，**就地替换数据集**；`clist="(mean) price (sd) mpg"`，`by` 分组 | ✓ |
+| `stata_frame` | 多数据集 frame：`dir`/`current`/`create`/`change`/`drop`/`copy`/`rename` | ✓ |
+| `stata_verify` | 校验：`count`/`assert`/`duplicates`/`isid`/`missing`。分析前跑一遍能挡掉多数「结果诡异」的根因 | — |
 | `stata_save_dataset` | 保存当前数据 | ✓ |
 | `stata_set_cwd` | 更改工作目录 | ✓ |
 | `stata_generate` | 创建新变量（`generate`）；支持 `condition` | 改数据集 |
@@ -107,7 +116,7 @@ description: >
 | `stata_logistic` | Logistic 回归；支持 `condition` | 二元选择 |
 | `stata_probit` | Probit 回归；可选 `marginal_effects` 附平均边际效应 | 二元选择 |
 | `stata_poisson` | Poisson 回归；可选 `irr` 报发生率比 | 计数 |
-| `stata_ttest` | t 检验；支持 `condition`、按组检验 | 均值比较 |
+| `stata_ttest` | t 检验四形式：`compare_to="5000"`（单样本）/ `byvar=`（按组）/ `compare_to="v2"`（配对，加 `options="unpaired"` 为非配对）。**二者必给其一** —— 裸 `ttest var` 是非法命令 | 均值比较 |
 | `stata_xtreg` | 面板回归；`effects` = fe/re/be/mle/pa（需先 `xtset`） | 面板 |
 | `stata_ivregress` | 工具变量 2SLS/LIML/GMM | 内生性 |
 
@@ -117,18 +126,22 @@ description: >
 | `stata_margins` | 边际效应 / 预测边际；`dydx` / `at` |
 | `stata_test` | 系数的 Wald 检验（联合显著、系数相等） |
 | `stata_predict` | 生成预测值/残差（会创建新变量，改数据集） |
+| `stata_estat` | 诊断：`vif` 多重共线 / `hettest` 异方差 / `ovtest` 遗漏变量 / `ic` AIC-BIC / `firststage` IV 第一阶段 |
+| `stata_estimates` | 存取模型：`store`/`restore`/`drop`（需 name）、`table`/`stats`（可多个 name 并排比较）、`dir`/`clear` |
 
 ### 通用执行
 | 工具 | 用途 |
 |------|------|
 | `stata_run` | **执行任意 Stata 命令**（专用工具未覆盖的操作全走这里） |
 | `stata_run_do_file` | 执行 .do 文件；执行前自动拆出 `ssc install` 单独安装（已装跳过），避免脚本卡在网络请求 |
-| `stata_graph` | 生成图形（推荐用 `export` 参数直接导出；支持 `height`） |
+| `stata_graph` | 生成图形（推荐用 `export` 参数直接导出）；选项按格式自动适配官方边界 |
+| `stata_scheme` | 主题：`action="list"` 列出全部方案 / `"get"` 查当前 / `"set"` 切换（可 `permanently`） |
 
 ### 结果导出
 | 工具 | 用途 |
 |------|------|
-| `stata_export_excel` | 导出数据集为 .xlsx；回归结果导出为 CSV |
+| `stata_export_excel` | 导出数据集为 .xlsx（`sheet_mode`/`cell`/`firstrow`/`if`-`in`）；`results=True` 时回归结果转 CSV |
+| `stata_export_delimited` | 导出为 CSV / TSV / 自定义分隔符（`delimiter`、`novarnames`、`quote` 等） |
 
 ### 包管理与帮助
 | 工具 | 用途 |
@@ -137,14 +150,29 @@ description: >
 | `stata_install_package` | 安装扩展包（ssc 或完整 from() URL）；`replace=True` 即重装最新 |
 | `stata_uninstall_package` | 卸载已装包（`ado uninstall`，纯本地，与 install 对称） |
 | `stata_describe_package` | 查包详情：默认本地 `ado describe`；`source="ssc"` 联网查（装前了解） |
-| `stata_find_package` | 联网搜索可安装的扩展包（`net search`） |
+| `stata_find_package` | 联网搜索扩展包（`net search`，0.6–2s）。宽泛多词查询输出极大（实测 94K 字符/24 页），用 `scope="toc"` 收窄约 8 倍；`match_any=True` 慢 13 倍慎用 |
 | `stata_list_packages` | 列出已安装包 |
 
 ### 会话控制
 | 工具 | 用途 |
 |------|------|
-| `stata_status` | 查看会话状态（当前数据、工作目录、内存） |
+| `stata_status` | 会话状态：数据集、工作目录、**frame**、**面板/时序设定**、**已存与活跃估计**、内存。调 `xtreg`/`margins`/`predict` 前先看这个 |
+| `stata_return_list` | 一次列出 `r()`（kind="r"）/ `e()`（"e"）/ `c()`（"c"）全部返回值 |
 | `stata_ping` | 快速检测 Stata DLL 存活 |
+
+### 参数与官方语法位置的对应
+
+所有包装具体命令的工具都对齐了官方语法 `command [varlist] [if] [in] [, options]`：
+
+| 官方位置 | 工具参数 | 说明 |
+|----------|----------|------|
+| `[if]` | `condition` | 如 `condition="foreign == 1"` |
+| `[in]` | `in_range` | 如 `in_range="1/100"`；`if` 与 `in` 叠加是「**前 n 条里**满足条件的」 |
+| `[, options]` | `options` | 长尾官方选项的自由文本出口，如 `options="noobs clean"` |
+| `[type]` | `vartype` | 仅 `generate`/`egen`：`byte`/`int`/`long`/`float`/`double`/`str#`/`strL` |
+
+不确定某选项属于哪个位置时先 `stata_help("命令名")`。少数命令没有某些位置
+（`test` 不接受 `if`/`in`，`display` 没有 `, options`），工具也就不提供对应参数。
 
 ### 工具选择指南
 
@@ -567,7 +595,19 @@ esttab m1 m2 using "results.csv", replace
    - 确实需要全量数据时利用自动分页：先看首页，需要时再 `stata_more`
 5. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装
 5a. **缺失包的处理**：某工具报「未安装 X 包」时，**不要**自己往 `stata_run` 里塞 `ssc install`（会阻塞冻结流程）。照提示单独调用一次 `stata_install_package("X", source="ssc", timeout=120)`（联网，阻塞几秒到十几秒；超时会被干净中断不卡死），装好后**重试刚才失败的那一步**、继续原任务。不要因为装个包就放弃或重排整个分析。
-6. **图形需导出**：`graph export "output/fig1.png", replace width(1200)`。`width()`/`height()` 单位随格式而变：png 等位图是**像素**，pdf/eps/svg 等矢量是**英寸（0.5–20）**——对 pdf 传 800 会报 r(198)。
+6. **图形需导出**：`stata_graph(command=..., export="output/fig1.png", width=1200)`。导出选项按格式而变（实测 Stata 19.5，已由 `stata_graph` 自动适配，不适用的会被丢弃并说明）：
+
+   | 格式 | width/height | quality | mag | fontface |
+   |------|------|:---:|:---:|:---:|
+   | png / jpg / tif / gif | 像素（8–16000） | 仅 jpg | ✗ | ✗ |
+   | svg | 像素 | ✗ | ✗ | ✓ |
+   | pdf | **英寸 0.5–20** | ✗ | ✓ | ✓ |
+   | eps / ps | **不支持** | ✗ | ✓ | ✓ |
+   | emf / wmf | **不支持** | ✗ | ✗ | ✗ |
+
+   可用性还依环境：emf/wmf 仅 Windows、gif 仅 Mac GUI、tif 不支持 console；本 MCP 是 headless console，实测只有 png/jpg/pdf/svg/eps/ps 能用。`.jpeg` 不是官方后缀。
+
+6a. **主题（scheme）**：`stata_graph` 不传 `scheme` 时**不会改动**当前主题（Stata 19 默认 `stcolor`）。要看/换主题用 `stata_scheme(action="list"/"get"/"set")`；跨会话保留传 `permanently=True`。
 7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway scatter mpg weight", export="output/scatter.png", scheme="s2color")`。它把 graph 与 export 放进同一复合块，少一次往返；导出成败以文件是否真被写入为准，失败会明确报错。分两步调用（先 `scatter` 再 `graph export`）实测也能成功，但错误定位更分散。
 8. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
 9. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
