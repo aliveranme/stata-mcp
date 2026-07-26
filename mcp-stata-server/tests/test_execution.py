@@ -449,3 +449,48 @@ def test_extract_ssc_installs_resumes_after_block_closes():
     text = "forvalues i=1/2 {\n    display `i'\n}\nssc install estout"
     _, installs = _extract_ssc_installs(text)
     assert installs == [("estout", False)]
+
+
+def test_watchdog_does_not_break_after_command_completes(exec_mocks):
+    """命令完成后不得再发 break —— 晚到的 break 会打断下一条无辜命令。
+
+    主线程在 StataSO_Execute 返回后，还要走完 RedirectOutput.__exit__ 与临时
+    文件清理（多行块时含一次磁盘 unlink）才置位事件；看门狗恰在这段间隙做二次
+    确认时仍读到「未完成」，于是 break 落在命令结束之后。它不会被任何代码消费，
+    而是被下一次 StataSO_Execute 吃掉，表现为一条无关命令的 rc=1「已中断」。
+
+    本测试让**清理**慢于 timeout：事件若在清理前置位就不会 break，置位在清理
+    之后则必然 break。
+    """
+    import time
+
+    exec_mocks["execute"].return_value = 0
+    with (
+        patch("server._cleanup_temp_block", side_effect=lambda p: time.sleep(0.3)),
+        patch("server._set_break") as set_break,
+    ):
+        _execute_single("display 42", timeout=0.05)
+
+    set_break.assert_not_called()
+
+
+def test_watchdog_timeout_note_reaches_caller(exec_mocks):
+    """真超时时，did_break 必须对主线程可见 —— 否则超时说明整条丢失。
+
+    `did_break = True` 此前写在 `_set_break()` **之后**，主线程可能先读到
+    False，于是既不清 break 残渣也不追加超时说明，调用方只看到一个通用 rc=1。
+    """
+    import time
+
+    def slow_execute(*args, **kwargs):
+        time.sleep(0.3)
+        return 1
+
+    exec_mocks["execute"].side_effect = slow_execute
+    with patch("server._set_break") as set_break:
+        _rc, out = _execute_single("sleep", timeout=0.05)
+
+    set_break.assert_called()
+    assert "已被中断" in out
+    assert "0.05s" in out
+    assert "timeout" in out

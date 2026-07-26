@@ -1435,17 +1435,28 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
 
     # 超时看门狗（防止 StataSO_Execute 挂起导致 MCP 通信阻塞）
     exec_done = threading.Event()
+    # 把「确认命令未完成」与「发出 break」合成一个原子步骤。裸的二次确认
+    # （`if exec_done.is_set(): return` 后紧跟 _set_break()）留有窗口：主线程可能
+    # 恰在两句之间完成。晚到的 break 不会被任何代码消费，而是被**下一次**
+    # StataSO_Execute 吃掉，表现为一条无关命令的 rc=1「已中断」。
+    break_guard = threading.Lock()
     did_break = False
 
     def _timeout_watchdog():
         nonlocal did_break
-        if not exec_done.wait(timeout=timeout):
-            # 二次检查，避免命令恰好在超时临界点完成时误发 break
+        if exec_done.wait(timeout=timeout):
+            return
+        with break_guard:
+            # 锁内二次确认：主线程置位 exec_done 同样要拿这把锁，于是「确认未
+            # 完成」与「发出 break」之间不可能再插入命令的完成。
             if exec_done.is_set():
                 return
             logger.warning("Stata command timed out (>%ss), issuing break: %s", timeout, cmd[:80])
-            _set_break()
+            # 先置位再 break：主线程要拿到锁才能往下走，因此不会读到
+            # 「break 已发出但 did_break 仍为 False」的中间态 —— 那会让它既不清
+            # break 残渣，也不追加超时说明，调用方只看到一个通用 rc=1。
             did_break = True
+            _set_break()
 
     watch = threading.Thread(target=_timeout_watchdog, daemon=True)
     watch.start()
@@ -1454,15 +1465,18 @@ def _execute_single(cmd: str, timeout: int = 60) -> tuple:
         with stout.RedirectOutput(stout.StataDisplay(), stout.StataError(), stecho=False):
             encoded = config.get_encode_str(exec_cmd)
             rc = config.stlib.StataSO_Execute(encoded, False)
+            # 命令一返回就立即置位，不能等到 RedirectOutput.__exit__ 与临时文件
+            # 清理之后 —— 那段（多行块时含一次磁盘 unlink）足够让看门狗超时。
+            with break_guard:
+                exec_done.set()
     except Exception as e:
         logger.exception("StataSO_Execute crashed on: %s", cmd[:80])
-        exec_done.set()
+        with break_guard:
+            exec_done.set()
         return 999, f"StataSO_Execute 崩溃: {e}"
     finally:
         # include 已把文件读完，此处删除；放 finally 保证崩溃路径也不残留。
         _cleanup_temp_block(tmp_block)
-
-    exec_done.set()
 
     # 仅在看门狗触发 break 后排空错误输出
     if did_break:

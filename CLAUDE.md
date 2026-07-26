@@ -102,7 +102,7 @@ stata-mcp/
 
 ### 超时看门狗
 
-超时看门狗在后台线程中运行，默认 60s（通过 `timeout` 参数可覆盖，钳制在 10–1800s）。因 Stata DLL 非线程安全，看门狗调用 `StataSO_SetBreak` 存在极小并发风险；目前的缓解**只有二次确认**（`exec_done.is_set()` 再判一次）。此前本节还写有「break 冷却机制」，代码中从未实现，已删除该说法。如需执行包安装、复杂回归或大循环，显式传入 `timeout=120` 或更高。
+超时看门狗在后台线程中运行，默认 60s（通过 `timeout` 参数可覆盖，钳制在 10–1800s）。因 Stata DLL 非线程安全，看门狗调用 `StataSO_SetBreak` 存在极小并发风险；缓解手段是**锁内二次确认**（`break_guard` 把「确认命令未完成」与「发出 break」合成原子步骤，主线程置位完成事件同样要拿这把锁）。此前本节还写有「break 冷却机制」，代码中从未实现，已删除该说法。如需执行包安装、复杂回归或大循环，显式传入 `timeout=120` 或更高。
 
 ### 安全护栏
 
@@ -427,6 +427,7 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | 导出图形会摧毁多面板工作流 | 复合块后无条件 `graph drop _all`。具名图正是「后续要引用它」的显式表达，于是 `graph combine g1 g2` 导出一张后，换个布局导出第二张时源图已不存在。真机确认匿名图名为 `Graph`，`graph drop Graph` 只删它、具名图存活 | 改 drop 目标为 `Graph`；真机复验四步工作流全部成功且 `graph dir` 仍列出 g1 g2 |
 | 一行 `ssc install` 让 do 文件的错误报告不可读 | 失败时走 `_result_text_inline`（换行变 `" | "`），而该函数是为并入单行**报告条目**设计的，套在可达 120K 的完整输出上会把错误上下文、表格、行号压成一条巨型单行；同一 do 文件不含 `ssc install` 时走原路径、格式完好 | 抽出保留换行的 `_result_text`，失败路径改用它；`_result_text_inline` 的 docstring 写明只可用于单行条目 |
 | 回归表导出被第三方包与 CSV 锁死 | 唯一路径 `stata_export_excel(results=True)` 依赖第三方 `estout`，名叫 excel 却只能产出 CSV；而 Stata 17+ 自带的 `etable` 无需任何第三方包，直出 .docx/.xlsx/.pdf/.tex | 新增 `stata_etable`。导出格式经真机逐一实测（9 种可用，`.csv`/`.rtf` 报 r(198)），不支持的格式在入口拦下 —— `etable` 会先打印表格再报错，只看输出会把失败当成功；成败以文件 mtime 判定（与 `stata_graph` 同思路） |
+| 晚到的 break 打断下一条无辜命令 | 看门狗的二次确认（`if exec_done.is_set(): return` 紧跟 `_set_break()`）留有窗口，而主线程要走完 `RedirectOutput.__exit__` 与临时文件清理（多行块含一次磁盘 unlink）才置位事件。break 不会被任何代码消费，而是被**下一次** `StataSO_Execute` 吃掉 → 无关命令报 rc=1 | 命令一返回就立即置位；置位与「确认+break」共用 `break_guard` 锁，合成原子步骤。另把 `did_break = True` 移到 `_set_break()` **之前** —— 此前主线程可能读到中间态，既不清 break 残渣也不追加超时说明 |
 
 ## 权限配置
 
@@ -467,5 +468,5 @@ server 选择「始终允许」）。
   - `FASTMCP_SPEC` 在 `setup.py`、`requirements.txt`、`pyproject.toml` 三处各有声明，但只有 `setup.py` 那处会被新用户实际执行；`test_fastmcp_spec_matches_requirements_and_pyproject` 守住三者一致，防止再次出现「元数据写 `>=3.2.0`、安装的却是裸 `fastmcp`」。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
 - **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**不要内嵌 `ssc install`** —— 但原因不是「损坏 DLL」。实测（Stata 19.5 MP，macOS）：`ssc install` 是网络阻塞调用，同一个包耗时在 **3–13s 间波动**，慢/不可达网络下更久；它整段独占 `_stata_lock` 阻塞整个 server。**看门狗超时对它是生效的**：装超过 timeout 时 `SetBreak` 会**干净中断**（实测 rdrobust 在 10s 下限被 break，返回超时提示，会话健康、包不残留半装状态；`timeout=1/2` 的 fre/mdesc 没被 break 只是它们在 10s 下限前就装完了）。**全程无 DLL 损坏**——多场景复现，break 后 `display`/`summarize`/`regress` 全正常。真正的问题只是：内嵌进分析步骤时，一个几秒到十几秒的网络阻塞会意外冻结整个流程。故包安装走专用的 `stata_install_package`（用户可控时机、`timeout` 参数真实兜底）。
-- **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前的缓解是串行锁、较低的默认超时（60s）与一次二次确认；本条此前还写有「连续 break 熔断」，代码中并不存在，已删除。**二次确认的窗口并未完全闭合**：主线程在 `StataSO_Execute` 返回后还要走完 `RedirectOutput.__exit__` 与临时文件清理才 `set()` 事件，看门狗恰在这段间隙做确认时仍读到未完成，于是 break 可能落在命令结束之后并被下一条命令消费（表现为无关的 rc=1）。建议长命令显式拆分或使用更大的 timeout 参数。
+- **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前的缓解是串行锁、较低的默认超时（60s）与锁内二次确认；本条此前还写有「连续 break 熔断」，代码中并不存在，已删除。**二次确认此前留有窗口**：主线程在 `StataSO_Execute` 返回后还要走完 `RedirectOutput.__exit__` 与临时文件清理才置位事件，看门狗恰在这段间隙确认时仍读到未完成，于是 break 落在命令结束之后并被下一条命令消费（表现为无关的 rc=1）。现已闭合 —— 命令一返回就立即置位，且置位与看门狗的「确认+break」共用 `break_guard`。剩余风险是 `SetBreak` 与 `StataSO_Execute` 本身的 DLL 层并发，无法在 Python 侧消除。建议长命令显式拆分或使用更大的 timeout 参数。
 - **工具错误语义**：错误结果（Stata 返回码非 0、输入验证失败、DLL 崩溃）通过 `ToolResult(is_error=True)` 告知 MCP 客户端。成功工具结果仍以普通字符串返回。若使用 `mcp.list_tools` 或类似客户端，需注意区分返回类型。
