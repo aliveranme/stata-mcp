@@ -269,3 +269,65 @@ def test_command_after_end_block_is_separate():
     assert len(blocks) == 3
     assert blocks[1] == "hi"
     assert blocks[2] == "summarize price"
+
+
+# --- end 块的开启行带 /// ------------------------------------------------------
+# 与「块内出现 ///」互为镜像。has_cont 分支直接 continue，绕过了唯一设置
+# in_end_block 的那行，于是 `program`/`input` 一词落在被合并的上一行时整个块
+# 判定失效，首行被单独送执行 → Stata 进入定义模式挂死会话。
+
+
+def test_program_opening_line_with_continuation_stays_one_block():
+    blocks = _parse_command_blocks(
+        "program define mymean ///\n    , rclass\n    summarize price\nend"
+    )
+    assert len(blocks) == 1
+    assert "program define mymean , rclass" in blocks[0]
+    assert blocks[0].rstrip().endswith("end")
+
+
+def test_input_opening_line_with_continuation_stays_one_block():
+    blocks = _parse_command_blocks('input str30 a ///\n    int c\n"x" 1\nend')
+    assert len(blocks) == 1
+    assert "input str30 a int c" in blocks[0]
+
+
+def test_command_after_continuation_opened_block_is_separate():
+    blocks = _parse_command_blocks(
+        "program define hi ///\n    , rclass\n    display 1\nend\nhi"
+    )
+    assert len(blocks) == 2
+    assert blocks[1] == "hi"
+
+
+# --- Stata 复合双引号 `" ... "' -----------------------------------------------
+# 开启是反引号+双引号，结束是双引号+单引号。曾把开启符写成 "'（那其实是结束符），
+# 导致普通字符串里一出现 "' 就翻转状态 —— `title("'90s")` 这类以撇号开头的
+# 字符串会让行尾的 /// 被当成字符串内容，续行失效。
+
+
+def test_apostrophe_leading_string_does_not_break_continuation():
+    blocks = _parse_command_blocks(
+        'twoway scatter y x, title("\'90s") ///\n  name(g1)'
+    )
+    assert len(blocks) == 1, "撇号开头的字符串不应让 /// 失效"
+    assert "name(g1)" in blocks[0]
+
+
+def test_compound_quote_opener_is_backtick_quote():
+    blocks = _parse_command_blocks('display `"hello "world" end"\'')
+    assert len(blocks) == 1
+    assert 'hello "world" end' in blocks[0]
+
+
+def test_compound_quote_protects_comment_and_brace():
+    """复合引号内的 // 与 { 不应被当作注释或块开始。"""
+    assert _parse_command_blocks('display `"http://x.com"\'') == ['display `"http://x.com"\'']
+    assert len(_parse_command_blocks('display `"a{b"\'')) == 1
+
+
+def test_apostrophe_string_with_trailing_comment():
+    blocks = _parse_command_blocks('gen d = "\'90s" if year<2000 // 注释')
+    assert len(blocks) == 1
+    assert "'90s" in blocks[0]
+    assert "注释" not in blocks[0]

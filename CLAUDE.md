@@ -85,7 +85,7 @@ stata-mcp/
 - 结构化参数的校验强度**不一致，且必须如此**：`condition` / `options` 只拒绝换行、回车、空字节、分号（要留出表达式与宏展开的空间）；`varlist` 另外拒绝 `!`、`|`、`&`、反引号、`$`、`/`、`,` 和独立的 `using`。
 - **`varlist` 的额外三条不是洁癖，是路径沙箱的一部分**：varlist 会被拼进 `export excel <varlist> using "<已校验路径>"`。实测 `varlist='mpg using /evil/out.xlsx, replace //'` 可构造出 `export excel mpg using /evil/out.xlsx, replace // using "<安全路径>"` —— `//` 把经 `_validate_path` 校验的路径整段注释掉，数据落到攻击者指定位置。`/`、`,`、`using` 在合法 varlist 里都没有用途，直接拒绝。
 - `condition` 不需要这层限制：它总是拼在命令中部（`summarize price if <condition>`），而 `!` 只有出现在**行首**才 shell out；实测 `condition='price > 0 | !touch /tmp/x'` 会被 Stata 当变量名解析失败（r(111)），不会执行命令。
-- 路径参数会拒绝空字节、双引号、分号、UNC 路径（默认）及越界的相对路径 `..`。`use_dataset`/`run_do_file` 的相对路径在锁内用 Stata cwd 解析并经沙箱权威校验（见「路径安全校验」）。安装源仅允许 `ssc` 或字符受限的 `https://` URL（禁止 `)`、`(`、空白、引号、`;`、`` ` ``、`$`，防止提前闭合 `from()`）。`export excel` 的 `sheet` 名用双引号包裹并拒绝 `"`、`)`、换行、分号。
+- 路径参数会拒绝空字节、双引号、分号、UNC 路径（默认）及越界的相对路径 `..`。`use_dataset`/`run_do_file` 的相对路径在锁内用 Stata cwd 解析并经沙箱权威校验（见「路径安全校验」）。安装源仅允许 `ssc` 或字符受限的 `https://` URL（禁止 `)`、`(`、空白、引号、`;`、`` ` ``、`$`，防止提前闭合 `from()`）。`export excel` 的 `sheet` 名用双引号包裹并拒绝 `"`、换行、回车、空字节、分号；`)` 是**故意允许**的（`sheet("Q1 (2024)")` 是常见写法，值在引号内对 Stata 安全）。`scheme` 用正向白名单（字母、数字、下划线、连字符）—— 黑名单曾漏掉 `,`，而 `set scheme` 支持逗号后的选项。
 
 ### Ping 缓存与失效
 
@@ -313,6 +313,10 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | `setup.py` 在 macOS/Linux 完全不可用 | edition 检测只查 Windows 的 `{edition}-64.dll`，macOS 候选路径还指向 app bundle 内部 | `_edition_artifacts` 按平台给出特征文件；候选路径改为含 `utilities/pystata` 的安装根目录 |
 | 重跑 `setup.py` 抹掉其他 MCP 配置 | `generate_mcp_json` 无条件整文件覆盖 | 改为读取后只更新 `stata` 条目，保留其他 server 与自定义 env |
 | 未闭合的 `{` / `program` 挂死会话 | 解析器把残缺块原样发出（旧注释称「让 Stata 报语法错」，实测它不报错而是等待输入） | 解析出口抛 `UnbalancedBlockError`；`_precheck_command` 在入口拦下并给可操作提示 |
+| `program define … ///` 挂死会话 | `_opens_end_block` 判定的是当前扫描行，而开启行带 `///` 时 `program` 一词落在被合并的上一行；`has_cont` 分支的 `continue` 又绕过了唯一设置 `in_end_block` 的语句 | 改为判定 `buffer[-1]`（续行合并后的完整命令）。与「块内出现 `///`」互为镜像 |
+| `title("'90s")` 让 `///` 失效 | 复合引号定界符写反：把 `"'`（Stata 的**结束**符）当成开启符，于是普通字符串里一出现 `"'` 就翻转状态 | 开启符改为 `` `" ``、结束符改为 `"'`，与 Stata 语法一致 |
+| 空 `depvar` 静默算错 | `_validate_identifier` 对空值一律放行，`regress("", "weight")` 拼出 `regress  weight`，Stata 把 weight 当因变量跑出**另一个回归**并返回成功 | 加 `required=True`，必填参数拒绝空值 |
+| `scheme` 可注入 `set scheme` 的选项 | 黑名单漏掉 `,`，而 `set scheme` 支持 `, permanently` | 改用正向白名单 `_SCHEME_NAME_RE` |
 
 ## 权限配置
 

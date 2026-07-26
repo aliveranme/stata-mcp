@@ -188,6 +188,8 @@ STATA_RC_MESSAGES = {
 # 输入安全：允许的 Stata 标识符（变量/包名）字符集合
 # Stata 变量名最大 32 字符，必须以字母或下划线开头，后续可为字母/数字/下划线
 _STATA_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
+# 图形方案名：字母、数字、下划线、连字符，可数字开头（538、s1color-asterisk）
+_SCHEME_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # 允许的包来源：ssc 或 HTTPS URL。
 # 主机段允许 :port（企业内网镜像常用），主机段后只允许 URL 安全字符
 # （不含 ) ( 空白 引号 ; ` $），防止 source 提前闭合 from() 注入额外参数。
@@ -417,9 +419,21 @@ def _validate_no_injection(value: str, label: str = "参数") -> str | None:
     return None
 
 
-def _validate_identifier(value: str, label: str = "变量名") -> str | None:
-    """校验单个 Stata 标识符格式。"""
+def _validate_identifier(value: str, label: str = "变量名", required: bool = False) -> str | None:
+    """校验单个 Stata 标识符格式。
+
+    Args:
+        value: 待校验的标识符。
+        label: 出错信息里的参数名。
+        required: 该参数是否必填。空值对可选参数（如 ``byvar``）是合法的
+            「不使用」，但对必填参数会静默产生错误结果 —— 实测
+            ``stata_regress(depvar="", indepvars="weight")`` 拼出
+            ``regress  weight``，Stata 把 weight 当因变量跑出一个**完全不同的
+            回归**并返回成功。这种静默算错比报错危险得多。
+    """
     if not value or not value.strip():
+        if required:
+            return f"错误: {label} 不能为空"
         return None
     value = value.strip()
     if _contains_injection_chars(value):
@@ -495,16 +509,19 @@ def _validate_scheme_name(scheme: str) -> str | None:
     """校验 Stata 图形方案名（scheme）。
 
     Stata scheme 名允许字母、数字、下划线、连字符，可数字开头（如 538、
-    s2color、s1color-asterisk、economist）。仅拒绝可能注入命令的字符：
-    换行、回车、空字节、分号、引号、空格、$、反引号、括号等。
+    s2color、s1color-asterisk、economist）。
+
+    改用**正向白名单**而非黑名单：scheme 被拼进 ``set scheme {scheme}``，
+    而 ``set scheme`` 支持逗号后的选项（``, permanently``）。黑名单原先漏了
+    ``,``，`s2color,permanently` 这类值能穿过校验并改变命令语义 —— 白名单
+    从根上排除了「又漏了某个字符」这类问题，也与本函数文档所述的字符集一致。
+
     返回错误文本或 None。
     """
     if not scheme or not scheme.strip():
         return "错误: scheme 为空"
-    # scheme 经 set scheme {scheme} 插入，拒绝会破坏命令或注入的字符
-    forbidden = ('"', "\n", "\r", "\x00", ";", " ", "$", "`", "(", ")", "!", "|", "&")
-    if any(ch in scheme for ch in forbidden):
-        return "错误: scheme 包含非法字符"
+    if not _SCHEME_NAME_RE.match(scheme.strip()):
+        return "错误: scheme 只允许字母、数字、下划线和连字符"
     return None
 
 
@@ -715,21 +732,30 @@ def _parse_command_blocks(cmd: str) -> list[str]:
             if in_string:
                 content.append(ch)
                 if in_compound_string:
-                    if ch == "'" and nxt == '"':
+                    # 复合字符串以 "' 结束（双引号 + 单引号）
+                    if ch == '"' and nxt == "'":
+                        content.append(nxt)
                         in_compound_string = False
                         in_string = False
+                        i += 2
+                        continue
                 else:
                     if ch == '"':
                         in_string = False
                 i += 1
                 continue
 
-            # 复合字符串 '" ... "'
-            if ch == '"' and nxt == "'":
+            # 复合字符串 `" ... "' —— 开启是**反引号 + 双引号**。
+            # 曾把开启符写成 "'（那其实是 Stata 的**结束**符），于是普通字符串里
+            # 一出现 "' 就翻转状态。实测 `title("'90s")` 这类以撇号开头的字符串
+            # （年代、千位记号、所有格）会让行尾的 /// 被当成字符串内容，续行失效，
+            # 一条命令被劈成两条各自报错。
+            if ch == "`" and nxt == '"':
                 in_string = True
                 in_compound_string = True
                 content.append(ch)
-                i += 1
+                content.append(nxt)
+                i += 2
                 continue
 
             # 普通字符串
@@ -833,21 +859,23 @@ def _parse_command_blocks(cmd: str) -> list[str]:
                 sep = " " if cont_space_before else ""
                 buffer[-1] = last.rstrip() + sep + content.lstrip()
             in_continuation = False
-            # 若续行被空行（或仅注释行）结束，直接尝试发出当前 block。
-            # 必须同时确认不在 end 配对块内 —— 否则 `program define ... ///` 这类
-            # 写法会在续行结束处把块劈开，`end` 落到下一个块，配对失效后
-            # Stata 进入定义模式挂死会话。
-            if brace_depth == 0 and not in_block_comment and not in_end_block:
-                _flush_block(buffer, blocks)
-                continue
         else:
             buffer.append(content)
 
         # end 配对块（program / input / mata）：与 { } 同理必须整体执行，
         # 否则首行会让 Stata 进入等待输入状态而挂死。
-        if not in_end_block and brace_depth == 0 and _opens_end_block(content):
+        #
+        # 判定对象必须是 buffer[-1]（续行合并后的完整命令），不能是当前扫描行
+        # content。块的**开启行**若带 ///，如
+        #     program define mymean ///
+        #         , rclass
+        # 则 content 只是 ", rclass"，`program` 一词落在上一行；用 content 判定
+        # 会漏掉整个块，首行被单独送执行 → Stata 进入定义模式挂死会话。
+        # （上一轮修好的是「块**内部**出现 ///」，与此互为镜像。）
+        probe = buffer[-1] if buffer else ""
+        if not in_end_block and brace_depth == 0 and _opens_end_block(probe):
             in_end_block = True
-        elif in_end_block and content.strip() == "end":
+        elif in_end_block and probe.strip().endswith("end") and content.strip() == "end":
             in_end_block = False
 
         if brace_depth == 0 and not in_block_comment and not in_end_block:
@@ -1794,7 +1822,7 @@ def stata_tabulate(
     """
     if not varname.strip():
         return _make_error_result("错误：请提供至少一个变量名。")
-    if err := _validate_identifier(varname, "varname"):
+    if err := _validate_identifier(varname, "varname", required=True):
         return _result_or_error(err)
     if err := _validate_identifier(byvar, "byvar"):
         return _result_or_error(err)
@@ -1853,7 +1881,7 @@ def stata_regress(
     Returns:
         回归分析结果表。
     """
-    if err := _validate_identifier(depvar, "depvar"):
+    if err := _validate_identifier(depvar, "depvar", required=True):
         return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
         return _result_or_error(err)
@@ -1883,13 +1911,15 @@ def stata_logistic(
     Args:
         depvar: 二元因变量名（取值 0/1）。
         indepvars: 自变量列表（空格分隔）。
-        options: 额外选项，如 "or"（优势比）、"robust"。
+        options: 额外选项，如 "robust"、"vce(cluster id)"、"level(90)"。
+            ``logistic`` 默认即报告优势比（``or`` 可写但冗余）；想看原始系数
+            用 ``coef``，或改用 ``stata_run("logit ...")``。
         condition: if 条件子句（可选）。例："age >= 18"。
 
     Returns:
         Logistic 回归结果表。
     """
-    if err := _validate_identifier(depvar, "depvar"):
+    if err := _validate_identifier(depvar, "depvar", required=True):
         return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
         return _result_or_error(err)
@@ -1927,7 +1957,7 @@ def stata_ttest(
     Returns:
         t 检验结果表。
     """
-    if err := _validate_identifier(varname, "varname"):
+    if err := _validate_identifier(varname, "varname", required=True):
         return _result_or_error(err)
     if err := _validate_identifier(byvar, "byvar"):
         return _result_or_error(err)

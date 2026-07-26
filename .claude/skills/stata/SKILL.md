@@ -303,15 +303,27 @@ estimates store re
 hausman fe re                                  // Hausman 检验
 ```
 
-### 7：工具变量（ivreg2）
+### 7：工具变量（IV / 2SLS）
+
+**官方 `ivregress`（无需安装，诊断走 estat）**
+```stata
+use "data.dta", clear
+ivregress 2sls y (x = z1 z2), robust
+estat firststage                               // 第一阶段 F（弱工具变量检验）
+estat overid                                   // 过度识别检验（Sargan/Hansen）
+```
+
+**SSC 的 `ivreg2`（诊断直接打印在主输出里，不要用 estat）**
 ```stata
 // 需要 ivreg2：先用 stata_install_package("ivreg2", source="ssc") 安装，
 // 切勿把 ssc install 写进 stata_run —— headless 下网络请求会卡死 DLL
 use "data.dta", clear
-ivreg2 y (x = z1 z2), robust first            // 2SLS + 第一阶段
-estat firststage                               // 第一阶段 F 统计量
-estat overid                                   // 过度识别检验
+ivreg2 y (x = z1 z2), robust first            // first 选项输出第一阶段
+// Hansen J / Kleibergen-Paap 统计量已在上面的输出里，无需再调 estat
+// ivreg2 不注册 estat handler，`estat firststage` 会报 r(321)
 ```
+
+两套不要混用：`estat firststage` / `estat overid` 只对 `ivregress` 有效。
 
 ### 8：DID（双重差分）
 ```stata

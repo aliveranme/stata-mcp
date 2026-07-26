@@ -5,7 +5,9 @@ import pytest
 from server import (
     _has_dangerous_command_prefix,
     _validate_command_blocks,
+    _validate_identifier,
     _validate_no_injection,
+    _validate_scheme_name,
     _validate_varlist,
 )
 
@@ -239,3 +241,37 @@ def test_validate_command_blocks_still_catches_plain_payloads():
     """不带注释的直白载荷当然也要拦。"""
     for cmd in ("!whoami", "shell ls", "python: import os", "mata:", "winexec notepad.exe"):
         assert _validate_command_blocks(cmd) is not None
+
+
+# --- 必填参数不能为空 ----------------------------------------------------------
+# 空的 depvar 会静默产生**错误结果**而非报错：实测
+# stata_regress(depvar="", indepvars="weight") 拼出 `regress  weight`，
+# Stata 把 weight 当因变量跑出一个完全不同的回归并返回成功。
+
+
+def test_validate_identifier_rejects_empty_when_required():
+    assert _validate_identifier("", "depvar", required=True) is not None
+    assert _validate_identifier("   ", "depvar", required=True) is not None
+
+
+def test_validate_identifier_allows_empty_when_optional():
+    """可选参数（如 ttest 的 byvar）的空值是合法的「不使用」。"""
+    assert _validate_identifier("", "byvar") is None
+    assert _validate_identifier("   ", "byvar") is None
+
+
+# --- scheme 改用正向白名单 ------------------------------------------------------
+# 黑名单曾漏掉 `,`，而 `set scheme` 支持逗号后的选项（, permanently）。
+
+
+@pytest.mark.parametrize("scheme", ["s2color", "538", "s1color-asterisk", "economist", "s2mono"])
+def test_validate_scheme_allows_real_scheme_names(scheme):
+    assert _validate_scheme_name(scheme) is None
+
+
+@pytest.mark.parametrize(
+    "scheme",
+    ["s2color,permanently", "s2color, foo", "a b", "x;y", "$x", "`x`", "s(1)", ""],
+)
+def test_validate_scheme_rejects_anything_outside_whitelist(scheme):
+    assert _validate_scheme_name(scheme) is not None

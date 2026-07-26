@@ -837,3 +837,31 @@ def test_graph_accepts_zero_size_as_unset():
     with patch("server._run_stata_command") as mock_run:
         stata_graph("histogram price", width=0, height=0)
         mock_run.assert_called_once()
+
+
+def test_regress_rejects_empty_depvar():
+    """空 depvar 会拼出 `regress  weight`，Stata 把 weight 当因变量静默算错。"""
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_regress("", "weight")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_logistic_rejects_empty_depvar():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_logistic("", "weight")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_ttest_rejects_empty_varname():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_ttest("")
+    assert getattr(result, "is_error", False)
+    mock_run.assert_not_called()
+
+
+def test_ttest_still_allows_empty_optional_byvar():
+    with patch("server._run_stata_command") as mock_run:
+        stata_ttest("price")
+        assert mock_run.call_args[0][0] == "ttest price"
