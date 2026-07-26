@@ -83,3 +83,19 @@ class TestValidatePathWithSandbox:
         result = _validate_path("../etc/passwd")
         assert result is not None
         assert "相对路径不能超出" in result
+
+
+def test_sandbox_boundary_is_documented_on_stata_run():
+    """沙箱不覆盖 stata_run —— 这个边界必须写在 Agent 读得到的地方。
+
+    实测：配置 STATA_ALLOWED_ROOTS 后 stata_use_dataset 拒绝越界路径，而
+    stata_run('use "越界路径"') 照常执行。做部分路径提取只会给出虚假安全感
+    （路径可出现在 use/save/import/export/log using/merge…using/include 等
+    任意位置，还能由宏运行时拼出），故如实记录而非半吊子拦截。
+    """
+    from server import stata_run
+
+    doc = (stata_run.fn if hasattr(stata_run, "fn") else stata_run).__doc__ or ""
+    assert "STATA_ALLOWED_ROOTS" in doc, "必须点名是哪个变量"
+    assert "不覆盖本工具" in doc
+    assert "虚假的" in doc, "要说明为何不做部分校验"

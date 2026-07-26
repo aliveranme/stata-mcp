@@ -6,7 +6,7 @@
 
 ```
 stata-mcp/
-├── mcp-stata-server/server.py       # MCP 执行层：35 个工具，通过 pystata 调用 Stata DLL
+├── mcp-stata-server/server.py       # MCP 执行层：49 个工具，通过 pystata 调用 Stata DLL
 ├── .claude/skills/stata/SKILL.md    # 知识层：Stata 语法、模板、陷阱、Agent 协作规范
 ├── setup.py                         # 安装层：检测 Stata、创建 venv、生成 .mcp.json
 ├── .gitignore                       # 忽略 .mcp.json(生成) .venv dta/log/smcl
@@ -24,7 +24,7 @@ stata-mcp/
 | `cd mcp-stata-server && source .venv/Scripts/activate && python server.py` | 调试模式启动 |
 | `uv pip install fastmcp && uv pip freeze > requirements.txt` | 添加新依赖 |
 
-## MCP 工具（35 个）
+## MCP 工具（49 个）
 
 > **能力边界不在工具数上**：`stata_run` 执行任意命令、`stata_help` 查任意命令的
 > 官方语法，二者即「全量内置命令支持」。专用工具（回归/面板/IV/生成变量等）是
@@ -33,17 +33,37 @@ stata-mcp/
 | 类别 | 工具 | 只读? | 说明 |
 |------|------|:-----:|------|
 | 核心执行 | `stata_run`, `stata_run_do_file` | — | 通用命令执行；`run_do_file` 执行前自动拆出 `ssc install` 单独安装（已装跳过） |
-| 数据管理 | `stata_use_dataset`, `stata_save_dataset`, `stata_set_cwd` | — | 读写 .dta、cd |
-| 数据生成 | `stata_generate`, `stata_egen` | — | 创建变量（改数据集，非只读） |
+| 数据管理 | `stata_use_dataset`, `stata_import`, `stata_save_dataset`, `stata_set_cwd` | — | 读写 .dta、cd；`stata_import` 覆盖官方 import 族（excel/delimited/sas/spss/dbase/parquet，按扩展名推断） |
+| 面板/时序 | `stata_xtset` | — | 声明/查询/清除 `xtset`(面板) 与 `tsset`(纯时序) —— 是 `stata_xtreg` 的前提 |
+| 示例数据 | `stata_use_example` | — | `sysuse`(本地) / `webuse`(联网) 加载官方示例数据集；`action="list"` 列出可用 |
+| 数据生成 | `stata_generate`, `stata_egen` | — | 创建变量（改数据集，非只读）；支持官方 `[type]` 存储类型与 `[if] [in]` |
+| 数据重构 | `stata_merge`, `stata_append`, `stata_reshape`, `stata_collapse`, `stata_frame` | — | 横向合并(1:1/m:1/1:m/m:m)、纵向追加(可多文件)、长宽转换、按组聚合、多数据集 frame |
+| 数据校验 | `stata_verify` | ✓ | `count`/`assert`/`duplicates`/`isid`/`misstable` 五合一 |
 | 数据探索 | `stata_describe`, `stata_codebook`, `stata_summarize`, `stata_list`, `stata_tabulate`, `stata_correlate`, `stata_display` | ✓ | 只读探索 |
 | 估计 | `stata_regress`, `stata_logistic`, `stata_probit`, `stata_poisson`, `stata_ttest`, `stata_xtreg`, `stata_ivregress` | ✓ | OLS/Logit/Probit/Poisson/t 检验/面板/IV |
-| 后估计 | `stata_margins`, `stata_test`, `stata_predict` | ✓* | 边际效应/Wald 检验/预测（`stata_predict` 会创建变量，非只读） |
-| 图形 | `stata_graph` | — | 执行图形命令并可选导出文件（destructiveHint=True，可覆盖文件） |
-| 导出 | `stata_export_excel` | — | 数据集导出为 .xlsx（replace 默认 False）；回归结果自动转为 CSV |
+| 后估计 | `stata_margins`, `stata_test`, `stata_predict`, `stata_estat`, `stata_estimates` | ✓* | 边际效应/Wald 检验/预测（`stata_predict` 会创建变量，非只读）；`stata_estat` 诊断(vif/hettest/ovtest/ic)；`stata_estimates` 存取与并排比较模型 |
+| 返回值 | `stata_return_list` | ✓ | 一次列出 `r()`/`e()`/`c()` 全部返回值，不必逐个 `display` |
+| 图形 | `stata_graph`, `stata_scheme` | — / ✓* | 绘图并可选导出（选项按格式自动适配，见下）；`stata_scheme` 列出/查询/设置主题（`action="set"` 非只读） |
+| 导出 | `stata_export_excel`, `stata_export_delimited` | — | 数据集导出为 .xlsx 或 CSV/TSV/自定义分隔符（replace 默认 False）；`export_excel(results=True)` 走 esttab 转 CSV |
 | 包管理与帮助 | `stata_install_package`, `stata_uninstall_package`, `stata_describe_package`, `stata_find_package`, `stata_list_packages`, `stata_help` | — / ✓ | 装/卸（`ado uninstall` 本地安全）/查详情（本地 `ado describe` 或联网 `ssc describe`）/`net search` 找包/`ado dir` 列包/`stata_help` 查任意命令帮助 |
 | 翻页 | `stata_more` | ✓ | 大输出分页浏览（缓存 120K chars） |
-| 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + 内存 |
+| 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + **frame** + **面板/时序设定** + **已存/活跃估计** + 内存 —— 覆盖 Agent 调 `xtreg`/`margins`/`predict` 前需确认的全部前提 |
 | 心跳 | `stata_ping` | ✓ | 快速检测 Stata DLL 存活状态 |
+
+### 语法位置对齐（`[varlist] [if] [in] [, options]`）
+
+包装具体命令的工具都应能表达该命令官方语法的每个位置，否则便利层反而成了能力
+天花板。统一约定：
+
+- **`condition` → `if`、`in_range` → `in`**，由 `_filter_clause` 拼接，顺序固定为
+  `if` 在前、`in` 在后、二者都在**逗号之前**（拼到逗号后 Stata 当未知选项报 r(198)）。
+- **`options`** 是长尾官方选项的自由文本逃生舱（经 `_validate_no_injection`）；
+  高频选项才给独立参数。
+- **例外（并非缺口）**：`test` 作用于已存储的估计结果，官方就不接受 `if`/`in`；
+  `display` 没有 `, options` 子句（格式指令写在表达式里）；`describe`/`save` 同样
+  没有 `if`/`in`。
+- **`stata_list` 的 `in` 由它自己的 `in_range`/`n` 逻辑负责**，只把 `condition`
+  交给 `_filter_clause` —— 否则会拼出 `list … in 1/20 in 1/20`。
 
 ## 环境变量
 
@@ -51,7 +71,7 @@ stata-mcp/
 |------|------|------|
 | `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。优先级：环境变量 > `setup.py` 自动检测 > 该默认值；手动安装时可在 `.mcp.json` 中覆盖。 |
 | `STATA_EDITION` | `mp` | 版本 (mp/se/be) |
-| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。**未设置时不限制任何绝对路径**，`_is_path_allowed` 直接放行 —— 文档中「沙箱校验」的说法只在配置了此变量时才有实际约束力。 |
+| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。**两重限制**：① 未设置时不限制任何绝对路径，`_is_path_allowed` 直接放行；② 即便设置了，也**只校验工具的路径参数**，不覆盖 `stata_run` / `stata_run_do_file` 里的自由文本命令 —— 实测配置白名单后 `stata_use_dataset("越界路径")` 被拒、`stata_run('use "越界路径"')` 照常执行。需要强制隔离请在操作系统层面限制本进程可访问的目录。 |
 | `STATA_ALLOW_UNC` | 未设置（=拒绝） | 设为 `1` 时允许 UNC 网络路径（`\\server\share`），默认拒绝。 |
 
 ## 关键设计决策
@@ -175,14 +195,38 @@ do 文件常在开头写 `ssc install foo`，内联执行会让整段脚本卡�
 
 - **第三方绘图包（binscatter 等）在 headless 环境会挂起**：Stata DLL 试图创建 GUI 窗口失败。服务器启动时自动执行 `set graphics off`，且在 `stata_graph` 导出复合块开头也注入 `set graphics off`。建议优先使用原生命令（`twoway scatter`、`histogram`）。
 - **图形导出用 `stata_graph(..., export="path.png")`**：它把 graph 与 export 放进同一复合块原子执行。实测图形对象其实**能**跨 `StataSO_Execute` 调用存活（分两步也可成功），但复合块少一次往返且语义更清晰，仍是推荐写法。
-- **`graph export` 的 `width()`/`height()` 单位随格式而变**：位图（png/tif/gif）是像素，矢量（pdf/eps/ps/svg/emf/wmf）是英寸且必须落在 0.5–20。对 .pdf 传 `width(800)` 会 r(198)。`stata_graph` 已按扩展名自动处理：矢量格式下超范围的取值被忽略并在返回信息中说明。
+- **`graph export` 的选项按格式而变，且不是「位图 vs 矢量」二分**。依据 [G-2] `graph export` 的 `override_options` 表与各 [G-3] `*_options` 条目，并在 Stata 19.5 MP（macOS）逐条实测：
+
+  | 格式 | 本环境可用 | `width()`/`height()` | `quality()` | `mag()` | `fontface()` |
+  |------|:---:|------|:---:|:---:|:---:|
+  | `.png` / `.tif` / `.gif` | 仅 png | **像素**，8–16000 | ✗ | ✗ | ✗ |
+  | `.jpg` | ✓ | **像素** | ✓ 1–100 | ✗ | ✗ |
+  | `.svg` | ✓ | **像素**（官方写作 `width(#px\|#in)`，无后缀默认 px；输出头为 `width="800px"`） | ✗ | ✗ | ✓ |
+  | `.pdf` | ✓ | **英寸**，0.5–20 | ✗ | ✓ 1–10000 | ✓ |
+  | `.eps` / `.ps` | ✓ | **不支持**（ps 另有 `pagewidth()`，仅 `pagesize(custom)` 时相关） | ✗ | ✓ | ✓ |
+  | `.emf` / `.wmf` | ✗ | **无任何 override_options**（`help emf_options` 不存在；wmf 更不在官方格式表里） | ✗ | ✗ | ✗ |
+
+  不适用的选项传给 Stata 会 r(198)，而复合块的 `capture` 会吞掉错误 → 导出无声失败。故 `stata_graph` 一律**先丢弃再提示**；取值是否越界则交给 Stata 报错（诊断更精确，也不随版本漂移）。
+  **格式可用性是运行时属性**：`emf`/`wmf` 仅 Windows、`gif` 仅 Mac GUI、`tif` 不支持 console 模式。本 MCP 以 headless console 运行，实测 `gif`/`emf`/`wmf` 报 `Stata for Unix cannot create ... files`、`tif` 报 `translator Graph2tif not found`。
+  `.jpeg` **不是**官方后缀（实测 `translator Graph2jpeg not found`），不要当 `.jpg` 处理。
+
+- **`stata_graph` 默认不改动 scheme**：`scheme` 留空时不发 `set scheme`。Stata 19 的默认是 `stcolor`（实测 `c(scheme)`），旧实现硬编码 `s2color` 且每次调用都设置、结束不还原，等于静默覆盖用户主题。查询/切换主题用 `stata_scheme`。
+
+- **`export excel` 的 `sheet(..., replace)` 与文件级 `replace` 互斥**：实测 `invalid syntax; option sheet(...,replace) may not be combined with option replace`。语义上也确实冲突 —— 文件级 replace 重建整个文件，不可能有工作表冲突。`stata_export_excel` 在入口拦下并说明二选一。
+
+- **导出命令对「筛选后 0 条观测」报的是 Excel 行数上限**：`observations must be between 1 and 1048576` —— 下界是 1，所以 0 条也越界，诊断与真实原因毫无关系。实测 `if foreign == 1 in 1/10`（auto 前 10 条全为国产车）即可复现。`_empty_selection_hint` 在传了筛选条件时把它翻译成「筛选未匹配到任何观测」，并点明 `if` + `in` 是「**前 n 条观测里**满足条件的」。
+
+- **`export delimited` 的 `delimiter(tab)` 与 `delimiter("tab")` 等价**：实测都产出制表符，Stata 不会把 `"tab"` 当三字符分隔符。代码取官方文档的无引号写法。
 - **图形导出成功与否以文件为准，不看返回码**：复合块用 `capture noisily` 包裹，rc 恒为 0。`stata_graph` 比对导出前后的 `st_mtime_ns` 判定是否真的写入 —— 只看「文件存在」会把「replace=False 且文件已存在」误判为成功。
 - **图形导出后自动清理**：`graph drop _all` 在复合块外单独执行，确保即使图形命令出错，缓存的图形对象也会被清理。
 - **`stata_graph` 与 `stata_export_excel` 的 `replace` 默认值为 `False`**（而非 True），写文件前需确保目标文件不存在或显式传入 `replace=True`。安全性优先于向后兼容。
 - **`stata_export_excel(results=True)`** 自动输出为 CSV（不支持 xlsx），若 `estout` 未安装则返回明确错误并提示手动安装（**不自动安装**——见下）。
 - **`///` 续行符**：现在已被修复支持（版本 v2+），可在 `stata_run` 中使用 `///` 连接多行长命令。
 - **`{ }` 复合块与循环可以直接写**：`forvalues` / `foreach` / `if` 块、`program define ... end` 都能在 `stata_run` 里正常使用（走临时 do 文件，见上）。注意 Stata 语法要求 `{` 之后换行 —— `forvalues i=1/3 { display \`i' }` 写在一行会 r(198)，这是 Stata 本身的规则。
-- **`stata_find_package` 走 `net search`（联网，约 1 秒）**：`ssc` 没有 `search` 子命令。只搜本机帮助用 `stata_run("search <词>, local")`。
+- **`stata_find_package` 走 `net search`（联网，实测 0.6–2 秒）**：`ssc` 没有 `search` 子命令。只搜本机帮助用 `stata_run("search <词>, local")`。
+  - **宽泛的多词查询输出极大**：实测 `net search difference in differences` 默认返回 94,236 字符（24 页）。用 `scope="toc"` 收窄到 12,160 字符（约 1/8），`pkg` / `nosj` 只能减到 8 万量级。
+  - **`match_any`（官方 `or`）显著变慢**：同一查询默认 2.3s，加 `or` 后 **29.9s**（13 倍）。默认的「全部关键词都要命中」既快又准。
+  - **无匹配默认不算错误**：返回 `no matches` 且 `isError=False`。需要程序化判定时传 `error_if_none=True`（官方 `errnone`，转 rc=111）。
 - **包生命周期已补全 `uninstall` / `describe`**：`stata_uninstall_package` 是 `ado uninstall`（**纯本地**删文件，实测约 20ms，无网络阻塞，与 `install` 对称）。`stata_describe_package` 默认 `source="installed"` 走本地 `ado describe`（约 12ms）；`source="ssc"` 走联网 `ssc describe`（约 1–7s，装前查详情用）—— 网络路径与 `install` 同属**网络阻塞**操作（阻塞串行锁、看门狗对其无效，见下方 estout 条目的实测澄清），故独立成工具、用户可控时机。`update` 由 `install` 的 `replace=True` 覆盖（`ssc install pkg, replace` 即重装最新）。
 - **`winsor2` 的 `suffix(_w)` 不能和 `replace` 一起用**：选项冲突。要么 `suffix(_w)` 创建新变量，要么 `replace` 覆盖原变量。
 - **裸 `cd`（不带参数）会切换到 home，不是显示当前目录**：同 Unix shell，它切换并把新目录打印出来，看着像查询实为修改。查当前目录一律用 `display c(pwd)`。`stata_status` 曾因此在标注只读的情况下悄悄重置用户 `set_cwd` 的结果。
@@ -313,6 +357,19 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | `if { }`、`program define` 挂死会话 | 首行使 Stata 进入等待输入状态，`SetBreak` 无法恢复 | 同上；`_parse_command_blocks` 另按 `end` 收集 `program`/`input`/`mata` 块 |
 | 图形导出失败被报成功 | 复合块的 `capture noisily` 吞掉错误使 rc 恒为 0 | 改以导出前后 `st_mtime_ns` 判定文件是否真被写入 |
 | `.pdf` 导出 r(198) | 矢量格式 `width()` 以英寸计（0.5–20），却收到像素值 800 | `_graph_size_options` 按扩展名区分单位，超范围则忽略并提示 |
+| `.svg` 导出静默产出废图 | 上一条的「矢量=英寸」二分是错的：svg 的 `width()` 实为**像素**。合法的 `width=800` 被当越界丢弃；而 `width=6` 被当英寸放行，产出 6 像素的图且文件写出成功、工具回报「已导出 5.1 KB」 | 拆成三类：`_INCH_GRAPH_EXTS`（pdf/emf/wmf）、`_NO_SIZE_GRAPH_EXTS`（eps/ps）、其余（位图与 svg）按像素原样下传 |
+| `.eps`/`.ps` 传合法英寸值仍导出失败 | 二者**完全不支持** `width()`/`height()`，传任何值都是 `option width() not allowed` → r(198)，错误又被复合块的 `capture` 吞掉 | 归入 `_NO_SIZE_GRAPH_EXTS`，丢弃全部尺寸选项并提示 |
+| E2E 测试失败被自动化当成通过 | `pystata.config.init()` 之后进程退出码恒为 0（实测连 `sys.exit(3)` 都返回 0，Stata 运行时接管了解释器退出路径） | `tests_e2e/conftest.py` 在 `pytest_unconfigure` 里用 `os._exit(exitstatus)` 收口（挂 `pytest_sessionfinish` 会截掉终端汇总） |
+| 每次绘图都静默改掉用户主题 | `stata_graph` 的 `scheme` 硬编码默认 `"s2color"`，每次调用都 `set scheme s2color` 且不还原；而 Stata 19 的默认是 `stcolor` | 默认改为空 = 不发 `set scheme`；主题的查询与切换独立成 `stata_scheme` |
+| `.emf`/`.wmf` 被当英寸格式 | 「矢量=英寸」的二分把二者也算了进去，实际 `help emf_options` **不存在**、wmf 更不在官方格式表里，都不接受任何 override option | 移入 `_NO_SIZE_GRAPH_EXTS`；`_INCH_GRAPH_EXTS` 收窄为仅 `.pdf` |
+| `quality`/`mag`/`fontface` 无法使用 | 官方 `*_options` 里的这些选项从未暴露，用户只能绕道 `stata_run` 手写 `graph export` | 新增 `_graph_format_options`，按格式适用性下传或丢弃并提示 |
+| `export excel` 撞工作表时无路可走 | 官方解法是 `sheet(..., modify\|replace)`，而工具只暴露了 sheet 名；且该选项与文件级 `replace` 互斥（r(198)） | 新增 `sheet_mode` 参数并在入口拦下互斥组合、说明二选一 |
+| 筛选落空被报成「Excel 行数超限」 | `export excel`/`export delimited` 对 0 条观测报 `observations must be between 1 and 1048576`，与真实原因无关 | `_empty_selection_hint` 在传了筛选条件时翻译成「未匹配到任何观测」，并点明 `if`+`in` 的语义 |
+| 官方 8 种导出方法只覆盖 1 种 | 仅有 `export excel`，最高频的 `export delimited`（CSV/TSV）完全缺失 | 新增 `stata_export_delimited`，含 `delimiter`/`novarnames`/`nolabel`/`datafmt`/`quote` 与 `if`-`in` |
+| `stata_ttest` 一直在发非法命令 | 不传 `byvar` 时拼出裸 `ttest price`，实测 **r(100) by() option required**。单元测试只比对字符串（`cmd == "ttest price, level(90)"`）照样全绿 —— 只有真机 E2E 才暴露 | 新增 `compare_to` 参数覆盖官方四种形式（单样本 `== #` / 按组 `by()` / 配对 `== v2` / 非配对 `, unpaired`）；两者都不给时在入口拦下并说明 |
+| `[in]` 观测范围在 14 个工具里无法表达 | 官方语法普遍是 `cmd … [if] [in] [, options]`，而只有 `stata_list` 有 `in_range` | 抽出 `_filter_clause(condition, in_range)` 统一拼接（`if` 在前、`in` 在后、都在逗号之前），并给 14 个工具补上参数 |
+| `describe` 的 `simple` 会丢弃 varlist | 旧实现 `simple=True` 时直接输出 `describe, simple`，用户请求两个变量却拿到**全部**变量清单；官方语法 `describe [varlist] [, options]` 两者本可共存 | 改为 `describe price mpg, simple` |
+| 长尾官方选项无出口 | `test`/`generate`/`egen`/`use`/`save`/`list`/`tabulate`/`summarize`/`codebook`/`describe` 都没有 `options` 逃生舱，用户只能绕道 `stata_run` | 统一补 `options` 自由文本参数（经 `_validate_no_injection`）；`generate`/`egen` 另补官方的 `[type]` 存储类型位置（白名单校验） |
 | `stata_find_package` 全不可用 | `ssc` 无 `search` 子命令 → r(198) invalid subcommand | 改用 `net search` |
 | `stata_export_excel(results=True)` 探测失效 | `capture which estout` 装与不装都返回 rc=0 | 改用裸 `which estout`（装=0，未装=111） |
 | `stata_status` 悄悄重置工作目录 | 裸 `cd` 会切到 home，却被当成查询命令使用 | 改用 `display c(pwd)` |
@@ -355,9 +412,14 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 
 - **CI 实际不运行**：`.github/workflows/test.yml` 是 GitHub Actions 格式，而本仓库的 `origin` 是自建 Gitea（`gitea.aliveranme.space`）。除非该 Gitea 启用 Actions 并注册了 runner，推送**不会触发任何检查**。这份 workflow 目前只是「若迁到 GitHub 即可用」的配置，**不能当作质量门禁**。
   - 它描述的内容：ubuntu-latest × py3.10/3.11/3.12，跑 `ruff check .` 加对仓库根 `setup.py` 的单独 lint，再跑 `pytest --cov`（ruff 规则见 `pyproject.toml` 的 `[tool.ruff]`）。
-  - 提交前请在本地手动执行：`cd mcp-stata-server && .venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check server.py tests/ && .venv/bin/python -m ruff check --config pyproject.toml ../setup.py`
+  - 提交前请在本地手动执行：`cd mcp-stata-server && .venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check server.py tests/ tests_e2e/ && .venv/bin/python -m ruff check --config pyproject.toml ../setup.py`
   - 即便迁到 GitHub，也只覆盖 Linux；本项目主要面向 Windows（`STATA_HOME` 默认即 Windows 路径），Windows 与 macOS 都无覆盖。
   - 测试用 `conftest.abs_path()` 构造平台原生绝对路径，不要硬编码 `C:/` —— POSIX 下 `os.path.isabs("C:/x")` 为假，路径会被当相对路径拼上 cwd。
+- **`tests/` 与 `tests_e2e/` 必须分开跑**：`tests/conftest.py` 在导入时就把 `pystata` / `sfi` 换成 `MagicMock`（且只在 `sys.modules` 里没有时才装桩），同一个 pytest 进程里再也换不回真 Stata。
+  - 单元测试（无需 Stata，默认 `testpaths`）：`.venv/bin/python -m pytest tests/ -q`
+  - 端到端（需真 Stata）：`STATA_HOME=/path/to/StataNow .venv/bin/python -m pytest tests_e2e/ -q`；未检测到安装时整目录自动跳过。混跑 `tests/ tests_e2e/` 时 E2E 会带明确原因跳过，不会静默对着 mock 断言。
+  - `tests_e2e/` 有 `__init__.py` 是**必需的**：否则 pytest 把该目录插进 `sys.path` 并以 `conftest` 为模块名导入，与 `tests/conftest.py` 撞名，`tests/` 里的 `from conftest import abs_path` 会解析错。
+  - E2E 只放**单元测试无法证伪**的断言（即代码对 Stata 实际行为的假设）；命令拼接与参数校验留在 `tests/`。
 - **无类型检查**：无 `mypy`、`pre-commit`。server.py 混合中英文标识符。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
 - **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**不要内嵌 `ssc install`** —— 但原因不是「损坏 DLL」。实测（Stata 19.5 MP，macOS）：`ssc install` 是网络阻塞调用，同一个包耗时在 **3–13s 间波动**，慢/不可达网络下更久；它整段独占 `_stata_lock` 阻塞整个 server。**看门狗超时对它是生效的**：装超过 timeout 时 `SetBreak` 会**干净中断**（实测 rdrobust 在 10s 下限被 break，返回超时提示，会话健康、包不残留半装状态；`timeout=1/2` 的 fre/mdesc 没被 break 只是它们在 10s 下限前就装完了）。**全程无 DLL 损坏**——多场景复现，break 后 `display`/`summarize`/`regress` 全正常。真正的问题只是：内嵌进分析步骤时，一个几秒到十几秒的网络阻塞会意外冻结整个流程。故包安装走专用的 `stata_install_package`（用户可控时机、`timeout` 参数真实兜底）。

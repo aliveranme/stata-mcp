@@ -14,10 +14,19 @@ EXPECTED_TOOLS = {
     "stata_run_do_file",
     # 数据管理
     "stata_use_dataset",
+    "stata_import",
     "stata_save_dataset",
     "stata_set_cwd",
     "stata_generate",
     "stata_egen",
+    "stata_xtset",
+    "stata_merge",
+    "stata_append",
+    "stata_reshape",
+    "stata_collapse",
+    "stata_frame",
+    "stata_verify",
+    "stata_use_example",
     # 数据探索
     "stata_describe",
     "stata_codebook",
@@ -38,9 +47,14 @@ EXPECTED_TOOLS = {
     "stata_margins",
     "stata_test",
     "stata_predict",
+    "stata_estat",
+    "stata_estimates",
+    "stata_return_list",
     # 图形与导出
     "stata_graph",
+    "stata_scheme",
     "stata_export_excel",
+    "stata_export_delimited",
     # 包管理与帮助
     "stata_install_package",
     "stata_uninstall_package",
@@ -87,15 +101,27 @@ def test_write_tools_are_not_marked_read_only():
     must_not_be_readonly = {
         "stata_run_do_file",
         "stata_use_dataset",
+        "stata_import",
         "stata_save_dataset",
         "stata_set_cwd",
         "stata_graph",
+        # action="set" 会改变会话（甚至用 permanently 写进配置），非只读
+        "stata_scheme",
         "stata_export_excel",
+        "stata_export_delimited",
         "stata_install_package",
         "stata_uninstall_package",
         # 以下会创建变量，改动内存中的数据集
         "stata_generate",
         "stata_egen",
+        "stata_xtset",
+        "stata_estimates",
+        "stata_use_example",
+        "stata_merge",
+        "stata_append",
+        "stata_reshape",
+        "stata_collapse",
+        "stata_frame",
         "stata_predict",
     }
     wrong = [
