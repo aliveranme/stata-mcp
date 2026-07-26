@@ -397,16 +397,24 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 
 ## 权限配置
 
+`.claude/settings.json` 的实际内容：
+
 ```json
 {
-  "enableAllProjectMcpServers": true,  // MCP 工具免弹窗
   "permissions": {
     "allow": [
       "WebFetch"  // 不限域名 Web 抓取
     ]
+  },
+  "enabledPlugins": {
+    "skill-creator@claude-plugins-official": true
   }
 }
 ```
+
+**MCP 工具仍会逐次弹窗**：本文件此前记有 `"enableAllProjectMcpServers": true`，
+但实际配置里没有这个键。要免弹窗需自行加上（或在 Claude Code 里对 `stata`
+server 选择「始终允许」）。
 
 ## 已知局限
 
@@ -421,6 +429,8 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
   - `tests_e2e/` 有 `__init__.py` 是**必需的**：否则 pytest 把该目录插进 `sys.path` 并以 `conftest` 为模块名导入，与 `tests/conftest.py` 撞名，`tests/` 里的 `from conftest import abs_path` 会解析错。
   - E2E 只放**单元测试无法证伪**的断言（即代码对 Stata 实际行为的假设）；命令拼接与参数校验留在 `tests/`。
 - **无类型检查**：无 `mypy`、`pre-commit`。server.py 混合中英文标识符。
+- **`setup.py` 自动检测只覆盖标准安装位置**：macOS 扫 `/Applications` 与 `~/Applications`，Windows 扫 `ProgramFiles`/`ProgramFiles(x86)`/`D:`/`E:`，Linux 扫 `/usr/local`、`/opt`。装在其他位置（实测外置卷 `/Volumes/ccc/Applications/StataNow` 即检测不到）时 `find_stata_installation()` 返回 `(None, None)` —— 需先设 `STATA_HOME` 环境变量再跑。这不是缺陷，但文档要说清，否则用户会以为「不支持我的系统」。
+- **`setup.py` 无自动化测试**：它是每个新用户第一个运行的脚本（565 行，含跨平台检测、venv 创建、`.mcp.json` 合并写入），目前只有 `ruff` lint，没有单元测试。`generate_mcp_json` 的「保留其他 server 与自定义 env」逻辑尤其值得补测 —— 它写的是用户的真实配置文件。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
 - **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**不要内嵌 `ssc install`** —— 但原因不是「损坏 DLL」。实测（Stata 19.5 MP，macOS）：`ssc install` 是网络阻塞调用，同一个包耗时在 **3–13s 间波动**，慢/不可达网络下更久；它整段独占 `_stata_lock` 阻塞整个 server。**看门狗超时对它是生效的**：装超过 timeout 时 `SetBreak` 会**干净中断**（实测 rdrobust 在 10s 下限被 break，返回超时提示，会话健康、包不残留半装状态；`timeout=1/2` 的 fre/mdesc 没被 break 只是它们在 10s 下限前就装完了）。**全程无 DLL 损坏**——多场景复现，break 后 `display`/`summarize`/`regress` 全正常。真正的问题只是：内嵌进分析步骤时，一个几秒到十几秒的网络阻塞会意外冻结整个流程。故包安装走专用的 `stata_install_package`（用户可控时机、`timeout` 参数真实兜底）。
 - **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（60s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。

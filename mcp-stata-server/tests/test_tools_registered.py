@@ -130,3 +130,90 @@ def test_write_tools_are_not_marked_read_only():
         if getattr(getattr(tools[name], "annotations", None), "readOnlyHint", False)
     ]
     assert not wrong, f"以下会产生副作用的工具被标为只读: {wrong}"
+
+
+# ============================================================================
+# 文档一致性 —— 防止文档与实现漂移
+# ============================================================================
+# 本轮仓库审查发现 5 处文档失实，全都不会让任何测试变红。代码有 491 单元 +
+# 81 E2E + 变异验证守着，文档却没有任何自动化守卫，故补上。
+
+import json  # noqa: E402
+import re  # noqa: E402
+
+_REPO_ROOT = os.path.dirname(_SERVER_DIR)
+_DOCS = (
+    os.path.join(_REPO_ROOT, "CLAUDE.md"),
+    os.path.join(_REPO_ROOT, "README.md"),
+    os.path.join(_REPO_ROOT, ".claude", "skills", "stata", "SKILL.md"),
+)
+
+
+def _doc_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _registered_tool_names():
+    server = _load_server()
+    return {t.name for t in asyncio.run(server.mcp.list_tools())}
+
+
+def test_docs_do_not_mention_nonexistent_tools():
+    """文档写了但代码里没有的工具 —— Agent 会照着调，然后失败。"""
+    real = _registered_tool_names()
+    for path in _DOCS:
+        mentioned = set(re.findall(r"`(stata_\w+)`", _doc_text(path)))
+        ghosts = sorted(mentioned - real)
+        assert not ghosts, f"{os.path.basename(path)} 提到了不存在的工具: {ghosts}"
+
+
+def test_docs_cover_every_registered_tool():
+    """代码里有但文档没提的工具 —— Agent 不知道它存在，等于没有。"""
+    real = _registered_tool_names()
+    for path in _DOCS:
+        mentioned = set(re.findall(r"`(stata_\w+)`", _doc_text(path)))
+        missing = sorted(real - mentioned)
+        assert not missing, f"{os.path.basename(path)} 未提及: {missing}"
+
+
+# 只匹配「声明服务器规模」的计数，不匹配叙述性的「给 14 个工具补上参数」。
+_COUNT_PATTERNS = (
+    r"MCP 工具（(\d+) 个）",              # 章节标题
+    r"MCP 执行层：(\d+) 个工具",           # CLAUDE.md 架构图
+    r"把 (\d+) 个工具",                   # README 正文
+    r"主程序（(\d+) 个工具）",             # README 项目结构
+    r"`stata`，(\d+) 个工具",             # SKILL.md
+    r"badge/tools-(\d+)-",               # README 徽章
+)
+
+
+def test_tool_count_in_docs_matches_reality():
+    """「49 个工具」这类计数散落在多份文档里，加工具时最容易忘记同步。
+
+    只看声明服务器规模的位置 —— 缺陷历史表里「给 14 个工具补上参数」这类
+    叙述文字不是计数声明，不该被误判。
+    """
+    n = len(_registered_tool_names())
+    for path in _DOCS:
+        text = _doc_text(path)
+        counts = {
+            int(c) for pat in _COUNT_PATTERNS for c in re.findall(pat, text)
+        }
+        wrong = sorted(c for c in counts if c != n)
+        assert not wrong, f"{os.path.basename(path)} 的工具计数 {wrong} 与实际 {n} 不符"
+
+
+def test_claude_md_permission_block_matches_settings_json():
+    """CLAUDE.md 曾声称配了 enableAllProjectMcpServers，实际文件里并没有。"""
+    settings_path = os.path.join(_REPO_ROOT, ".claude", "settings.json")
+    with open(settings_path, encoding="utf-8") as f:
+        settings = json.load(f)
+    claude_md = _doc_text(os.path.join(_REPO_ROOT, "CLAUDE.md"))
+
+    if "enableAllProjectMcpServers" not in settings:
+        # 允许在说明「没有这个键」的语境里提到它，但不能写成已配置的样子
+        assert '"enableAllProjectMcpServers": true,  //' not in claude_md, (
+            "CLAUDE.md 把 enableAllProjectMcpServers 写成已配置，"
+            "但 .claude/settings.json 里没有这个键"
+        )

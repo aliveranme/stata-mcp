@@ -76,6 +76,9 @@ cd stata-mcp
 python setup.py
 ```
 
+> 装在非标准位置（如外置卷 `/Volumes/xxx/Applications/StataNow`）时自动检测会失败 ——
+> 先 `export STATA_HOME=/你的/Stata路径` 再跑 `setup.py` 即可。
+
 `setup.py` 会：检测 Stata 安装（常见路径 + `STATA_HOME` 环境变量，跨平台）→
 创建虚拟环境并安装 `fastmcp` → 生成 `.mcp.json`（保留你已有的其他 MCP Server 配置）
 → 验证 Server 可启动。
@@ -215,9 +218,16 @@ cd mcp-stata-server
 source .venv/bin/activate          # 或 .venv/Scripts/activate (Windows)
 python server.py
 
-# 跑测试与 lint
+# 单元测试（无需 Stata）
 python -m pytest tests/ -q
-python -m ruff check server.py tests/
+
+# 端到端测试（需真实 Stata；未检测到安装时整目录跳过）
+# 必须与 tests/ 分开跑：tests/conftest.py 会把 pystata 换成 mock，同进程内换不回来
+STATA_HOME=/path/to/StataNow python -m pytest tests_e2e/ -q
+
+# lint
+python -m ruff check server.py tests/ tests_e2e/
+python -m ruff check --config pyproject.toml ../setup.py
 
 # 添加依赖
 uv pip install <package>
@@ -232,7 +242,8 @@ stata-mcp/
 ├── setup.py                        # 一键安装（跨平台检测 Stata）
 ├── mcp-stata-server/
 │   ├── server.py                   # MCP Server 主程序（49 个工具）
-│   └── tests/                      # pytest 测试套件
+│   ├── tests/                      # 单元测试（mock pystata，无需 Stata）
+│   └── tests_e2e/                  # 端到端测试（需真实 Stata）
 ├── .claude/skills/stata/SKILL.md   # Stata 编程知识 Skill
 ├── assets/readme/                  # README 视觉资产
 └── .mcp.json                       # Server 配置（setup.py 生成）
