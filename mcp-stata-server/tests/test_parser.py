@@ -198,12 +198,16 @@ def test_balanced_blocks_still_parse():
     assert len(_parse_command_blocks("program define hi\n    display 1\nend")) == 1
 
 
-def test_leading_space_star_is_not_comment():
-    # Stata *-comments must start at column 1; leading spaces keep the line as code.
-    blocks = _parse_command_blocks("  *not a comment\nsummarize mpg")
-    assert len(blocks) == 2
-    assert "*not a comment" in blocks[0]
-    assert "summarize mpg" in blocks[1]
+def test_leading_space_star_is_a_comment():
+    """缩进的 ``*`` 仍是注释 —— 本测试此前编码了相反的假设。
+
+    旧断言写着「Stata *-comments must start at column 1」，真机（Stata 19.5 MP，
+    批处理）反证：顶层的 ``   * comment`` 与循环体内的缩进注释都被正常当注释处理，
+    无输出无错误。循环体内缩进写注释是绝大多数 Stata 代码的写法，按第 1 列判定会
+    让注释里的 ``{`` / ``}`` 计入花括号深度并拒掉合法脚本。
+    """
+    blocks = _parse_command_blocks("  *a comment\nsummarize mpg")
+    assert blocks == ["summarize mpg"]
 
 
 def test_standalone_triple_slash_ends_prior_block():
@@ -284,6 +288,109 @@ def test_program_opening_line_with_continuation_stays_one_block():
     assert len(blocks) == 1
     assert "program define mymean , rclass" in blocks[0]
     assert blocks[0].rstrip().endswith("end")
+
+
+# --- end 块的开启行带通用前缀 --------------------------------------------------
+# `quietly program define …` / `capture input …` 都是合法且可用的 Stata（真机验证
+# quietly program define 定义成功、随后调用正常打印）。而 _opens_end_block 只看
+# head[0]，前缀让它一律返回 False，开启行被单独送执行 → 进入定义模式挂死会话。
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "quietly program define foo",
+        "qui program define foo",
+        "capture program define foo",
+        "capture noisily program define foo",
+        "by foreign: program define foo",
+    ],
+)
+def test_prefixed_program_block_stays_one_block(opener):
+    blocks = _parse_command_blocks(f'{opener}\n    display "x"\nend')
+    assert len(blocks) == 1
+    assert blocks[0].rstrip().endswith("end")
+
+
+def test_prefixed_input_block_stays_one_block():
+    blocks = _parse_command_blocks("quietly input x\n1\n2\nend\nlist")
+    assert blocks == ["quietly input x\n1\n2\nend", "list"]
+
+
+def test_prefixed_program_drop_still_not_a_block():
+    """前缀剥离后仍须正确识别 drop/dir/list 不进入定义模式。"""
+    blocks = _parse_command_blocks("capture program drop _all\nsummarize price")
+    assert blocks == ["capture program drop _all", "summarize price"]
+
+
+# --- 注释与续行：`///` 先拼逻辑行，再判是不是注释 --------------------------------
+# 真机 ground truth（Stata 19.5 MP，批处理日志）：
+#   ·    * 缩进注释            → 合法，无输出无错误（顶层与循环体内都成立）
+#   · `display 1 ///` + `* 2`  → 输出 **2**：续行后的 `*` 是乘号，不是注释
+#   · `* 注释 ///` + 后续行     → 后续行被并入注释，一行都不执行
+# 因此判定顺序必须是「先按 /// 拼成逻辑行，再看逻辑行是否以 * 开头」。
+
+
+def test_indented_star_comment_is_a_comment():
+    blocks = _parse_command_blocks('   * indented comment\ndisplay "x"')
+    assert blocks == ['display "x"']
+
+
+def test_indented_star_comment_braces_not_counted():
+    """缩进注释里的 { } 不得计入花括号深度，否则合法循环被拒或被切碎。"""
+    blocks = _parse_command_blocks(
+        "forvalues i=1/2 {\n    * body { brace in comment\n    display `i'\n}"
+    )
+    assert len(blocks) == 1
+    assert blocks[0].rstrip().endswith("}")
+
+    blocks = _parse_command_blocks(
+        "forvalues i=1/2 {\n    * close } here\n    display `i'\n}"
+    )
+    assert len(blocks) == 1
+
+
+def test_star_comment_with_continuation_swallows_next_line():
+    """`* 注释 ///` 在 Stata 中吞掉下一行；解析器不得反而去执行它。"""
+    assert _parse_command_blocks('* DO NOT RUN ///\ndisplay "THIS RAN"') == []
+    assert _parse_command_blocks('   * indented ///\ndisplay "THIS RAN"') == []
+
+
+def test_star_comment_continuation_chain_swallows_all():
+    blocks = _parse_command_blocks(
+        '* c ///\ndisplay "A" ///\ndisplay "B"\ndisplay "after"'
+    )
+    assert blocks == ['display "after"']
+
+
+def test_star_after_continuation_is_multiplication_not_comment():
+    """`display 1 ///` 之后的 `* 2` 是乘号（真机输出 2），不能当注释丢掉。"""
+    assert _parse_command_blocks("display 1 ///\n* 2") == ["display 1 * 2"]
+    assert _parse_command_blocks("display 1 ///\n   * 2") == ["display 1 * 2"]
+
+
+def test_block_comment_across_lines_is_a_line_join():
+    """`/*` 换行 `*/` 是官方行连接符（`///` 出现前的写法），须并入上一行。
+
+    真机对照：``regress price weight /*\\n*/ mpg foreign`` 的
+    ``e(cmdline)`` 为 ``regress price weight  mpg foreign``、``e(df_m)=3``。
+    劈成两行会变成只有一个回归元的**另一个模型**，且前半条独立执行「成功」。
+    """
+    assert _parse_command_blocks("regress price weight /*\n*/ mpg foreign") == [
+        "regress price weight  mpg foreign"
+    ]
+
+
+def test_block_comment_spanning_multiple_lines_joins_once():
+    blocks = _parse_command_blocks("regress price weight /*\n  still comment\n*/ mpg")
+    assert blocks == ["regress price weight  mpg"]
+
+
+def test_standalone_block_comment_does_not_join_separate_commands():
+    blocks = _parse_command_blocks('display 1\n/* note\n*/ display 2')
+    assert len(blocks) == 2
+    assert blocks[0] == "display 1"
+    assert blocks[1].strip() == "display 2"
 
 
 def test_input_opening_line_with_continuation_stays_one_block():

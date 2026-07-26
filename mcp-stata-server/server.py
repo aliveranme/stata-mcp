@@ -313,42 +313,162 @@ _VARLIST_FORBIDDEN_CHARS = {"\n", "\r", "\x00", ";", "!", "|", "&", "`", "$"}
 # 危险：stata_run 中可能导致主机命令执行或 Python 代码执行的显著前缀
 _DANGEROUS_COMMAND_PREFIXES = ("!", "shell", "winexec", "python:", "python(")
 
+# Stata 通用前缀命令中**不带冒号**的一类，可任意叠加（`capture noisily …`）。
+# 官方允许从最短缩写到全写，逐一列出以免正则误伤同名变量/命令。
+_BARE_PREFIX_COMMANDS = frozenset(
+    {
+        "cap", "capt", "captu", "captur", "capture",
+        "qui", "quie", "quiet", "quietl", "quietly",
+        "noi", "nois", "noisi", "noisil", "noisily",
+    }
+)
+
+# 带冒号的前缀里，冒号左侧本身就是危险关键字的情形 —— 不能当前缀剥掉，
+# 否则 `mata: _stata(…)` 会被剥成 `_stata(…)` 而逃过检查。
+_COLON_DANGEROUS_HEADS = frozenset({"mata", "python"})
+
+# 前缀叠加的扫描上限：真实 Stata 最多几层，设上限纯粹为防御畸形输入死循环。
+_MAX_PREFIX_DEPTH = 8
+
+
+def _split_top_level(text: str, sep: str) -> list[str]:
+    """按 ``sep`` 切分，跳过双引号字符串与复合字符串 `` `" … "' `` 内的分隔符。"""
+    parts: list[str] = []
+    buf: list[str] = []
+    in_string = False
+    in_compound = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if in_string:
+            buf.append(ch)
+            if in_compound:
+                if ch == '"' and nxt == "'":
+                    buf.append(nxt)
+                    in_compound = in_string = False
+                    i += 2
+                    continue
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == "`" and nxt == '"':
+            in_string = in_compound = True
+            buf.append(ch)
+            buf.append(nxt)
+            i += 2
+            continue
+        if ch == '"':
+            in_string = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == sep:
+            parts.append("".join(buf))
+            buf.clear()
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+def _strip_command_prefixes(line: str) -> str:
+    """剥掉 Stata 通用前缀，返回**真正被执行**的命令文本。
+
+    Stata 的前缀命令有两种形态，都不改变被执行命令的语义：
+
+    - 无冒号：``capture`` / ``quietly`` / ``noisily``（含全部官方缩写），可叠加
+    - 带冒号：``by g:`` / ``bysort g:`` / ``version 17:`` / ``svy:`` / ``xi:`` …
+
+    二者都能套在 ``shell`` / ``mata:`` / ``!`` 前面而效果不变，因此任何基于
+    「行首」的护栏都必须先剥再判。真机验证（Stata 19.5 MP）：
+    ``capture shell touch <f>`` 与 ``quietly mata: _stata("shell touch <f>")``
+    都真实创建了文件，而修复前的护栏对二者一律放行。
+
+    冒号形态要特别小心：``mata:`` / ``python:`` 自身就以冒号结尾，若无脑取
+    冒号右侧，恰好会把最该拦的关键字剥掉。故仅当冒号左侧的首 token 不是危险
+    关键字时才剥离。未知的冒号前缀一律按前缀处理 —— 多剥只会让护栏更严格。
+    """
+    cur = line.strip()
+    for _ in range(_MAX_PREFIX_DEPTH):
+        head = cur.split(None, 1)
+        if not head:
+            return cur
+        if head[0].lower() in _BARE_PREFIX_COMMANDS:
+            cur = head[1].strip() if len(head) > 1 else ""
+            continue
+        segments = _split_top_level(cur, ":")
+        if len(segments) < 2:
+            return cur
+        lead = segments[0].strip().lower().split()
+        if not lead or lead[0] in _COLON_DANGEROUS_HEADS:
+            return cur
+        cur = ":".join(segments[1:]).strip()
+    return cur
+
+
+def _match_dangerous_prefix(line: str) -> str | None:
+    """对单条**已归一化**的命令做行首危险前缀匹配；返回原因或 None。"""
+    lowered = line.lower()
+    for prefix in _DANGEROUS_COMMAND_PREFIXES:
+        if lowered.startswith(prefix):
+            # shell/python: 等命令后通常跟随要执行的系统/Py 代码
+            target = line[len(prefix) :].strip() or "<empty>"
+            return (
+                f"错误: 命令 '{line[:60]}' 包含危险前缀 '{prefix}'，"
+                f"可能执行主机系统/Py 代码（目标: {target[:40]}）。"
+                "如确有必要，请使用操作系统直接操作，而非通过 Stata MCP。"
+            )
+    # 检测 python 主机命令（部分 Stata 版本使用 python 子命令）
+    if lowered == "python" or lowered.startswith("python "):
+        return f"错误: 命令 '{line[:60]}' 尝试调用 Stata 内嵌 Python，已被禁止"
+    # Mata 与内嵌 Python 同属「可执行任意代码的子语言」，须同等禁止：
+    # 块内 _stata("...") 可调用任意 Stata 命令（包括 ! shell out），
+    # unlink() / fopen() 可直接读写文件，而本函数是**行首**匹配，
+    # 对 mata 块内的代码完全无效 —— 实测 `mata:` + `_stata("display 12345")`
+    # 可原样穿过本护栏并成功执行。
+    if lowered == "mata" or lowered.startswith("mata ") or lowered.startswith("mata:"):
+        return (
+            f"错误: 命令 '{line[:60]}' 尝试进入 Mata，已被禁止 —— "
+            "Mata 可经 _stata() 执行任意 Stata 命令并直接读写文件。"
+            "如确需 Mata 编程，请在 Stata 中直接操作。"
+        )
+    return None
+
 
 def _has_dangerous_command_prefix(cmd: str) -> str | None:
     """检查命令是否包含明显的 shell/python 执行入口；返回原因或 None。
 
-    该检查仅作为最后一层护栏，不能替代操作系统级沙箱。它阻止最常见的
-    '!' shell out 和 'python:' 代码注入；复杂的 Stata 宏/ado 绕行仍可能
-    绕过，因此仍需保持最小权限运行 MCP Server。
+    「行首」不等于「命令首」，本函数据此做三重归一化后再匹配：
+
+    1. **分号切分**：``#delimit ;`` 会把命令分隔符从换行改成 ``;``，此后 ``!``
+       永远不在行首。真机验证：``#delimit ;`` + ``display 3 ; !touch <f> ;``
+       真实创建了文件，而按行匹配的护栏全程放行。字符串内的 ``;`` 不切分。
+    2. **前缀剥离**：``capture`` / ``quietly`` / ``by g:`` 等通用前缀套在危险命令
+       前不改变其效果（见 ``_strip_command_prefixes``）。
+    3. **原文与剥离后各判一次**：剥离只用于发现被藏起来的危险词，原文匹配保证
+       ``mata:`` 这类自身即关键字的形态不被剥掉后漏判。
+
+    该检查仍只是最后一层护栏，不能替代操作系统级沙箱：复杂的 Stata 宏/ado
+    间接调用仍可能绕过，因此仍需以最小权限运行 MCP Server。
     """
     for raw_line in cmd.split("\n"):
         line = raw_line.strip()
         if not line or line.startswith("*") or line.startswith("//"):
             continue
-        lowered = line.lower()
-        for prefix in _DANGEROUS_COMMAND_PREFIXES:
-            if lowered.startswith(prefix):
-                # shell/python: 等命令后通常跟随要执行的系统/Py 代码
-                target = line[len(prefix) :].strip() or "<empty>"
-                return (
-                    f"错误: 命令 '{line[:60]}' 包含危险前缀 '{prefix}'，"
-                    f"可能执行主机系统/Py 代码（目标: {target[:40]}）。"
-                    "如确有必要，请使用操作系统直接操作，而非通过 Stata MCP。"
-                )
-        # 检测 python 主机命令（部分 Stata 版本使用 python 子命令）
-        if lowered == "python" or lowered.startswith("python "):
-            return f"错误: 命令 '{line[:60]}' 尝试调用 Stata 内嵌 Python，已被禁止"
-        # Mata 与内嵌 Python 同属「可执行任意代码的子语言」，须同等禁止：
-        # 块内 _stata("...") 可调用任意 Stata 命令（包括 ! shell out），
-        # unlink() / fopen() 可直接读写文件，而本函数是逐行**行首**匹配，
-        # 对 mata 块内的代码完全无效 —— 实测 `mata:` + `_stata("display 12345")`
-        # 可原样穿过本护栏并成功执行。
-        if lowered == "mata" or lowered.startswith("mata ") or lowered.startswith("mata:"):
-            return (
-                f"错误: 命令 '{line[:60]}' 尝试进入 Mata，已被禁止 —— "
-                "Mata 可经 _stata() 执行任意 Stata 命令并直接读写文件。"
-                "如确需 Mata 编程，请在 Stata 中直接操作。"
-            )
+        for raw_segment in _split_top_level(line, ";"):
+            segment = raw_segment.strip()
+            if not segment:
+                continue
+            if reason := _match_dangerous_prefix(segment):
+                return reason
+            stripped = _strip_command_prefixes(segment)
+            if stripped != segment and (reason := _match_dangerous_prefix(stripped)):
+                return reason
     return None
 
 
@@ -390,19 +510,36 @@ def _validate_command_blocks(command: str) -> str | None:
     return None
 
 
-def _precheck_command(command: str) -> str | None:
-    """自由文本命令的入口预检：危险前缀 + 块闭合性。返回错误文本或 None。
+def _has_delimit_change(command: str) -> bool:
+    """检测行首的 ``#delimit``（字符串内的同名字样不算）。"""
+    return any(
+        _split_top_level(raw_line, '"')[0].strip().lower().startswith("#delimit")
+        for raw_line in command.split("\n")
+    )
 
-    两项检查都必须在**进入执行路径之前**完成：
+
+def _precheck_command(command: str) -> str | None:
+    """自由文本命令的入口预检：危险前缀 + 分隔符变更 + 块闭合性。
+
+    三项检查都必须在**进入执行路径之前**完成：
     - 危险前缀：见 ``_validate_command_blocks``，校验解析后的执行块
+    - ``#delimit``：把命令分隔符从换行改成 ``;``，而本模块的解析器是行导向的
     - 块闭合性：未闭合的 ``{`` 或 ``end`` 送去执行会让 Stata 进入等待输入
       状态并挂死会话，看门狗的 SetBreak 也救不回
 
-    顺序有意为之：先报危险前缀。``mata:`` 这类输入同时命中两项，此时「已被禁止」
+    顺序有意为之：先报危险前缀。``mata:`` 这类输入同时命中多项，此时「已被禁止」
     比「块未闭合」更贴近用户的真实问题。
     """
     if reason := _validate_command_blocks(command):
         return reason
+    if _has_delimit_change(command):
+        return (
+            "错误: 不支持 `#delimit` —— 它把命令分隔符改成 `;`，而本工具按行解析命令。"
+            "实测这类脚本会被切成碎块（如 `regress price weight` 与续行 `mpg ;` 变成两条"
+            "独立命令，少跑一个回归元却各自「成功」）。"
+            "请改用 stata_run_do_file 执行 .do 文件（由 Stata 自行解析，原生支持 #delimit），"
+            "或把命令改写成默认的换行分隔形式。"
+        )
     try:
         _parse_command_blocks(command)
     except UnbalancedBlockError as e:
@@ -483,6 +620,55 @@ def _validate_varlist(value: str, label: str = "varlist") -> str | None:
         i += 1
     if quotes % 2 != 0:
         return f"错误: {label} 包含未闭合的双引号"
+    return None
+
+
+def _validate_filter_expr(value: str, label: str) -> str | None:
+    """校验 ``[if]`` / ``[in]`` 子句：拒绝能改写命令目标文件的记号。
+
+    这两个子句与经 ``_validate_path`` 校验的路径拼在同一条命令里，因此和
+    ``_validate_varlist`` 面临同一类攻击 —— 只是入口不同。实测
+    ``stata_import(filepath="<沙箱内>", condition='1 using "<越界>" //')``
+    可拼出 ``import sas if 1 using "<越界>" // using "<沙箱内>", clear``，
+    行内 ``//`` 把已校验的路径整段注释掉，数据从攻击者指定的位置读入。
+
+    校验强度必须弱于 ``_validate_varlist``：``in_range`` 天然需要 ``/``
+    （``1/100``），``condition`` 天然需要 ``"``（``make == "Honda"``）。故只拒绝
+    三类在合法表达式里没有用途的记号，且都只在**字符串之外**判定
+    （``strpos(url, "//")`` 是合法的）：
+
+    - 注释起始 ``//`` 与 ``/*``、``*/`` —— 可截断命令余下部分
+    - 独立的 ``using`` —— 可引入第二个文件路径
+    - 未闭合的双引号 —— 会把后续的 ``using "路径"`` 吞成字符串内容
+
+    本函数是 ``_validate_no_injection`` 的**超集**，两个子句统一走这里，避免
+    「只有拼在路径之前的那个工具加了检查」这种按工具打补丁的漂移。
+    """
+    if err := _validate_no_injection(value, label):
+        return err
+    if not value or not value.strip():
+        return None
+    # 取出双引号**之外**的文本；引号内的 // 是数据不是注释
+    outside_parts: list[str] = []
+    in_string = False
+    for ch in value:
+        if ch == '"':
+            in_string = not in_string
+            outside_parts.append(" ")
+            continue
+        if not in_string:
+            outside_parts.append(ch)
+    if in_string:
+        return f"错误: {label} 包含未闭合的双引号"
+    outside = "".join(outside_parts)
+    for marker in ("//", "/*", "*/"):
+        if marker in outside:
+            return (
+                f"错误: {label} 不能包含注释记号 '{marker}' —— "
+                "它会截断命令余下部分（含已校验的文件路径）"
+            )
+    if any(tok.lower() == "using" for tok in outside.replace("(", " ").replace(")", " ").split()):
+        return f"错误: {label} 不能包含 'using'（会改写命令的目标文件）"
     return None
 
 
@@ -710,8 +896,13 @@ def _opens_end_block(line: str) -> bool:
     写入临时 do 文件执行。
 
     ``program`` 的 ``drop`` / ``dir`` / ``list`` 子命令不进入定义模式，排除。
+
+    判定前须剥掉通用前缀：``quietly program define …`` / ``capture input …``
+    都是合法且可用的 Stata（真机验证 Stata 19.5 MP：``quietly program define``
+    定义成功、随后调用正常输出），但只看首 token 会让它们一律漏判，开启行被
+    单独送执行 —— 正是上面那条挂死路径。
     """
-    head = line.strip().split()
+    head = _strip_command_prefixes(line).split()
     if not head:
         return False
     kw = head[0].rstrip(":")
@@ -741,12 +932,13 @@ def _parse_command_blocks(cmd: str) -> list[str]:
     """
 
     def _scan_line(line: str, in_block_comment: bool):
-        """扫描单行，返回 (有效内容, 是否有续行, 花括号深度变化, 是否仍在块注释中, 续行前是否有空格)。"""
-        # Stata 的 * 注释必须位于第 1 列（不允许前导空白）
-        if not in_block_comment and line.startswith("*"):
-            # 完整行注释；花括号均不计算
-            return "", False, 0, False, False
+        """扫描单行，返回 (有效内容, 是否有续行, 花括号深度变化, 是否仍在块注释中, 续行前是否有空格)。
 
+        ``*`` 注释行不会走到这里 —— 主循环已在**逻辑行**层面把它们摘掉（见下方
+        ``in_comment_line``）。这一点很重要：``///`` 续行之后的 ``*`` 是乘号而非
+        注释（真机 ``display 1 ///`` + ``* 2`` 输出 2），只有逻辑行的**开头**才
+        可能是注释。
+        """
         content = []
         brace_delta = 0
         in_string = False
@@ -838,6 +1030,14 @@ def _parse_command_blocks(cmd: str) -> list[str]:
 
         return "".join(content), False, brace_delta, in_block_comment, False
 
+    def _comment_continues(line: str) -> bool:
+        """``*`` 注释行是否以 ``///`` 续行（其后各行一并并入注释）。
+
+        真机验证：``* 注释 ///`` 之后的行不会执行，续行链可连续吞多行。
+        注释内没有字符串语义，直接看行尾即可。
+        """
+        return line.rstrip().endswith("///")
+
     blocks = []
     buffer = []
     brace_depth = 0
@@ -845,9 +1045,27 @@ def _parse_command_blocks(cmd: str) -> list[str]:
     in_continuation = False
     cont_space_before = False
     in_end_block = False
+    in_comment_line = False
 
     for raw_line in cmd.split("\n"):
         line = raw_line.strip("\r")
+
+        # `*` 注释在**逻辑行开头**才成立，且允许缩进（真机验证：顶层与循环体内的
+        # 缩进注释都合法）。旧实现只认第 1 列，于是缩进注释被当代码扫描，里面的
+        # `{` / `}` 会改变 brace_depth —— 含 `{` 的注释让合法循环抛
+        # UnbalancedBlockError，含 `}` 的把块提前切开。
+        # 反过来，`///` 续行之后的 `*` 是乘号不是注释，故必须排除 in_continuation。
+        if in_comment_line:
+            in_comment_line = _comment_continues(line)
+            continue
+        if (
+            not in_block_comment
+            and not in_continuation
+            and line.lstrip().startswith("*")
+        ):
+            in_comment_line = _comment_continues(line)
+            continue
+
         if (
             not line.strip()
             and brace_depth == 0
@@ -857,6 +1075,7 @@ def _parse_command_blocks(cmd: str) -> list[str]:
         ):
             continue
 
+        was_in_block_comment = in_block_comment
         content, has_cont, delta, in_block_comment, space_before = _scan_line(
             line, in_block_comment
         )
@@ -900,6 +1119,16 @@ def _parse_command_blocks(cmd: str) -> list[str]:
                 sep = " " if cont_space_before else ""
                 buffer[-1] = last.rstrip() + sep + content.lstrip()
             in_continuation = False
+        elif was_in_block_comment and buffer:
+            # `/*` 换行 `*/` 是官方**行连接符**（`///` 出现前的写法），不是两条命令。
+            # 旧实现 buffer.append 成新行，于是
+            #     regress price weight /*
+            #     */ mpg foreign
+            # 被劈成 `regress price weight` + `mpg foreign` —— 前半条独立跑出一个
+            # **少两个回归元的模型**并「成功」，后半条报 r(199)。真机 e(cmdline) 为
+            # `regress price weight  mpg foreign`（两个空格），故此处原样拼接、
+            # 不做 strip，才能与 Stata 逐字一致。
+            buffer[-1] = buffer[-1] + content
         else:
             buffer.append(content)
 
@@ -1402,7 +1631,7 @@ def _run_stata_command(
         all_buf = io.StringIO()
         hwritten = False
         had_error = False
-        for block in blocks:
+        for index, block in enumerate(blocks):
             try:
                 rc, out = _execute_safe(block, timeout)
 
@@ -1433,6 +1662,21 @@ def _run_stata_command(
                     all_buf.write(_format_error(rc, block, out))
                     hwritten = True
                     had_error = True
+                    # 首错即停 —— 与 Stata 自身的 do 文件语义一致。此前只有
+                    # 997/998 会中止，而 r(601)/r(198) 与看门狗超时（break 后
+                    # rc=1）都继续执行剩余块。这两类比 997 常见几个数量级，
+                    # 且后果更重：`use` 失败后的 `collapse` 会在**上一个**内存
+                    # 数据集上聚合，`save … , replace` 把错误数据落盘 —— 整体
+                    # 虽标 isError，磁盘破坏已不可逆。
+                    # 想继续执行的用户用 Stata 原生的 `capture`（它让 rc=0）。
+                    remaining = len(blocks) - index - 1
+                    if remaining > 0:
+                        all_buf.write(
+                            f"\n[已跳过后续 {remaining} 条命令]"
+                            " 出错后中止，避免在陈旧/半截状态上继续执行。"
+                            " 如需忽略该错误继续，请在该命令前加 Stata 的 capture 前缀。"
+                        )
+                    break
                 elif out.strip():
                     if hwritten:
                         all_buf.write("\n")
@@ -1682,7 +1926,19 @@ def _prepare_ssc_installs(installs: list[tuple[str, bool]], timeout: int) -> lis
     report: list[str] = []
     for pkg, replace in installs:
         if not replace:
-            probe_rc, _ = _execute_safe(f"which {pkg}", timeout=10)
+            # 锁内执行：Stata DLL 非线程安全，且 _execute_safe 会 drain 输出缓冲，
+            # 不加锁会抢走并发命令的输出（与 estout 探测同处理）。锁在此 with
+            # 结束时释放，下面的 _run_stata_command 自行重新抢锁 —— _stata_lock
+            # 是不可重入的 threading.Lock，不能嵌套持有。
+            with _stata_lock:
+                probe_rc, _ = _execute_safe(f"which {pkg}", timeout=10)
+            if probe_rc in (STATA_RC_RECOVERED, 998):
+                # DLL 已死/刚恢复：探测结果不可信。当成「未安装」会对每个包各发
+                # 一次联网 ssc install，把一个已经失败的会话拖更久。
+                report.append(
+                    f"  · {pkg}: 探测失败（Stata 无响应，返回码 {probe_rc}），已中止后续安装"
+                )
+                break
             if probe_rc in (0, STATA_RC_NO_OUTPUT):
                 report.append(f"  · {pkg}: 已安装，跳过")
                 continue
@@ -1736,10 +1992,14 @@ def stata_run_do_file(filepath: str, timeout: int = 300) -> str | ToolResult:
     # 前置拆分：读文件（best-effort）→ 拆出 ssc install → 单独预装 → 跑清理后脚本。
     # 读不到文件（如 Stata cwd 与 Python cwd 不一致的相对路径）时不做拆分，
     # 退回原样执行 —— 由下方 require_file 的锁内权威解析报「文件不存在」或正常运行。
+    # UnicodeDecodeError 必须一并兜住：它继承自 ValueError 而非 OSError，
+    # 而中文 Windows 的 Stata do 编辑器默认就不是 UTF-8（GBK/Big5 的 do 文件
+    # 在本项目用户群体里很常见）。漏掉它会让 Python 栈异常穿透整个工具 ——
+    # 而这类文件交给 Stata 自己执行本来完全正常。
     try:
         with open(normalized, encoding="utf-8") as f:
             do_text = f.read()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return _run_stata_command(
             f'do "{normalized}"', require_file=filepath, timeout=safe_timeout
         )
@@ -1806,9 +2066,9 @@ def stata_use_dataset(
     """
     if err := _validate_varlist(varlist, "varlist"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -1892,9 +2152,9 @@ def stata_generate(
         return _make_error_result("错误: 请提供赋值表达式")
     if err := _validate_no_injection(expression, "expression"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_storage_type(vartype):
         return _result_or_error(err)
@@ -1941,9 +2201,9 @@ def stata_egen(
         return _result_or_error(err)
     if err := _validate_varlist(by, "by"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_storage_type(vartype):
         return _result_or_error(err)
@@ -1983,9 +2243,9 @@ def stata_predict(
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     cmd = f"predict {newvar}"
     cmd += _filter_clause(condition, in_range)
@@ -2049,9 +2309,9 @@ def stata_summarize(
     """
     if err := _validate_varlist(varlist, "varlist"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2094,9 +2354,9 @@ def stata_list(
     """
     if err := _validate_varlist(varlist, "varlist"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2140,9 +2400,9 @@ def stata_codebook(
     """
     if err := _validate_varlist(varlist, "varlist"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2182,9 +2442,9 @@ def stata_tabulate(
         return _result_or_error(err)
     if err := _validate_identifier(byvar, "byvar"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2249,9 +2509,9 @@ def stata_regress(
         return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2289,9 +2549,9 @@ def stata_logistic(
         return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2343,9 +2603,9 @@ def stata_ttest(
         return _result_or_error(err)
     if err := _validate_no_injection(compare_to, "compare_to"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2402,9 +2662,9 @@ def stata_probit(
         return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2442,9 +2702,9 @@ def stata_poisson(
         return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2489,9 +2749,9 @@ def stata_xtreg(
         return _result_or_error(err)
     if err := _validate_varlist(indepvars, "indepvars"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2552,9 +2812,9 @@ def stata_ivregress(
         return _make_error_result("错误: 至少需要一个工具变量")
     if err := _validate_varlist(exogenous, "exogenous"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2594,9 +2854,9 @@ def stata_correlate(
     """
     if err := _validate_varlist(varlist, "varlist"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -2643,9 +2903,9 @@ def stata_margins(
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     cmd = "margins"
     if marginlist.strip():
@@ -3127,9 +3387,9 @@ def stata_export_excel(
         return _result_or_error(err)
     if err := _validate_sheet_name(sheet):
         return _result_or_error(err)
-    if err := _validate_no_injection(condition, "condition"):
+    if err := _validate_filter_expr(condition, "condition"):
         return _result_or_error(err)
-    if err := _validate_no_injection(in_range, "in_range"):
+    if err := _validate_filter_expr(in_range, "in_range"):
         return _result_or_error(err)
     if err := _validate_no_injection(options, "options"):
         return _result_or_error(err)
@@ -3980,10 +4240,12 @@ def stata_import(
         return _result_or_error(err)
     if err := _validate_varlist(varlist, "varlist"):
         return _result_or_error(err)
+    for value, label in ((condition, "condition"), (in_range, "in_range")):
+        if err := _validate_filter_expr(value, label):
+            return _result_or_error(err)
     for value, label in (
-        (condition, "condition"), (in_range, "in_range"), (options, "options"),
-        (sheet, "sheet"), (cellrange, "cellrange"), (varnames, "varnames"),
-        (encoding, "encoding"),
+        (options, "options"), (sheet, "sheet"), (cellrange, "cellrange"),
+        (varnames, "varnames"), (encoding, "encoding"),
     ):
         if err := _validate_no_injection(value, label):
             return _result_or_error(err)

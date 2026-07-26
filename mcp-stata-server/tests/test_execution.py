@@ -211,6 +211,83 @@ def test_run_stata_command_breaks_chain_on_recovered_rc():
     assert "已自动恢复" in text
 
 
+def test_run_stata_command_breaks_chain_on_ordinary_error():
+    """普通 Stata 错误也应中止命令链 —— 与 Stata 自身的 do 文件语义一致。
+
+    此前只有 997/998 会 break，r(601)/r(198) 与看门狗超时（break 后 rc=1）都只
+    设 had_error 并继续。CLAUDE.md 推荐把「加载→清洗→回归→诊断」批量成一次
+    stata_run，于是 ``use`` 因路径错返回 r(601) 后，后续的 ``collapse`` 会在
+    **上一个**内存数据集上聚合、``save ... , replace`` 把错误数据覆盖到磁盘 ——
+    整体虽标 isError，磁盘破坏已不可逆。
+    """
+    from server import _run_stata_command
+
+    side_effect = [
+        (601, "file not found"),
+        (0, "collapse SHOULD NOT RUN"),
+        (0, "save SHOULD NOT RUN"),
+    ]
+    with patch("server._execute_safe", side_effect=side_effect) as exec_safe:
+        result = _run_stata_command(
+            'use "missing.dta", clear\ncollapse (mean) x, by(g)\nsave "out.dta", replace'
+        )
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert "SHOULD NOT RUN" not in text
+    assert exec_safe.call_count == 1
+    assert getattr(result, "is_error", False) is True
+    assert "601" in text
+    # 提示要说明「跳过了什么」以及 Stata 原生的继续执行方式
+    assert "已跳过" in text
+    assert "capture" in text
+
+
+def test_run_stata_command_capture_keeps_chain_running():
+    """``capture`` 是 Stata 原生的「继续执行」逃生舱：它让 rc=0，链条自然继续。"""
+    from server import _run_stata_command
+
+    with patch("server._execute_safe", side_effect=[(0, "a"), (0, "b")]) as exec_safe:
+        result = _run_stata_command('capture use "missing.dta"\nsummarize price')
+    text = result.content[0].text if hasattr(result, "content") else result
+    assert exec_safe.call_count == 2
+    assert getattr(result, "is_error", False) is False
+    assert "b" in text
+
+
+def test_prepare_ssc_installs_probe_holds_lock():
+    """``which`` 探测必须在 ``_stata_lock`` 内 —— Stata DLL 非线程安全。
+
+    文件里其余全部 DLL 访问都在锁内（_run_stata_command、estout 探测、
+    stata_ping）。探测裸奔会与并发工具调用竞态：轻则 _drain_output 抢走对方
+    输出，重则复现「已修复的崩溃历史」里那条 DLL 竞态崩溃。
+    """
+    import server
+
+    held = []
+
+    def fake_execute_safe(cmd, timeout=None):
+        held.append(server._stata_lock.locked())
+        return (0, "")
+
+    with patch("server._execute_safe", side_effect=fake_execute_safe):
+        server._prepare_ssc_installs([("estout", False)], timeout=30)
+
+    assert held == [True]
+
+
+def test_prepare_ssc_installs_aborts_when_dll_dead():
+    """探测返回 998（DLL 无响应）时不得当成「未安装」继续逐个联网安装。"""
+    import server
+
+    with patch("server._execute_safe", return_value=(998, "Stata 无响应")):
+        with patch("server._run_stata_command") as run_cmd:
+            report = server._prepare_ssc_installs(
+                [("estout", False), ("outreg2", False)], timeout=30
+            )
+
+    run_cmd.assert_not_called()
+    assert any("无响应" in line or "中止" in line for line in report)
+
+
 def test_execute_single_collects_consecutive_chunks():
     """L3/P1: 阶段 1 取到输出后应立即复取（continue），连续多块输出都收集。
 

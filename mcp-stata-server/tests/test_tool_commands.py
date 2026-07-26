@@ -806,6 +806,25 @@ def test_run_do_file_passes_require_file_and_timeout():
     assert mock_run.call_args.kwargs["timeout"] == 900
 
 
+def test_run_do_file_falls_back_on_non_utf8_file(tmp_path):
+    """非 UTF-8 的 do 文件应退回原样执行，而不是抛 Python 栈异常。
+
+    ``UnicodeDecodeError`` 继承自 ``ValueError`` 而非 ``OSError``，此前的
+    ``except OSError`` 兜不住它。中文 Windows 的 Stata do 编辑器默认不是 UTF-8，
+    GBK/Big5 的 do 文件很常见 —— 而这类文件交给 Stata 自己执行本来完全正常。
+    """
+    from server import stata_run_do_file
+
+    target = tmp_path / "gbk.do"
+    target.write_bytes("* 中文注释\nsysuse auto, clear\n".encode("gbk"))
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_run_do_file(str(target))
+
+    assert mock_run.call_args[0][0] == f'do "{str(target)}"'
+    assert mock_run.call_args.kwargs["require_file"] == str(target)
+
+
 def test_run_do_file_clamps_timeout():
     """与 stata_run 一致地夹在 10–1800 之间，避免 0/负值让看门狗立即触发。"""
     from server import stata_run_do_file

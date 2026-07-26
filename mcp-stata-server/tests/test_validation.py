@@ -54,6 +54,155 @@ def test_dangerous_command_prefix_allows_safe(cmd):
     assert _has_dangerous_command_prefix(cmd) is None
 
 
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # Stata 的通用前缀命令可套在任意命令前，加上之后行首不再是危险词。
+        # 真机验证（Stata 19.5 MP）：`capture shell touch <f>` 与
+        # `quietly mata: _stata("shell touch <f>")` 都真实创建了文件，
+        # `capture noisily mata: _stata("display 999888")` 打印了 999888。
+        "capture shell touch /tmp/x",
+        "cap shell touch /tmp/x",
+        "quietly shell rm -f /tmp/x",
+        "qui shell echo hi",
+        "noisily !touch /tmp/x",
+        "capture noisily shell echo hi",
+        'quietly mata: _stata("shell touch /tmp/x")',
+        'cap mata: unlink("/tmp/x")',
+        "qui python: import os",
+        # 带冒号的前缀（by/bysort/version/svy/xi）同理
+        "by foreign: shell echo hi",
+        "bysort foreign: shell echo hi",
+        "version 17: shell echo hi",
+        # 前缀叠加
+        "capture quietly noisily shell echo hi",
+    ],
+)
+def test_dangerous_prefix_blocks_behind_stata_prefix_commands(cmd):
+    """通用前缀不改变被执行的命令，护栏必须先剥前缀再判行首。"""
+    assert _has_dangerous_command_prefix(cmd) is not None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # 剥前缀不能误伤合法命令
+        "capture noisily regress price weight",
+        "quietly summarize mpg",
+        "by foreign: summarize price",
+        "bysort foreign: egen m = mean(price)",
+        "capture drop matador",
+        # 扩展宏函数里的顶层冒号：剥掉后仍是安全命令
+        "local n : word count `varlist'",
+        # 冒号在字符串内，不是前缀分隔符
+        'display "ratio 1:2"',
+    ],
+)
+def test_dangerous_prefix_allows_safe_behind_prefix(cmd):
+    assert _has_dangerous_command_prefix(cmd) is None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # #delimit ; 让分号成为命令分隔符，于是 ! 永远不在行首。
+        # 真机验证：`#delimit ;` + `display 3 ; !touch <f> ;` 真实创建了文件。
+        "#delimit ;\ndisplay 2 ; !touch /tmp/x ;",
+        "display 1 ; shell echo hi ;",
+    ],
+)
+def test_dangerous_prefix_blocks_after_semicolon(cmd):
+    """分隔符可被 #delimit 改成 `;`，护栏须对分号切分后的每段做行首匹配。"""
+    assert _has_dangerous_command_prefix(cmd) is not None
+
+
+def test_dangerous_prefix_allows_semicolon_inside_string():
+    """字符串内的分号不是命令分隔符，不应触发误报。"""
+    assert _has_dangerous_command_prefix('display "a; shell b"') is None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "#delimit ;\nsysuse auto, clear ;",
+        "  #delimit;\ndisplay 1 ;",
+        "#DELIMIT ;",
+    ],
+)
+def test_precheck_rejects_delimit_change(cmd):
+    """``#delimit ;`` 把命令分隔符改成分号，行导向的解析器无法跟踪。
+
+    真机验证：`#delimit ;` 脚本经 ``_parse_command_blocks`` 被逐行切成碎块，
+    `regress price weight` 与续行 `  mpg ;` 被劈成两条独立命令 —— 少跑一个
+    回归元却各自「成功」。与其静默给出另一个模型，不如在入口报错并指向
+    ``stata_run_do_file``（do 文件由 Stata 自己解析，原生支持 #delimit）。
+    """
+    from server import _precheck_command
+
+    reason = _precheck_command(cmd)
+    assert reason is not None
+    assert "#delimit" in reason
+    assert "stata_run_do_file" in reason
+
+
+def test_precheck_allows_delimit_word_inside_string():
+    """字符串里出现 #delimit 字样不应误伤。"""
+    from server import _precheck_command
+
+    assert _precheck_command('display "use #delimit ; in do files"') is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # `//` 注释掉命令余下部分（含已校验的路径 / 选项）
+        '1 using "/tmp/secret/x.sas7bdat" //',
+        "price > 0 // rest is gone",
+        # `/* */` 同样能吞掉后续文本
+        "price > 0 /* using",
+        "1 */ using",
+        # 独立的 using 会引入第二个文件路径
+        'foreign == 1 using "/tmp/evil.dta"',
+        # 未闭合的双引号会把后续的 using "路径" 吞成字符串内容
+        'make == "Honda',
+    ],
+)
+def test_validate_filter_expr_rejects_path_rewrites(value):
+    """``if`` / ``in`` 子句会与已校验路径拼在同一条命令里，须拒绝改写路径的记号。
+
+    实测（STATA_ALLOWED_ROOTS=/tmp/allowed）：
+    ``stata_import(filepath="/tmp/allowed/ok.sas7bdat", format="sas",
+    condition='1 using "/tmp/secret/x.sas7bdat" //')``
+    拼出 ``import sas if 1 using "/tmp/secret/x.sas7bdat" // using "/tmp/allowed/ok.sas7bdat", clear``，
+    解析器遇行内 ``//`` 截断后只剩越界读取 —— 与已修复的 varlist 路径注入同类。
+    """
+    from server import _validate_filter_expr
+
+    assert _validate_filter_expr(value, "condition") is not None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # in_range 天然需要 `/`
+        "1/100",
+        "1/10",
+        "f/l",
+        # condition 的常见合法形态
+        'make == "Honda"',
+        "price > 5000 & foreign == 1",
+        "inlist(rep78, 3, 4, 5)",
+        # 字符串内的 `//` 不是注释，不应误伤
+        'strpos(url, "//") > 0',
+        "",
+    ],
+)
+def test_validate_filter_expr_allows_legitimate(value):
+    from server import _validate_filter_expr
+
+    assert _validate_filter_expr(value, "condition") is None
+
+
 def test_validate_no_injection_rejects_newline_and_semicolon():
     assert _validate_no_injection("a\nb", "x") is not None
     assert _validate_no_injection("a;b", "x") is not None
