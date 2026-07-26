@@ -6,6 +6,7 @@ from fastmcp.tools.base import ToolResult
 from server import (
     _ESTOUT_PROBE_CMD,
     stata_codebook,
+    stata_describe,
     stata_export_excel,
     stata_find_package,
     stata_graph,
@@ -683,3 +684,117 @@ def test_graph_blocks_comment_masked_shell_out():
         result = stata_graph("/* x */ !touch /tmp/pwned")
     assert getattr(result, "is_error", False)
     mock_run.assert_not_called()
+
+
+# --- 此前零行为覆盖的 5 个工具 -------------------------------------------------
+
+
+def test_describe_default_lists_all_variables():
+    with patch("server._run_stata_command") as mock_run:
+        stata_describe()
+        assert mock_run.call_args[0][0] == "describe"
+
+
+def test_describe_with_varlist():
+    with patch("server._run_stata_command") as mock_run:
+        stata_describe("price mpg")
+        assert mock_run.call_args[0][0] == "describe price mpg"
+
+
+def test_describe_simple_overrides_varlist():
+    """simple 与 varlist 同时给出时 varlist 被丢弃 —— 固化当前行为以便发现回归。"""
+    with patch("server._run_stata_command") as mock_run:
+        stata_describe("price mpg", simple=True)
+        assert mock_run.call_args[0][0] == "describe, simple"
+
+
+def test_describe_rejects_injected_varlist():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_describe("price; !ls")
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_display_builds_expression():
+    from server import stata_display
+
+    with patch("server._run_stata_command") as mock_run:
+        stata_display("r(mean)")
+        assert mock_run.call_args[0][0] == "display r(mean)"
+
+
+def test_display_rejects_injection():
+    from server import stata_display
+
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_display("1; !ls")
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_set_cwd_quotes_and_normalizes_path():
+    from server import stata_set_cwd
+
+    target = abs_path("data", "project")
+    with patch("server._run_stata_command") as mock_run:
+        stata_set_cwd(target)
+        assert mock_run.call_args[0][0] == f'cd "{target}"'
+
+
+def test_set_cwd_rejects_illegal_path():
+    from server import stata_set_cwd
+
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_set_cwd('/tmp/x";!ls')
+        assert getattr(result, "is_error", False)
+        mock_run.assert_not_called()
+
+
+def test_run_do_file_passes_require_file_and_timeout():
+    from server import stata_run_do_file
+
+    target = abs_path("scripts", "run.do")
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", return_value=True),
+    ):
+        stata_run_do_file(target, timeout=900)
+    assert mock_run.call_args[0][0] == f'do "{target}"'
+    assert mock_run.call_args.kwargs["require_file"] == target
+    assert mock_run.call_args.kwargs["timeout"] == 900
+
+
+def test_run_do_file_clamps_timeout():
+    """与 stata_run 一致地夹在 10–1800 之间，避免 0/负值让看门狗立即触发。"""
+    from server import stata_run_do_file
+
+    target = abs_path("scripts", "run.do")
+    for given, expected in ((0, 10), (99999, 1800)):
+        with (
+            patch("server._run_stata_command") as mock_run,
+            patch("server.os.path.isfile", return_value=True),
+        ):
+            stata_run_do_file(target, timeout=given)
+        assert mock_run.call_args.kwargs["timeout"] == expected
+
+
+def test_more_without_cache_gives_actionable_hint():
+    import server
+    from server import stata_more
+
+    with server._output_lock:
+        server._last_output = ""
+    result = stata_more(page=1)
+    assert "没有缓存" in _result_text(result)
+
+
+def test_more_paginates_cached_output():
+    import server
+    from server import stata_more
+
+    with server._output_lock:
+        server._last_output = "L" * 10_000
+    page1 = _result_text(stata_more(page=1, page_size=1000))
+    assert page1.startswith("── 第 1/10 页")
+    full = _result_text(stata_more(page=0))
+    assert len(full) == 10_000, "page=0 应返回完整缓存"
