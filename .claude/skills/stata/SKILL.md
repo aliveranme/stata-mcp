@@ -392,7 +392,7 @@ estat overid                                   // 过度识别检验（Sargan/Ha
 **SSC 的 `ivreg2`（诊断直接打印在主输出里，不要用 estat）**
 ```stata
 // 需要 ivreg2：先用 stata_install_package("ivreg2", source="ssc") 安装，
-// 切勿把 ssc install 写进 stata_run —— headless 下网络请求会卡死 DLL
+// 不要把 ssc install 写进 stata_run —— 网络阻塞会长时间冻结流程（非损坏 DLL）
 use "data.dta", clear
 ivreg2 y (x = z1 z2), robust first            // first 选项输出第一阶段
 // Hansen J / Kleibergen-Paap 统计量已在上面的输出里，无需再调 estat
@@ -488,7 +488,7 @@ estimates store m2
 estimates table m1 m2, star stats(N r2 r2_a)
 
 // 导出（需 estout；缺失时先用 stata_install_package("estout", source="ssc") 装，
-//       切勿把 ssc install 混进 stata_run —— headless 下网络请求会卡死 DLL）
+//       不要把 ssc install 混进 stata_run —— 网络阻塞会长时间冻结流程（非损坏 DLL）
 esttab m1 m2 using "results.csv", replace
 ```
 
@@ -498,9 +498,10 @@ esttab m1 m2 using "results.csv", replace
 
 用法：`stata_find_package("包名")` 搜 → `stata_describe_package("包名", source="ssc")`
 看详情（可选）→ `stata_install_package("包名", source="ssc")` 装 → `stata_help("包名")`
-查语法。不再需要时 `stata_uninstall_package("包名")` 卸载。**切勿**把 `ssc install`
-或 `ssc describe` 写进 `stata_run` ——
-headless 下 SSC 网络请求会卡死 DLL（见「与 Agent 协作规范」）。
+查语法。不再需要时 `stata_uninstall_package("包名")` 卸载。**不要**把 `ssc install`
+或 `ssc describe` 写进 `stata_run` —— 它们是网络阻塞调用（实测 3–13s 波动，慢网络更久），
+会独占串行锁冻结整个流程且看门狗超时对其无效；改走专用工具（可控时机、显式 timeout）。
+注意：这是「阻塞太久」而非「损坏 DLL」，网络正常时安装本身会干净完成。
 
 ### 结果输出 / 表格
 | 包 | 用途 | 补足哪个内置 |
@@ -576,4 +577,4 @@ headless 下 SSC 网络请求会卡死 DLL（见「与 Agent 协作规范」）�
     - `stata_use_dataset(filepath, clear=True)` — 默认清除内存中已有数据
     - `stata_run(command, timeout=60)` — 命令默认超时 60s，安装包/复杂回归可传 `timeout=120`
 12. **`stata_graph` 非只读**：虽然标记为只读探索，但导出文件时会写入磁盘（destructiveHint=True），Agent 应在覆盖文件前向用户确认。
-13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并**不会**自动安装 `estout`：执行前先探测，缺失则直接报错。此时改用 `stata_install_package("estout", source="ssc")` 手动安装后重试。绝不要在 `stata_run` 里内嵌 `ssc install` —— headless 环境下 SSC 网络请求会阻塞 `StataSO_Execute`，看门狗无法干净中断，会导致后续调用全部卡死。
+13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并**不会**自动安装 `estout`：执行前先探测，缺失则直接报错。此时改用 `stata_install_package("estout", source="ssc")` 手动安装后重试。不要在 `stata_run` 里内嵌 `ssc install` —— SSC 网络请求会独占串行锁阻塞整个流程（实测 3–13s 波动，慢网络更久），且看门狗超时对网络 I/O 不生效；这是「阻塞太久」而非「损坏 DLL」，改走专用工具即可（可控时机、显式 timeout）。

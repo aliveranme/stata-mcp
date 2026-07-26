@@ -171,7 +171,7 @@ stata-mcp/
 - **`///` 续行符**：现在已被修复支持（版本 v2+），可在 `stata_run` 中使用 `///` 连接多行长命令。
 - **`{ }` 复合块与循环可以直接写**：`forvalues` / `foreach` / `if` 块、`program define ... end` 都能在 `stata_run` 里正常使用（走临时 do 文件，见上）。注意 Stata 语法要求 `{` 之后换行 —— `forvalues i=1/3 { display \`i' }` 写在一行会 r(198)，这是 Stata 本身的规则。
 - **`stata_find_package` 走 `net search`（联网，约 1 秒）**：`ssc` 没有 `search` 子命令。只搜本机帮助用 `stata_run("search <词>, local")`。
-- **包生命周期已补全 `uninstall` / `describe`**：`stata_uninstall_package` 是 `ado uninstall`（**纯本地**删文件，实测约 20ms，无 SSC 网络卡死风险，与 `install` 对称）。`stata_describe_package` 默认 `source="installed"` 走本地 `ado describe`（约 12ms）；`source="ssc"` 走联网 `ssc describe`（约 1–7s，装前查详情用）—— 网络路径与 `install` 同属有卡死风险的联网操作，故独立成工具、用户可控时机。`update` 由 `install` 的 `replace=True` 覆盖（`ssc install pkg, replace` 即重装最新）。
+- **包生命周期已补全 `uninstall` / `describe`**：`stata_uninstall_package` 是 `ado uninstall`（**纯本地**删文件，实测约 20ms，无网络阻塞，与 `install` 对称）。`stata_describe_package` 默认 `source="installed"` 走本地 `ado describe`（约 12ms）；`source="ssc"` 走联网 `ssc describe`（约 1–7s，装前查详情用）—— 网络路径与 `install` 同属**网络阻塞**操作（阻塞串行锁、看门狗对其无效，见下方 estout 条目的实测澄清），故独立成工具、用户可控时机。`update` 由 `install` 的 `replace=True` 覆盖（`ssc install pkg, replace` 即重装最新）。
 - **`winsor2` 的 `suffix(_w)` 不能和 `replace` 一起用**：选项冲突。要么 `suffix(_w)` 创建新变量，要么 `replace` 覆盖原变量。
 - **裸 `cd`（不带参数）会切换到 home，不是显示当前目录**：同 Unix shell，它切换并把新目录打印出来，看着像查询实为修改。查当前目录一律用 `display c(pwd)`。`stata_status` 曾因此在标注只读的情况下悄悄重置用户 `set_cwd` 的结果。
 - **`stata_list_packages` 用 `ado dir` 而非 `ado describe`**：后者输出每个包的完整文档（实测本机 49516 字符 / 13 页），前者 4330 字符即给出同样的包清单。看单个包详情用 `stata_run("ado describe <包名>")`。
@@ -324,6 +324,7 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | `title("'90s")` 让 `///` 失效 | 复合引号定界符写反：把 `"'`（Stata 的**结束**符）当成开启符，于是普通字符串里一出现 `"'` 就翻转状态 | 开启符改为 `` `" ``、结束符改为 `"'`，与 Stata 语法一致 |
 | 空 `depvar` 静默算错 | `_validate_identifier` 对空值一律放行，`regress("", "weight")` 拼出 `regress  weight`，Stata 把 weight 当因变量跑出**另一个回归**并返回成功 | 加 `required=True`，必填参数拒绝空值 |
 | `scheme` 可注入 `set scheme` 的选项 | 黑名单漏掉 `,`，而 `set scheme` 支持 `, permanently` | 改用正向白名单 `_SCHEME_NAME_RE` |
+| 「SSC 网络请求损坏 DLL」被误诊 | 早先据「用户报告卡死了」记为 DLL 损坏，但从未复现。实测（Stata 19.5 MP，macOS）`ssc install` 耗时 3–13s 波动、慢网络更久，整段独占 `_stata_lock`、看门狗超时对网络 I/O 不生效——表现为「卡住」但**不损坏 DLL**，网络返回后干净完成，会话健康（多场景复现无一崩溃） | 无代码改动：`stata_install_package` 独立成工具的设计依旧正确（隔离长阻塞的网络操作）；仅把文档中「损坏 DLL / 卡死」改正为「网络阻塞太久」 |
 
 ## 权限配置
 
@@ -347,6 +348,6 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
   - 测试用 `conftest.abs_path()` 构造平台原生绝对路径，不要硬编码 `C:/` —— POSIX 下 `os.path.isabs("C:/x")` 为假，路径会被当相对路径拼上 cwd。
 - **无类型检查**：无 `mypy`、`pre-commit`。server.py 混合中英文标识符。
 - **日志写入文件**：server.py 已将日志同时输出到 stderr 和 `mcp-stata-server/logs/stata-mcp.log`，MCP 传输中断后仍可排查。
-- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**绝不内嵌 `ssc install`** —— headless MCP 环境下 SSC 网络请求会阻塞 `StataSO_Execute`，看门狗 `SetBreak` 无法干净中断网络 I/O，会损坏 DLL 状态导致后续调用全部卡死。包安装请走专用的 `stata_install_package`（用户可控时机、可显式传 timeout）。
+- **`stata_export_excel` 的 results=True 需要先运行过回归模型**：会用 `esttab` 导出估计结果；执行前先用裸 `which estout` 探测（**不能加 `capture`** —— 那会吞掉错误使 rc 恒为 0，探测形同虚设），**estout 缺失则直接报错**，提示用 `stata_install_package("estout", source="ssc")` 手动安装。**不要内嵌 `ssc install`** —— 但原因不是「损坏 DLL」。实测（Stata 19.5 MP，macOS）：`ssc install` 是网络阻塞调用，同一个包耗时在 **3–13s 间波动**，慢/不可达网络下可达分钟级；它整段独占 `_stata_lock` 阻塞整个 server，且**看门狗超时对网络 I/O 不生效**（实测 `timeout=1` 的安装照样跑满 3.3s 完成，未被 break）。表现为「卡住」，但**并不损坏 DLL**——网络返回后安装干净完成，会话健康（`display`/`summarize`/后续多条命令全正常，多场景复现无一崩溃）。真正的问题是：内嵌进分析步骤时，一个不可中断的多分钟网络阻塞会意外冻结整个流程。故包安装走专用的 `stata_install_package`（用户可控时机、显式 300s timeout）。
 - **超时看门狗线程安全**：Stata DLL 不提供官方线程安全的中断机制。看门狗在命令超时时调用 `StataSO_SetBreak`，与执行线程的 `StataSO_Execute` 存在极小并发风险。当前通过串行锁、降低默认超时（60s）、二次确认和连续 break 熔断降低风险，但不能完全保证在高负载下避免状态损坏。建议长命令显式拆分或使用更大的 timeout 参数。
 - **工具错误语义**：错误结果（Stata 返回码非 0、输入验证失败、DLL 崩溃）通过 `ToolResult(is_error=True)` 告知 MCP 客户端。成功工具结果仍以普通字符串返回。若使用 `mcp.list_tools` 或类似客户端，需注意区分返回类型。
