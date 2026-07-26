@@ -1587,27 +1587,144 @@ def stata_run(command: str, page: int = 1, timeout: int = 60) -> str | ToolResul
     return _run_stata_command(command, page, timeout=safe_timeout)
 
 
+# 匹配 do 文件里的 `ssc install <pkg> [, options]`，允许 qui/cap/noi 前缀组合。
+# install 只匹配全写（99% 写法），缩写未命中则退回原样内联执行（安全兜底）。
+_SSC_INSTALL_RE = re.compile(
+    r"^\s*(?:(?:qui(?:etly)?|cap(?:ture)?|noi(?:sily)?)\s+)*"
+    r"ssc\s+install\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*(?P<opts>.*))?$",
+    re.IGNORECASE,
+)
+
+
+def _extract_ssc_installs(do_text: str) -> tuple[str, list[tuple[str, bool]]]:
+    """从 do 文本中拆出 `ssc install` 行，供执行前单独安装。
+
+    返回 ``(cleaned_text, installs)``：
+    - ``cleaned_text``：安装行**改成注释**（保留行号，便于错误定位），其余原样。
+    - ``installs``：``[(package, replace)]``，按包名去重（保留首次出现的 replace 标志）。
+
+    只处理**行首**的 `ssc install`（含 qui/cap/noi 前缀）；`{ }` 块或循环内的
+    安装极罕见，不特殊处理，仍随块内联执行。``install`` 只认全写。
+    """
+    installs: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    out_lines: list[str] = []
+    for raw in do_text.split("\n"):
+        m = _SSC_INSTALL_RE.match(raw)
+        if m:
+            pkg = m.group(1)
+            opts = (m.group("opts") or "")
+            replace = bool(re.search(r"\breplace\b", opts, re.IGNORECASE))
+            if pkg not in seen:
+                seen.add(pkg)
+                installs.append((pkg, replace))
+            out_lines.append(f"* [stata-mcp] 已移出单独安装: {raw.strip()}")
+        else:
+            out_lines.append(raw)
+    return "\n".join(out_lines), installs
+
+
+def _prepare_ssc_installs(installs: list[tuple[str, bool]], timeout: int) -> list[str]:
+    """执行前逐个处理拆出的 ssc install：已装且无 replace 则跳过，缺失才装。
+
+    每次安装走独立的联网调用（带 timeout，超时可被看门狗干净中断）。
+    调用者不得持有 ``_stata_lock`` —— 本函数内部经 ``_run_stata_command`` 自行抢锁。
+
+    Returns:
+        面向用户的处理报告行列表。
+    """
+    report: list[str] = []
+    for pkg, replace in installs:
+        if not replace:
+            probe_rc, _ = _execute_safe(f"which {pkg}", timeout=10)
+            if probe_rc in (0, STATA_RC_NO_OUTPUT):
+                report.append(f"  · {pkg}: 已安装，跳过")
+                continue
+        replace_opt = ", replace" if replace else ""
+        res = _run_stata_command(f"ssc install {pkg}{replace_opt}", timeout=timeout)
+        ok = not isinstance(res, ToolResult)
+        report.append(f"  · {pkg}: {'已安装' if ok else '安装失败（详见下方输出）'}")
+        if not ok:
+            report.append("    " + _result_text_inline(res))
+    return report
+
+
+def _result_text_inline(value) -> str:
+    """提取 str / ToolResult 的文本（单行化，用于并入报告）。"""
+    if isinstance(value, ToolResult):
+        try:
+            return value.content[0].text.strip().replace("\n", " | ")
+        except (AttributeError, IndexError):
+            return str(value)
+    return str(value).strip().replace("\n", " | ")
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def stata_run_do_file(filepath: str, timeout: int = 300) -> str | ToolResult:
     """执行一个 Stata .do 文件并返回全部输出。
 
     .do 文件是 Stata 的批处理脚本。此工具会执行指定路径的 .do 文件。
 
+    **执行前自动拆出 `ssc install`**：do 文件常在开头写 `ssc install foo`，内联
+    执行会让整段脚本卡在网络请求上。本工具先扫描并把这些行移出：已安装的包直接
+    跳过（不重复联网），缺失的包各自单独安装（带 timeout，超时可干净中断），
+    然后运行**去掉安装行**的脚本主体（安装行改成注释，行号不变）。文件里没有
+    `ssc install` 时，脚本原样执行、行为完全不变。
+
     注意：do 文件由 Stata 自行解析，**不经过** ``stata_run`` 的危险命令前缀
     护栏。只执行你信任的 do 文件。
 
     Args:
         filepath: .do 文件的绝对路径。
-        timeout: 超时秒数（默认 300，范围 10–1800）。do 文件往往是最长跑的
-            任务，跑批量建模或大数据清洗时请显式调大。
+        timeout: 超时秒数（默认 300，范围 10–1800）。既是脚本主体的超时，也是
+            每个拆出的包安装的超时。跑批量建模或大数据清洗时请显式调大。
 
     Returns:
-        do 文件执行过程中的全部 Stata 输出。
+        （若有）包安装报告 + do 文件执行的全部输出。
     """
+    if err := _validate_path(filepath):
+        return _result_or_error(err)
     safe_timeout = max(10, min(timeout, 1800))
-    return _run_stata_command(
-        f'do "{_normalize_path(filepath)}"', require_file=filepath, timeout=safe_timeout
-    )
+    normalized = _normalize_path(filepath)
+
+    # 前置拆分：读文件（best-effort）→ 拆出 ssc install → 单独预装 → 跑清理后脚本。
+    # 读不到文件（如 Stata cwd 与 Python cwd 不一致的相对路径）时不做拆分，
+    # 退回原样执行 —— 由下方 require_file 的锁内权威解析报「文件不存在」或正常运行。
+    try:
+        with open(normalized, encoding="utf-8") as f:
+            do_text = f.read()
+    except OSError:
+        return _run_stata_command(
+            f'do "{normalized}"', require_file=filepath, timeout=safe_timeout
+        )
+
+    cleaned, installs = _extract_ssc_installs(do_text)
+    if not installs:
+        # 无 ssc install：原样执行，走标准 require_file 权威路径，行为不变。
+        return _run_stata_command(
+            f'do "{normalized}"', require_file=filepath, timeout=safe_timeout
+        )
+
+    report = _prepare_ssc_installs(installs, timeout=safe_timeout)
+
+    # 清理后的脚本写入 Stata 临时 do 文件执行（临时文件由 Stata 会话末清理，
+    # 且 _cleanup 不适用于 do；此处即用即删）。
+    try:
+        tmpf = sfi.SFIToolkit.getTempFile()
+        with open(tmpf, "w", encoding="utf-8") as f:
+            f.write(cleaned if cleaned.endswith("\n") else cleaned + "\n")
+    except OSError as e:
+        return _make_error_result(f"错误: 无法写入清理后的临时 do 文件: {e}")
+
+    try:
+        result = _run_stata_command(f'do "{tmpf}"', timeout=safe_timeout)
+    finally:
+        _cleanup_temp_block(tmpf)
+
+    header = "已在执行前处理 do 文件中的 ssc install：\n" + "\n".join(report) + "\n" + "-" * 40 + "\n"
+    if isinstance(result, ToolResult):
+        return _make_error_result(header + _result_text_inline(result))
+    return header + result
 
 
 # =============================================================================

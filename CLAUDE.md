@@ -32,7 +32,7 @@ stata-mcp/
 
 | 类别 | 工具 | 只读? | 说明 |
 |------|------|:-----:|------|
-| 核心执行 | `stata_run`, `stata_run_do_file` | — | 通用命令执行和 do 文件 |
+| 核心执行 | `stata_run`, `stata_run_do_file` | — | 通用命令执行；`run_do_file` 执行前自动拆出 `ssc install` 单独安装（已装跳过） |
 | 数据管理 | `stata_use_dataset`, `stata_save_dataset`, `stata_set_cwd` | — | 读写 .dta、cd |
 | 数据生成 | `stata_generate`, `stata_egen` | — | 创建变量（改数据集，非只读） |
 | 数据探索 | `stata_describe`, `stata_codebook`, `stata_summarize`, `stata_list`, `stata_tabulate`, `stata_correlate`, `stata_display` | ✓ | 只读探索 |
@@ -152,6 +152,18 @@ stata-mcp/
 - 绝对路径直接检查。
 - 相对路径优先使用 **Stata 当前工作目录** 解析（与后续 Stata 执行路径一致），在 `_stata_lock` 保护内完成。
 - 若无法获取 Stata cwd，回退到 Python 进程当前目录。
+
+### do 文件执行前拆出 `ssc install`
+
+do 文件常在开头写 `ssc install foo`，内联执行会让整段脚本卡在网络请求上（见「SSC 网络」条目）。`stata_run_do_file` 执行前先处理：
+
+1. **best-effort 读文件**（Python 侧，按 `_normalize_path` 的绝对路径）。读不到（如 Stata cwd 与 Python cwd 不一致的相对路径）→ 不拆分，退回 `do "path"` 原样执行，由 `require_file` 锁内权威路径兜底。
+2. `_extract_ssc_installs` 扫描**行首** `ssc install <pkg>[, replace]`（含 `qui`/`cap`/`noi` 前缀组合），按包名去重；安装行**改成注释保留行号**。`{ }` 块内、`ssc describe`/`uninstall`、缩写 `inst` 不匹配 —— 未命中就随原文内联，安全兜底。
+3. `_prepare_ssc_installs` 逐个处理：无 `replace` 时先 `which pkg` 探测，**已装则跳过不重复联网**；缺失才 `ssc install`（带 timeout，超时可被看门狗干净中断）。
+4. 清理后的脚本写 **Stata 临时 do 文件**执行（`finally` 中 `_cleanup_temp_block` 即用即删），返回信息前置「预装/跳过报告」。
+5. **文件中无 `ssc install` → 完全走原路径，行为逐字不变**（不写临时文件、不加报告头）。
+
+拆分只处理 `ssc install`（`net install` 的第三方 URL 未纳入，避免 URL 注入复杂度）。因预装要经 `_run_stata_command` 自行抢锁，拆分/读取都在锁外做 —— do 文件按约定传绝对路径，Python-cwd 与 Stata-cwd 解析一致；即便相对路径读错文件，最坏是预装了错误的包（无害）或漏拆（退回内联），do 主体执行仍走各自的权威路径。
 
 ### 路径安全校验（两层）
 

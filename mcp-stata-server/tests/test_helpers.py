@@ -255,3 +255,56 @@ def test_format_size_kilobytes(tmp_path):
 
 def test_format_size_missing_file_is_graceful(tmp_path):
     assert _format_size(str(tmp_path / "gone.png")) == "大小未知"
+
+
+# ============================================================================
+# do 文件的 ssc install 拆分（_extract_ssc_installs）
+# ============================================================================
+from server import _extract_ssc_installs  # noqa: E402
+
+
+def test_extract_ssc_plain_and_replace():
+    cleaned, installs = _extract_ssc_installs("ssc install estout\nssc install winsor2, replace")
+    assert installs == [("estout", False), ("winsor2", True)]
+    # 安装行改注释，非安装内容不受影响
+    assert all(line.startswith("* [stata-mcp]") for line in cleaned.split("\n"))
+
+
+def test_extract_ssc_with_prefixes():
+    for src, pkg in [
+        ("qui ssc install reghdfe", "reghdfe"),
+        ("cap noi ssc install ivreg2", "ivreg2"),
+        ("  ssc install coefplot ", "coefplot"),
+        ("QUIETLY SSC INSTALL Estout", "Estout"),
+    ]:
+        _cleaned, installs = _extract_ssc_installs(src)
+        assert installs == [(pkg, False)], src
+
+
+def test_extract_ssc_preserves_line_numbers():
+    src = "sysuse auto, clear\nssc install estout\nregress price weight"
+    cleaned, installs = _extract_ssc_installs(src)
+    assert installs == [("estout", False)]
+    lines = cleaned.split("\n")
+    assert len(lines) == 3, "行号必须保持不变（安装行改注释而非删除）"
+    assert lines[0] == "sysuse auto, clear"
+    assert lines[2] == "regress price weight"
+    assert lines[1].startswith("* [stata-mcp]")
+
+
+def test_extract_ssc_dedup():
+    _cleaned, installs = _extract_ssc_installs("ssc install estout\nssc install estout, replace")
+    assert installs == [("estout", False)], "同包去重，保留首次出现"
+
+
+def test_extract_ssc_no_installs_untouched():
+    src = "sysuse auto, clear\nregress price weight\ngraph export x.png"
+    cleaned, installs = _extract_ssc_installs(src)
+    assert installs == []
+    assert cleaned == src, "无 ssc install 时文本逐字不变"
+
+
+def test_extract_ssc_ignores_non_install_ssc():
+    """ssc describe / uninstall 不是安装，不应被拆出。"""
+    _cleaned, installs = _extract_ssc_installs("ssc describe estout\nssc uninstall foo")
+    assert installs == []

@@ -122,7 +122,7 @@ description: >
 | 工具 | 用途 |
 |------|------|
 | `stata_run` | **执行任意 Stata 命令**（专用工具未覆盖的操作全走这里） |
-| `stata_run_do_file` | 执行 .do 文件 |
+| `stata_run_do_file` | 执行 .do 文件；执行前自动拆出 `ssc install` 单独安装（已装跳过），避免脚本卡在网络请求 |
 | `stata_graph` | 生成图形（推荐用 `export` 参数直接导出；支持 `height`） |
 
 ### 结果导出

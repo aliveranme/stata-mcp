@@ -118,7 +118,7 @@ Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize
 
 | 类别 | 工具 |
 |------|------|
-| **核心执行** | `stata_run`（任意命令，含危险前缀拦截）· `stata_run_do_file` |
+| **核心执行** | `stata_run`（任意命令，含危险前缀拦截）· `stata_run_do_file`（执行前自动拆出 `ssc install` 单独安装，已装跳过） |
 | **数据管理** | `stata_use_dataset` · `stata_save_dataset` · `stata_set_cwd` · `stata_generate` · `stata_egen` |
 | **数据探索** | `stata_describe` · `stata_codebook` · `stata_summarize` · `stata_list` · `stata_tabulate` · `stata_correlate` · `stata_display` |
 | **估计** | `stata_regress` · `stata_logistic` · `stata_probit` · `stata_poisson` · `stata_ttest` · `stata_xtreg` · `stata_ivregress` |
