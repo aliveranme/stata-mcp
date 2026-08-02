@@ -56,8 +56,16 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: 安装 mcp-publisher
-        run: brew install mcp-publisher
+      - name: 安装 mcp-publisher（下载 Linux 预构建二进制）
+        # 不用 brew：GitHub Actions ubuntu 无预装 Homebrew，且 brew 安装不稳。
+        # 官方在 modelcontextprotocol/registry 的 release 发布多平台预构建二进制。
+        run: |
+          curl -sL -o /tmp/mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.0/mcp-publisher_linux_amd64.tar.gz"
+          mkdir -p /tmp/mcp-pub
+          tar -xzf /tmp/mcp-publisher.tar.gz -C /tmp/mcp-pub
+          sudo install -m 755 "$(find /tmp/mcp-pub -type f -name 'mcp-publisher' | head -1)" /usr/local/bin/mcp-publisher
+          mcp-publisher --help >/dev/null && echo "mcp-publisher 就绪 (Linux amd64)"
 
       - name: 登录 MCP registry（GitHub Actions OIDC）
         run: mcp-publisher login github-oidc
