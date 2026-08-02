@@ -56,6 +56,15 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: 发布到 GitHub Packages（npm，绑定本仓库）
+        # 与仓库地址绑定的私有 npm registry（npm.pkg.github.com，scope @aliveranme）。
+        # 用默认 GITHUB_TOKEN（需仓库 Settings→Actions→Workflow permissions 开启
+        # Read and write；若被拒，错误会提示 "package does not exist / permissions"）。
+        working-directory: npm-package
+        run: npm publish --registry=https://npm.pkg.github.com --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: 安装 mcp-publisher（下载 Linux 预构建二进制）
         # 不用 brew：GitHub Actions ubuntu 无预装 Homebrew，且 brew 安装不稳。
         # 官方在 modelcontextprotocol/registry 的 release 发布多平台预构建二进制。

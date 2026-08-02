@@ -1,0 +1,44 @@
+name: Lint
+
+# 语法与格式化检查流水线（轻量、无需 Stata）：
+#   ruff check（lint）+ ruff format --check（格式）+ compileall（语法）
+# 功能/回归测试在本地跑（tests/ 单元 + tests_e2e/ 需真实 Stata）。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 ruff
+        run: pip install ruff
+
+      - name: ruff check（lint）
+        working-directory: mcp-stata-server
+        run: |
+          ruff check server.py stata_helpers.py tool_modules/ tests/ tests_e2e/
+          # setup.py 在仓库根，不在本 job 的 working-directory 下；
+          # 它是每个新用户第一个运行的脚本，必须一并检查
+          ruff check --config pyproject.toml ../setup.py
+
+      - name: ruff format --check
+        working-directory: mcp-stata-server
+        run: |
+          ruff format --check server.py stata_helpers.py tool_modules/ tests/ tests_e2e/
+          ruff format --check --config pyproject.toml ../setup.py
+
+      - name: Python 语法检查（compileall，不 import，无需 Stata）
+        working-directory: mcp-stata-server
+        run: |
+          python -m compileall -q server.py stata_helpers.py tool_modules/
+          python -m py_compile ../setup.py
