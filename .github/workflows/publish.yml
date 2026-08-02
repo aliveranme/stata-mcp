@@ -58,10 +58,14 @@ jobs:
 
       - name: 发布到 GitHub Packages（npm，绑定本仓库）
         # 与仓库地址绑定的私有 npm registry（npm.pkg.github.com，scope @aliveranme）。
-        # 用默认 GITHUB_TOKEN（需仓库 Settings→Actions→Workflow permissions 开启
-        # Read and write；若被拒，错误会提示 "package does not exist / permissions"）。
+        # 需在 .npmrc 显式配置 GitHub registry 的 _authToken（setup-node 只配了 npmjs），
+        # 否则 ENEEDAUTH。GITHUB_TOKEN 需仓库 Actions permissions 开启 Read and write
+        #（否则会进一步 403）。
         working-directory: npm-package
-        run: npm publish --registry=https://npm.pkg.github.com --access public
+        run: |
+          npm config set //npm.pkg.github.com/:_authToken="$NODE_AUTH_TOKEN"
+          npm config set @aliveranme:registry=https://npm.pkg.github.com/
+          npm publish --registry=https://npm.pkg.github.com --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
