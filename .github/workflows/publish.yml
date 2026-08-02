@@ -56,11 +56,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: 发布到 GitHub Packages（npm，绑定本仓库）
+      - name: 发布到 GitHub Packages（npm，绑定本仓库，可选渠道）
         # 与仓库地址绑定的私有 npm registry（npm.pkg.github.com，scope @aliveranme）。
-        # 需在 .npmrc 显式配置 GitHub registry 的 _authToken（setup-node 只配了 npmjs），
-        # 否则 ENEEDAUTH。GITHUB_TOKEN 需仓库 Actions permissions 开启 Read and write
-        #（否则会进一步 403）。
+        # 非关键渠道：失败不阻断核心发布（npmjs + registry），故 continue-on-error。
+        # 需 .npmrc 显式配置 GitHub registry 的 _authToken；GITHUB_TOKEN 需仓库
+        # Actions→Workflow permissions 为 Read and write（否则 E403）。
+        continue-on-error: true
         working-directory: npm-package
         run: |
           npm config set //npm.pkg.github.com/:_authToken="$NODE_AUTH_TOKEN"
