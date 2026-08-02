@@ -1,13 +1,21 @@
 name: Publish npm + MCP Registry
 
-# 打 v* tag 时触发：同步 python 服务器 → 构建 npm 包 → 发布到 npmjs.org
-# （需在 GitHub secrets 配置 NPM_TOKEN —— npmjs.org 的 access token）
+# 打 v* tag 时触发，一条命令完成全部发布：
+#   1. 同步 python 服务器到 npm 包
+#   2. 从 tag 解析版本 → 写入 package.json 与 server.json（tag 即版本源）
+#   3. npm publish（secrets.NPM_TOKEN，需 granular token + bypass 2fa）
+#   4. mcp-publisher login github-oidc（GitHub Actions OIDC 认证）
+#   5. mcp-publisher publish（发布到官方 MCP registry）
 on:
   push:
     tags: ['v*']
 
+permissions:
+  contents: read
+  id-token: write   # OIDC：registry 用 GitHub Actions OIDC 验证 io.github 命名空间
+
 jobs:
-  publish-npm:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,22 +33,21 @@ jobs:
           cp ../mcp-stata-server/server.py ../mcp-stata-server/stata_helpers.py python/
           cp -r ../mcp-stata-server/tool_modules python/
 
-      - name: 同步 tag 版本到 package.json（tag 即版本源）
-        # v1.2.3 → version 1.2.3。保证「git tag 版本 == 发布的 npm 包版本」，
-        # 避免手动改 package.json 与 tag 漂移导致 publish 冲突（如 tag v1.0.4
-        # 却发 1.0.0 → 报已存在）。
-        working-directory: npm-package
+      - name: 同步 tag 版本到 package.json 与 server.json（tag 即版本源）
+        # v1.2.3 → 1.2.3，写入三处版本：npm package.json、server.json 顶层、server.json 包内。
+        # 保证「git tag == npm 包版本 == registry 版本」三者一致，杜绝漂移。
         run: |
           V="${GITHUB_REF_NAME#v}"
-          node -e "const p=require('./package.json'); p.version=process.env.V; require('fs').writeFileSync('package.json', JSON.stringify(p,null,2)+'\n')"
-          echo "npm 包版本: $V"
+          node -e "const p=require('./npm-package/package.json'); p.version=process.env.V; require('fs').writeFileSync('./npm-package/package.json', JSON.stringify(p,null,2)+'\n')"
+          node -e "const s=require('./server.json'); s.version=process.env.V; s.packages[0].version=process.env.V; require('fs').writeFileSync('./server.json', JSON.stringify(s,null,2)+'\n')"
+          echo "=== 发布版本: $V ==="
         env:
           V: ${{ github.ref_name }}
 
-      - name: 校验 npm 包（含 mcpName 字段 + 版本）
+      - name: 校验 npm 包（mcpName + 版本）
         working-directory: npm-package
         run: |
-          node -e "const p=require('./package.json'); if(p.mcpName!=='io.github.aliveranme/stata-mcp'){throw new Error('mcpName 缺失')}; if(!p.version) throw new Error('version 缺失'); console.log('mcpName OK:', p.mcpName, '| version:', p.version)"
+          node -e "const p=require('./package.json'); if(p.mcpName!=='io.github.aliveranme/stata-mcp'){throw new Error('mcpName 缺失')}; const expect=process.argv[1].replace(/^v/,''); if(p.version!==expect){throw new Error('版本未同步: '+p.version)}; console.log('OK:', p.mcpName, 'v'+p.version)" "${{ github.ref_name }}"
           npm pack --dry-run
 
       - name: 发布到 npmjs.org
@@ -48,3 +55,12 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 安装 mcp-publisher
+        run: brew install mcp-publisher
+
+      - name: 登录 MCP registry（GitHub Actions OIDC）
+        run: mcp-publisher login github-oidc
+
+      - name: 发布官方 MCP registry
+        run: mcp-publisher publish
