@@ -144,6 +144,21 @@ Claude Code `.mcp.json` 配置：
 
 Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize`。
 
+### 各 Agent 安装教程
+
+除 Claude Code 外，本 MCP 可接入所有支持 MCP 的客户端/Agent。逐平台教程见
+[`docs/agent-setup/`](docs/agent-setup/README.md)：
+
+| Agent / 客户端 | 配置位置 | 教程 |
+|------|----------|------|
+| Claude Code | `.mcp.json` / `claude mcp add` | [claude-code.md](docs/agent-setup/claude-code.md) |
+| Claude Desktop | `claude_desktop_config.json` | [claude-desktop.md](docs/agent-setup/claude-desktop.md) |
+| Cursor | `.cursor/mcp.json` | [cursor.md](docs/agent-setup/cursor.md) |
+| Cline / Roo Code / Continue / Zed / Windsurf | 通用 `mcpServers` schema（Zed 用 `context_servers`） | [other-clients.md](docs/agent-setup/other-clients.md) |
+
+> 插件 / 扩展市场分发（Claude Code 插件、Cursor 扩展、Claude Desktop `.mcpb`）的可行性
+> 评估见 [plugin-distribution.md](docs/agent-setup/plugin-distribution.md)。
+
 ## MCP 工具（75 个）
 
 > 能力边界不在工具数量上：`stata_run` + `stata_help` 已覆盖全部内置命令。下面的
