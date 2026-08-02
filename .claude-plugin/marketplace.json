@@ -1,0 +1,15 @@
+{
+  "name": "stata-mcp-marketplace",
+  "owner": {
+    "name": "aliveranme",
+    "email": "aliveranme@users.noreply.github.com"
+  },
+  "plugins": [
+    {
+      "name": "stata-mcp",
+      "source": "./plugin",
+      "description": "Stata MCP server + 编程 skill：驱动真实 Stata 的 75 个工具。",
+      "version": "1.0.8"
+    }
+  ]
+}
