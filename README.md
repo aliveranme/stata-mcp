@@ -106,6 +106,35 @@ cp .mcp.json.example .mcp.json     # 编辑其中的 <repo-path>
 ```
 </details>
 
+### 通过 npm 安装（无需 clone 仓库）
+
+若你已有 Node.js ≥ 18 与 `uv`（无 uv 时需 Python 3.10+ 且已装 `fastmcp>=3.2.0`），可直接使用已发布的
+npm 包 `@aliveranme/stata-mcp`：
+
+```bash
+export STATA_HOME="/你的/Stata路径"     # 含 utilities/pystata
+export STATA_EDITION=mp
+
+# 直接跑通（首次启动经 uv 拉取 fastmcp，请给客户端 90s 超时）
+npx -y @aliveranme/stata-mcp
+```
+
+Claude Code `.mcp.json` 配置：
+
+```json
+{
+  "mcpServers": {
+    "stata": {
+      "command": "npx",
+      "args": ["-y", "@aliveranme/stata-mcp"],
+      "env": { "STATA_HOME": "/Applications/StataNow", "STATA_EDITION": "mp" }
+    }
+  }
+}
+```
+
+> `npx @aliveranme/stata-mcp` 与 `npx stata-mcp-server`（bin 名）等价，二者都触发同一个启动器。
+
 ### 连接并验证
 
 重启 Claude Code（或 `/reload-plugins`），`.mcp.json` 里的 `stata` Server 会自动连接。

@@ -565,9 +565,9 @@ server 选择「始终允许」）。
 
 ## 已知局限
 
-- **CI 实际不运行**：`.github/workflows/test.yml` 是 GitHub Actions 格式，而本仓库的 `origin` 是自建 Gitea（`gitea.aliveranme.space`）。除非该 Gitea 启用 Actions 并注册了 runner，推送**不会触发任何检查**。这份 workflow 目前只是「若迁到 GitHub 即可用」的配置，**不能当作质量门禁**。
-  - 它描述的内容：ubuntu-latest × py3.10/3.11/3.12，跑 `ruff check .` 加对仓库根 `setup.py` 的单独 lint，再跑 `pytest --cov`（ruff 规则见 `pyproject.toml` 的 `[tool.ruff]`）。
-  - 提交前请在本地手动执行：`cd mcp-stata-server && .venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check server.py tool_modules/ tests/ tests_e2e/ && .venv/bin/python -m ruff check --config pyproject.toml ../setup.py`
+- **CI 实际不运行**：`.github/workflows/lint.yml` 与 `publish.yml` 是 GitHub Actions 格式，而本仓库的 `origin` 是自建 Gitea（`gitea.aliveranme.space`）。除非该 Gitea 启用 Actions 并注册了 runner，推送**不会触发任何检查**。这份 workflow 目前只是「若迁到 GitHub 即可用」的配置，**不能当作质量门禁**。
+  - `lint.yml` 描述的内容：单 job、python 3.12，跑 `ruff check`（含仓库根 `setup.py` 单独检查）+ `ruff format --check` + `compileall`/`py_compile` 语法检查（ruff 规则见 `pyproject.toml` 的 `[tool.ruff]`）。**不含 pytest** —— 功能/回归测试留在本地（`tests/` 单元 + `tests_e2e/` 需真实 Stata）。
+  - 提交前请在本地手动执行（与 lint.yml 逐条对齐，本地绿 == CI 绿）：`cd mcp-stata-server && .venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check server.py stata_helpers.py tool_modules/ tests/ tests_e2e/ && .venv/bin/python -m ruff check --config pyproject.toml ../setup.py && .venv/bin/python -m ruff format --check server.py stata_helpers.py tool_modules/ tests/ tests_e2e/ && .venv/bin/python -m ruff format --check --config pyproject.toml ../setup.py && .venv/bin/python -m compileall -q server.py stata_helpers.py tool_modules/ && .venv/bin/python -m py_compile ../setup.py`
   - 即便迁到 GitHub，也只覆盖 Linux；本项目主要面向 Windows（`STATA_HOME` 默认即 Windows 路径），Windows 与 macOS 都无覆盖。
   - 测试用 `conftest.abs_path()` 构造平台原生绝对路径，不要硬编码 `C:/` —— POSIX 下 `os.path.isabs("C:/x")` 为假，路径会被当相对路径拼上 cwd。
 - **`stata_snapshot` 只覆盖内存数据集，不是全会话快照**：Stata 原生 `snapshot` 保存的是数据 + 值标签，估计结果、宏、program、frame 结构都不在其中；`restore` 后这些需要重跑。真「多会话隔离」需多个 Stata 实例（受许可证并发实例数约束），snapshot 是单会话内的轻量回退。

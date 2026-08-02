@@ -32,13 +32,27 @@ class McpClient:
             STATA_HOME=os.environ["STATA_HOME"],
             PYTHON=os.environ.get(
                 "PYTHON",
-                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "bin", "python"),
+                os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    ".venv",
+                    "bin",
+                    "python",
+                ),
             ),
         )
-        idx = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "npm-package", "index.js")
+        idx = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "..",
+            "npm-package",
+            "index.js",
+        )
         self.proc = subprocess.Popen(
-            ["node", idx], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, env=env,
+            ["node", idx],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
         )
         time.sleep(10)  # 等 Stata 初始化 + FastMCP banner
 
@@ -74,11 +88,18 @@ def client():
 @pytest.fixture()
 def session(client):
     """initialize + initialized 握手。"""
-    client.send({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2025-11-25", "capabilities": {},
-                   "clientInfo": {"name": "pt", "version": "1.0"}},
-    })
+    client.send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "pt", "version": "1.0"},
+            },
+        }
+    )
     init = client.recv()
     client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     time.sleep(0.3)
@@ -92,10 +113,10 @@ def test_initialize_handshake(session):
     assert r.get("protocolVersion") == "2025-11-25"
     assert "serverInfo" in r and "name" in r["serverInfo"]
     caps = r.get("capabilities", {})
-    assert "tools" in caps          # 我们声明了 tools
-    assert "resources" in caps      # 资源模板
+    assert "tools" in caps  # 我们声明了 tools
+    assert "resources" in caps  # 资源模板
     assert "prompts" in caps
-    assert "instructions" in r      # 服务器说明
+    assert "instructions" in r  # 服务器说明
 
 
 def test_tools_list_structure(session, client):
@@ -110,8 +131,14 @@ def test_tools_list_structure(session, client):
 
 def test_tool_call_result_structure(session, client):
     """tools/call 返回 content 数组 + isError 标志。"""
-    client.send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                 "params": {"name": "stata_ping", "arguments": {}}})
+    client.send(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "stata_ping", "arguments": {}},
+        }
+    )
     r = client.recv()
     result = r["result"]
     assert "content" in result and isinstance(result["content"], list)
@@ -120,18 +147,31 @@ def test_tool_call_result_structure(session, client):
 
 
 def test_unknown_method_returns_jsonrpc_error(session, client):
-    """未知方法返回 JSON-RPC error（含 code/message）。"""
+    """未知方法返回 JSON-RPC error（含 code/message）。
+
+    记录 2025-11-25 符合性审查结论 F2：mcp SDK 对 ClientRequest 联合类型校验先于
+    -32601 分发，未知方法落到 -32602（Invalid request parameters）。规范预期 -32601
+    (Method not found)。此偏差来自上游 SDK，server.py 在 stdio transport 层难以覆盖；
+    断言当前实际码，防止无感漂移。
+    """
     client.send({"jsonrpc": "2.0", "id": 9, "method": "bogus/method", "params": {}})
     r = client.recv()
     assert "error" in r
-    assert "code" in r["error"] and "message" in r["error"]
+    assert r["error"]["code"] == -32602  # F2：上游 SDK 行为（规范预期 -32601）
+    assert "message" in r["error"]
     assert r.get("id") == 9
 
 
 def test_tool_call_bad_arguments_returns_iserror(session, client):
     """tools/call 错误参数 → isError=true（而非协议级 error）。"""
-    client.send({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-                 "params": {"name": "stata_ping", "arguments": {"bogus": 1}}})
+    client.send(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "stata_ping", "arguments": {"bogus": 1}},
+        }
+    )
     r = client.recv()
     assert r["result"]["isError"] is True
 
@@ -153,6 +193,24 @@ def test_prompts_list_valid(session, client):
 
 def test_notification_gets_no_response(session, client):
     """notification（无 id）不应有响应。"""
-    client.send({"jsonrpc": "2.0", "method": "notifications/cancelled",
-                 "params": {"requestId": 999, "reason": "test"}})
+    client.send(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 999, "reason": "test"},
+        }
+    )
     assert client.recv(timeout=1.5) is None
+
+
+def test_malformed_message_gets_no_error_response(session, client):
+    """畸形 JSON-RPC（缺 method）不会得到 JSON-RPC 错误响应。
+
+    记录 2025-11-25 符合性审查结论 F1：mcp SDK 的 stdio 解析器对畸形消息吞掉异常，
+    仅发 notifications/message("Internal Server Error")，不发规范要求的 -32700/-32600
+    错误。上游 SDK 行为，非 server.py 引入；断言「不会出现带 id 的合法错误响应」。
+    """
+    client.send({"jsonrpc": "2.0", "id": 99})
+    r = client.recv(timeout=2)
+    if r is not None:
+        assert "method" in r and "id" not in r  # 是通知而非响应
