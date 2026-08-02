@@ -16,7 +16,7 @@ export STATA_HOME=/Applications/StataNow
 export STATA_EDITION=mp
 
 # MCP 客户端配置（stdio 传输）
-# command: npx stata-mcp-server   （或直接 stata-mcp-server）
+# command: npx -y @aliveranme/stata-mcp
 ```
 
 ## 配置 MCP 客户端（Claude Code 示例）
@@ -26,7 +26,7 @@ export STATA_EDITION=mp
   "mcpServers": {
     "stata": {
       "command": "npx",
-      "args": ["stata-mcp-server"],
+      "args": ["-y", "@aliveranme/stata-mcp"],
       "env": { "STATA_HOME": "/Applications/StataNow", "STATA_EDITION": "mp" }
     }
   }

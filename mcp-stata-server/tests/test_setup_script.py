@@ -345,3 +345,44 @@ def test_generate_mcp_json_hints_optional_env_when_none_set(tmp_path, setup_mod,
     out = capsys.readouterr().out
     assert "可选环境变量" in out
     assert "STATA_ALLOWED_ROOTS" in out
+
+
+def test_test_server_bootstrap_includes_server_dir(setup_mod, monkeypatch, tmp_path):
+    """setup.py 的 test_server bootstrap 必须把 server 目录加入 sys.path（ENG-1 回归）。
+
+    bootstrap 脚本写在系统临时目录，而 server.py 从同目录 import stata_helpers /
+    tool_modules；若不把 server 目录插入 sys.path，一键安装的 Step 4 必抛
+    ModuleNotFoundError（对抗性审查 ENG-1：server.py 抽取 stata_helpers 后引入的回归）。
+    """
+    captured = {}
+
+    class FakeTempFile:
+        def __init__(self):
+            self.name = str(tmp_path / "bootstrap_test.py")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def write(self, s):
+            captured["content"] = s
+
+    monkeypatch.setattr(setup_mod.tempfile, "NamedTemporaryFile", lambda *a, **k: FakeTempFile())
+
+    class FakeResult:
+        stdout = "TOOLS:75"
+        stderr = ""
+
+    monkeypatch.setattr(setup_mod.subprocess, "run", lambda *a, **k: FakeResult())
+
+    ok = setup_mod.test_server(
+        project_root=str(tmp_path / "repo"),
+        python_exe="python",
+        stata_home="/opt/StataNow",
+    )
+    assert ok is True
+    content = captured["content"]
+    assert "utilities" in content, "pystata utilities 目录应加入 sys.path"
+    assert "mcp-stata-server" in content, "server 目录必须加入 sys.path（ENG-1 修复点）"

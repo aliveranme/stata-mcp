@@ -44,6 +44,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         in_range: str = "",
         vartype: str = "",
         options: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """创建新变量（generate）。
 
@@ -78,7 +79,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        return deps.run_stata_command(cmd, timeout=timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def stata_egen(
@@ -89,6 +90,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         in_range: str = "",
         vartype: str = "",
         options: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """用扩展生成函数创建新变量（egen）。
 
@@ -127,14 +129,11 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        return deps.run_stata_command(cmd, timeout=timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def stata_predict(
-        newvar: str,
-        options: str = "",
-        condition: str = "",
-        in_range: str = "",
+        newvar: str, options: str = "", condition: str = "", in_range: str = "", timeout: int = 60
     ) -> str | deps.ToolResult:
         """在估计后生成预测值 / 残差等（predict，后估计命令）。
 
@@ -162,7 +161,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        return deps.run_stata_command(cmd, timeout=timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def stata_xtset(
@@ -170,6 +169,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         timevar: str = "",
         action: str = "set",
         options: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """声明面板 / 时间序列结构（``xtset`` / ``tsset``）。
 
@@ -196,9 +196,9 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             # 裸 xtset 是查询，但未设定时报 r(459)；capture noisily 既不中断
             # 命令链，又保留 "panel variable not set" 这句有用的诊断。
             # 实测 xtset 对纯时序数据也照报 "Time variable: …"，无需再发 tsset。
-            return deps.run_stata_command("capture noisily xtset")
+            return deps.run_stata_command("capture noisily xtset", timeout=timeout)
         if action == "clear":
-            return deps.run_stata_command("xtset, clear")
+            return deps.run_stata_command("xtset, clear", timeout=timeout)
 
         if err := deps.validate_identifier(panelvar, "panelvar"):
             return deps.result_or_error(err)
@@ -221,7 +221,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd = f"tsset {timevar.strip()}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        return deps.run_stata_command(cmd, timeout=timeout)
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）
     return {k: v for k, v in locals().items() if k.startswith("stata_") and callable(v)}

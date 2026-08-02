@@ -278,7 +278,7 @@ eps/ps/emf 不支持）、`quality`（仅 jpg）、`mag`（仅 pdf/eps/ps）、`
 |------|--------|------|
 | `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。环境变量优先级最高；未设置时由 `setup.py` 自动检测。 |
 | `STATA_EDITION` | `mp` | Stata 版本（mp / se / be） |
-| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。未设置时不限制绝对路径；**即便设置也只校验工具的路径参数**，不覆盖 `stata_run` 里的自由文本命令。 |
+| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。**两重限制**：未设置时不限制绝对路径；设置后既校验工具的路径参数，也审计 `stata_run` / `stata_run_do_file` / `stata_background` 自由文本命令里的引号路径（`use "越界路径"` 同样被拒）。宏路径 fail-open，未配置白名单时不启用。 |
 | `STATA_ALLOW_UNC` | 未设置 | 设为 `1` 允许 UNC 网络路径，默认拒绝。 |
 | `JAVA_TOOL_OPTIONS` | 自动追加 `-Djava.awt.headless=true` | MCP 无 GUI 会话时自动启用 Java headless，避免图形导出触发 AWT 渲染错误。若已显式设置 `-Djava.awt.headless=true/false`，则保留原值。 |
 </details>

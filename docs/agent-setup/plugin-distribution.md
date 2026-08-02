@@ -59,10 +59,12 @@ stata-mcp-plugin/
 }
 ```
 
-> ⚠️ `STATA_HOME` 是用户机器相关的路径，**不能写死在插件里**。用 `${env:STATA_HOME}`
-> 引用用户系统的环境变量（Claude Code 支持 `${env:VAR}` 替换），并在插件 README 里
-> 说明「先 export STATA_HOME 指向你的 Stata 安装目录」。若用户未设该变量，也可在
-> `SessionStart` hook 里引导设置。
+> ⚠️ `STATA_HOME` 是用户机器相关的路径，**不能写死在插件里**。用 `${STATA_HOME}`
+> 引用用户系统的环境变量（Claude Code `.mcp.json` 的 env 支持 `${VAR}` 展开，见
+> [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)；注意是 `${STATA_HOME}`
+> 而非 `${env:STATA_HOME}`），并在插件 README 里说明「先 export STATA_HOME 指向你的
+> Stata 安装目录，再启动 Claude Code」。若用户未设该变量，Claude Code 会报 missing-variable
+> 警告，server 因缺少 `utilities/pystata` 而 FATAL 退出——错误信息已足够可操作。
 
 ### 落地步骤（未来）
 

@@ -491,6 +491,9 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
                 '"""Bootstrap test — imported by setup.py to verify MCP server."""\n'
                 "import sys, os\n"
                 f"sys.path.insert(0, {repr(os.path.join(stata_home, 'utilities'))})\n"
+                # server.py 依赖同目录的 stata_helpers / tool_modules；bootstrap 脚本在
+                # 系统临时目录，cwd 不会进 sys.path，必须显式加入 server 目录。
+                f"sys.path.insert(0, {repr(os.path.dirname(server_script))})\n"
                 "os.environ['STATA_HOME'] = " + repr(stata_home) + "\n"
                 f"os.environ['STATA_EDITION'] = {repr(stata_edition)}\n"
                 "import importlib.util\n"

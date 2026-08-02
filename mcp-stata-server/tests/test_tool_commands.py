@@ -3067,6 +3067,24 @@ def test_truncation_notice_not_duplicated():
     assert text.count("已截断") == 1, "截断提示应只出现一次"
 
 
+def test_aggregate_truncation_final_clamp():
+    """多块各超限聚合后仍必须收口到 120K（对抗性审查 perf-1：修复前实测 240K+）。
+
+    _execute_single 的上限只作用于单块；N 块拼起来是 N×120K。旧实现里 notice 保留
+    逻辑在 room_for_head 被钳 0 后产出 full = notice + after（仍超预算），需最终
+    无条件收口。
+    """
+    from unittest.mock import patch
+
+    from server import _TRUNCATION_NOTICE, _run_stata_command
+
+    chunk = "x" * (120000 - len(_TRUNCATION_NOTICE)) + _TRUNCATION_NOTICE
+    with patch("server._execute_safe", side_effect=[(0, chunk)] * 3):
+        result = _run_stata_command("list x, n=0\nlist x, n=0\nlist x, n=0")
+    text = result if isinstance(result, str) else result.content[0].text
+    assert len(text) <= 120000 + len(_TRUNCATION_NOTICE), f"聚合截断超上限: {len(text)}"
+
+
 def test_list_empty_result_hints_zero_match():
     """有数据但 list 匹配 0 行时应给可操作提示（实战发现与数据缺失无法区分）。"""
     from unittest.mock import patch

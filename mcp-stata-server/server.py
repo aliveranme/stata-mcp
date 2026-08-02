@@ -1031,7 +1031,6 @@ def _audit_block_paths(block: str) -> str | None:
         # using "path" 形态
         for m in re.finditer(r"\busing\s*\"([^\"]+)\"", line, re.IGNORECASE):
             candidates.append(m.group(1))
-        # 无 using 的引号路径（graph export "x.png" / copy "a" "b"）
         # 无 using 的引号路径（graph export "x.png" / copy "a" "b" /
         # export delimited "x.csv"）—— 含官方缩写
         if base_cmd in (
@@ -1248,6 +1247,10 @@ def _run_stata_command(
                 full = full[: max(0, room_for_head)] + _TRUNCATION_NOTICE + after
             else:
                 full = full[:MAX_OUTPUT_CHARS] + _TRUNCATION_NOTICE
+            # 最终无条件收口：room_for_head 被钳 0 时 full = notice + after，若 after 仍
+            # 超预算（多块各注入一条 notice）会再次超 120K（实测 240K+）。此处保证硬上限。
+            if len(full) > MAX_OUTPUT_CHARS:
+                full = full[: MAX_OUTPUT_CHARS - len(_TRUNCATION_NOTICE)] + _TRUNCATION_NOTICE
         with _output_lock:
             _last_output = full
 
@@ -1590,6 +1593,9 @@ def _bg_worker(task: _BackgroundTask) -> None:
                 full = full[: max(0, room_for_head)] + _TRUNCATION_NOTICE + after
             else:
                 full = full[:MAX_OUTPUT_CHARS] + _TRUNCATION_NOTICE
+            # 与 _run_stata_command 一致：最终无条件收口到 120K 硬上限。
+            if len(full) > MAX_OUTPUT_CHARS:
+                full = full[: MAX_OUTPUT_CHARS - len(_TRUNCATION_NOTICE)] + _TRUNCATION_NOTICE
         task.result = full
         task.is_error = had_error
         task.status = "failed" if had_error else "done"
@@ -2390,9 +2396,15 @@ def stata_read_file(
         return _format_resource_info(entry)
     # base64 工具返回没有 _run_stata_command 的 120K 收口：先按载荷上限拦下，
     # 避免一个 16MB 文件编码成约 21MB 的单一工具结果撑爆 MCP 传输。
-    if entry["size"] > _MAX_TOOL_READ_BYTES:
+    # 用实时文件大小而非登记快照：文件登记后被再次写入/外部修改变大时，陈旧的
+    # entry["size"] 会放行超限文件（历史缺陷，见对抗性审查 ENG-4）。
+    try:
+        live_size = os.path.getsize(_normalize_path(filepath))
+    except OSError:
+        live_size = entry["size"]
+    if live_size > _MAX_TOOL_READ_BYTES:
         return _make_error_result(
-            f"错误: 文件过大（{entry['size']} 字节），无法经 base64 工具返回"
+            f"错误: 文件过大（{live_size} 字节），无法经 base64 工具返回"
             f"（工具载荷上限约 {_MAX_TOOL_READ_BYTES} 字节）。\n"
             "  · 请用 MCP 资源协议：resources/read 读 "
             f"{entry['uri']}（流式二进制，上限 16MB）\n"
