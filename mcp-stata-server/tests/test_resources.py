@@ -214,7 +214,9 @@ def test_save_dataset_registers_on_success(tmp_path):
 def test_save_dataset_does_not_register_on_error(tmp_path):
     p = tmp_path / "out.dta"
     p.write_bytes(b"\x93\x11")
-    with patch("server._run_stata_command", return_value=server._make_error_result("错误: 保存失败")):
+    with patch(
+        "server._run_stata_command", return_value=server._make_error_result("错误: 保存失败")
+    ):
         result = stata_save_dataset(str(p))
     assert isinstance(result, ToolResult) and result.is_error
     assert _resource_lookup(str(p)) is None

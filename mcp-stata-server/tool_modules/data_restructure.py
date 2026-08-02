@@ -107,7 +107,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         if not varlist.strip() and not condition.strip() and not in_range.strip():
             return deps.make_error(
                 "错误: 请二选一 —— 给 varlist 删变量（如 price mpg 或 _all），"
-                "或给 condition/in_range 删观测（如 condition=\"foreign == 1\"）"
+                '或给 condition/in_range 删观测（如 condition="foreign == 1"）'
             )
         if err := deps.validate_varlist(varlist, "varlist"):
             return deps.result_or_error(err)
@@ -152,7 +152,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         if not varlist.strip() and not condition.strip() and not in_range.strip():
             return deps.make_error(
                 "错误: 请二选一 —— 给 varlist 留变量（如 price mpg 或 _all），"
-                "或给 condition/in_range 留观测（如 condition=\"foreign == 1\"）"
+                '或给 condition/in_range 留观测（如 condition="foreign == 1"）'
             )
         if err := deps.validate_varlist(varlist, "varlist"):
             return deps.result_or_error(err)

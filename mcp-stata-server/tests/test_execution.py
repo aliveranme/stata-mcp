@@ -293,8 +293,10 @@ def test_prepare_ssc_installs_does_not_misreport_recovered_command():
     import server
 
     recovered = "StataSO_Execute 崩溃: boom\n(Stata 已自动恢复，请重试命令)"
-    with patch("server._execute_safe", return_value=(111, "not found")), \
-         patch("server._run_stata_command", return_value=recovered):
+    with (
+        patch("server._execute_safe", return_value=(111, "not found")),
+        patch("server._run_stata_command", return_value=recovered),
+    ):
         report = server._prepare_ssc_installs([("estout", False)], timeout=30)
 
     text = "\n".join(report)
@@ -442,7 +444,7 @@ def test_extract_ssc_installs_skips_block_interior():
     """
     from server import _extract_ssc_installs
 
-    text = 'sysuse auto, clear\nif 1 {\n    ssc install estout\n}\nsummarize price'
+    text = "sysuse auto, clear\nif 1 {\n    ssc install estout\n}\nsummarize price"
     cleaned, installs = _extract_ssc_installs(text)
     assert installs == []
     assert cleaned == text

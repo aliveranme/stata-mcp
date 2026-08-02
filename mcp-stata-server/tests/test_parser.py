@@ -237,9 +237,7 @@ def test_parser_ignores_carriage_returns():
 
 
 def test_program_define_collected_as_single_block():
-    blocks = _parse_command_blocks(
-        'program define hi\n    display "hi"\nend'
-    )
+    blocks = _parse_command_blocks('program define hi\n    display "hi"\nend')
     assert blocks == ['program define hi\n    display "hi"\nend']
 
 
@@ -267,9 +265,7 @@ def test_mata_block_collected():
 
 
 def test_command_after_end_block_is_separate():
-    blocks = _parse_command_blocks(
-        'program define hi\n    display "hi"\nend\nhi\nsummarize price'
-    )
+    blocks = _parse_command_blocks('program define hi\n    display "hi"\nend\nhi\nsummarize price')
     assert len(blocks) == 3
     assert blocks[1] == "hi"
     assert blocks[2] == "summarize price"
@@ -344,9 +340,7 @@ def test_indented_star_comment_braces_not_counted():
     assert len(blocks) == 1
     assert blocks[0].rstrip().endswith("}")
 
-    blocks = _parse_command_blocks(
-        "forvalues i=1/2 {\n    * close } here\n    display `i'\n}"
-    )
+    blocks = _parse_command_blocks("forvalues i=1/2 {\n    * close } here\n    display `i'\n}")
     assert len(blocks) == 1
 
 
@@ -357,9 +351,7 @@ def test_star_comment_with_continuation_swallows_next_line():
 
 
 def test_star_comment_continuation_chain_swallows_all():
-    blocks = _parse_command_blocks(
-        '* c ///\ndisplay "A" ///\ndisplay "B"\ndisplay "after"'
-    )
+    blocks = _parse_command_blocks('* c ///\ndisplay "A" ///\ndisplay "B"\ndisplay "after"')
     assert blocks == ['display "after"']
 
 
@@ -387,7 +379,7 @@ def test_block_comment_spanning_multiple_lines_joins_once():
 
 
 def test_standalone_block_comment_does_not_join_separate_commands():
-    blocks = _parse_command_blocks('display 1\n/* note\n*/ display 2')
+    blocks = _parse_command_blocks("display 1\n/* note\n*/ display 2")
     assert len(blocks) == 2
     assert blocks[0] == "display 1"
     assert blocks[1].strip() == "display 2"
@@ -400,9 +392,7 @@ def test_input_opening_line_with_continuation_stays_one_block():
 
 
 def test_command_after_continuation_opened_block_is_separate():
-    blocks = _parse_command_blocks(
-        "program define hi ///\n    , rclass\n    display 1\nend\nhi"
-    )
+    blocks = _parse_command_blocks("program define hi ///\n    , rclass\n    display 1\nend\nhi")
     assert len(blocks) == 2
     assert blocks[1] == "hi"
 
@@ -414,9 +404,7 @@ def test_command_after_continuation_opened_block_is_separate():
 
 
 def test_apostrophe_leading_string_does_not_break_continuation():
-    blocks = _parse_command_blocks(
-        'twoway scatter y x, title("\'90s") ///\n  name(g1)'
-    )
+    blocks = _parse_command_blocks('twoway scatter y x, title("\'90s") ///\n  name(g1)')
     assert len(blocks) == 1, "撇号开头的字符串不应让 /// 失效"
     assert "name(g1)" in blocks[0]
 

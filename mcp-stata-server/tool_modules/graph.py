@@ -24,6 +24,7 @@ stata_scheme 只查/切主题：scheme 名用正向白名单（deps.validate_sch
   打在共享的 os 模块属性上，仍能截获）
 - 校验失败一律 return deps.result_or_error(err)；错误文本以 "错误: " 开头、中文
 """
+
 import os
 from typing import Any
 
@@ -211,9 +212,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             方案清单、当前方案名，或设置确认。
         """
         if action not in ("list", "get", "set"):
-            return deps.make_error(
-                f'错误: action 只能是 "list" / "get" / "set"（收到 {action!r}）'
-            )
+            return deps.make_error(f'错误: action 只能是 "list" / "get" / "set"（收到 {action!r}）')
 
         safe_timeout = max(10, min(timeout, 1800))
         if action == "list":
@@ -231,9 +230,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             return deps.result_or_error(err)
 
         suffix = ", permanently" if permanently else ""
-        return deps.run_stata_command(
-            f"set scheme {scheme.strip()}{suffix}", timeout=safe_timeout
-        )
+        return deps.run_stata_command(f"set scheme {scheme.strip()}{suffix}", timeout=safe_timeout)
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）
     return {k: v for k, v in locals().items() if k.startswith("stata_") and callable(v)}

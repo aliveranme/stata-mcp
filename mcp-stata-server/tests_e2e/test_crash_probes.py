@@ -65,7 +65,10 @@ _PROBES = [
     (lambda s: s.stata_run("drop x_never_exists"), "drop 不存在的变量"),
     (lambda s: s.stata_collapse("price", "nonexistent_xyz"), "collapse 不存在变量"),
     (lambda s: s.stata_run("reshape long x, i(id) j(t)"), "未 reshape 的数据上 reshape"),
-    (lambda s: s.stata_merge(kind="1:1", keyvars="price", using="nonexistent_xyz.dta"), "merge 不存在文件"),
+    (
+        lambda s: s.stata_merge(kind="1:1", keyvars="price", using="nonexistent_xyz.dta"),
+        "merge 不存在文件",
+    ),
     (lambda s: s.stata_run("save /nonexistent_dir_xyz/out.dta"), "保存到不存在目录"),
     # --- 特殊命令 / 输出 ---
     (lambda s: s.stata_run("memory"), "memory 命令"),
@@ -136,9 +139,7 @@ def test_background_task_cancelled_then_result(stata):
 def test_do_file_clear_all_mid_run(stata, outdir):
     """do 文件里 clear all 不应使后续命令崩溃。"""
     do_file = outdir / "midclear.do"
-    do_file.write_text(
-        "sysuse auto, clear\nclear all\nsummarize\n", encoding="utf-8"
-    )
+    do_file.write_text("sysuse auto, clear\nclear all\nsummarize\n", encoding="utf-8")
     r = stata.stata_run_do_file(str(do_file))
     txt = result_text(r)
     assert "崩溃" not in txt and "无响应" not in txt

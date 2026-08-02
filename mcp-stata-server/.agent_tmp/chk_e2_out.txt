@@ -1,0 +1,51 @@
+
+======================================================================
+LABEL: pdf width=800 (default, expect drop hint) is_error= False
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pd
+    > f800.pdf saved as PDF format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pdf800.pdf, 12.6 KB)
+(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pdf800.pdf)
+提示：.pdf 的 width()/height() 单位是英寸（0.5–20），已忽略像素取值 width=800，改用 Stata 默认尺寸。
+
+======================================================================
+LABEL: pdf width=6 (expect no hint) is_error= False
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pd
+    > f6.pdf saved as PDF format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pdf6.pdf, 12.6 KB)
+(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pdf6.pdf)
+提示：.pdf 的 width()/height() 单位是英寸（0.5–20），已忽略像素取值 width=800，改用 Stata 默认尺寸。
+
+======================================================================
+LABEL: png quality=80 (expect drop hint) is_error= False
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_png
+> _q.png written in PNG format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_png_q.png, 23.7 KB)
+(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_png_q.png)
+提示：.png 不支持 quality=80（Stata 会报 option ... not allowed），已忽略。
+
+======================================================================
+LABEL: eps width=800 (expect drop hint) is_error= False
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_ep
+    > s800.eps saved as EPS format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_eps800.eps, 22.8 KB)
+(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_eps800.eps)
+提示：.eps 不支持 width()/height()（Stata 报 option width() not allowed），已忽略 width=800，改用 Stata 默认尺寸。
+
+======================================================================
+LABEL: svg width=800 (expect no hint) is_error= False
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_sv
+    > g800.svg saved as SVG format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_svg800.svg, 40.0 KB)
+(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_svg800.svg)
+
+======================================================================
+LABEL: png width=400 height=300 is_error= False
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_png
+> 400.png written in PNG format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_png400.png, 10.8 KB)
+(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_png400.png)
+

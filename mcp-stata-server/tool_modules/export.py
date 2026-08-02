@@ -19,6 +19,7 @@ stata_export_excel(results=True) 的 estout 探测与回归表导出是**本模�
 ``deps.execute_safe`` 会 drain 输出缓冲，不加锁会抢走并发命令的输出），并以
 ``deps.RC_RECOVERED`` / ``deps.RC_NO_OUTPUT`` 区分「崩溃已恢复」与「无输出」。
 """
+
 import os
 from typing import Any
 
@@ -130,9 +131,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             if ext.lower() != ".csv":
                 export_path = base + ".csv"
                 if ext.lower() == ".xlsx":
-                    changed_msg = (
-                        f"提示：回归结果导出不支持 .xlsx/sheet()，已自动改用 CSV 路径：{export_path}\n"
-                    )
+                    changed_msg = f"提示：回归结果导出不支持 .xlsx/sheet()，已自动改用 CSV 路径：{export_path}\n"
                 else:
                     changed_msg = f"提示：回归结果已导出为 CSV：{export_path}\n"
             else:
@@ -171,10 +170,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                     "装好后重试本次导出即可，无需改动其他步骤。"
                 )
 
-            cmd = (
-                f'esttab using "{export_path}", csv {replace_opt} '
-                f"plain nogaps nomtitles nonumber"
-            )
+            cmd = f'esttab using "{export_path}", csv {replace_opt} plain nogaps nomtitles nonumber'
         else:
             changed_msg = ""
             # Stata 的 export excel 在目标没有扩展名时会实际写成 ``.xlsx``；
@@ -225,7 +221,9 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
 
         reg_err = deps.register_resource(export_path, "stata_export_excel")
         note = "" if reg_err is None else f"\n(登记资源失败: {reg_err})"
-        return f"{changed_msg}已导出 {deps.format_size(export_path)} -> {export_path}\n{result}{note}"
+        return (
+            f"{changed_msg}已导出 {deps.format_size(export_path)} -> {export_path}\n{result}{note}"
+        )
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_etable(

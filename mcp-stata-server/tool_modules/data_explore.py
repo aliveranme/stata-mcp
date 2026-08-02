@@ -16,6 +16,7 @@ destructiveHint=False。
 - **stata_list 的 in 由它自己的 in_range/n 逻辑负责**，只把 condition 交给
   filter_clause —— 否则会拼出 `list … in 1/20 in 1/20`
 """
+
 from typing import Any
 
 
@@ -318,9 +319,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         """
         prefix = {"r": "return", "e": "ereturn", "c": "creturn"}.get(kind)
         if not prefix:
-            return deps.make_error(
-                f'错误: kind 只能是 "r" / "e" / "c"（收到 {kind!r}）'
-            )
+            return deps.make_error(f'错误: kind 只能是 "r" / "e" / "c"（收到 {kind!r}）')
         return deps.run_stata_command(f"{prefix} list")
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）

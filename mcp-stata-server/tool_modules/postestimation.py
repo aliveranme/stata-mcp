@@ -15,6 +15,7 @@
 只依赖注入的 deps 命名空间（ToolAnnotations / ToolResult / run_stata_command /
 make_error / result_or_error / 各校验器）。
 """
+
 from typing import Any
 
 
@@ -66,9 +67,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def stata_nlcom(
-        expression: str, options: str = "", timeout: int = 60
-    ) -> str | deps.ToolResult:
+    def stata_nlcom(expression: str, options: str = "", timeout: int = 60) -> str | deps.ToolResult:
         """对当前估计结果做非线性组合的 delta 法检验（``nlcom``）。
 
         **前提**：先运行过一个估计命令，可用 ``stata_status`` 确认「当前活跃」

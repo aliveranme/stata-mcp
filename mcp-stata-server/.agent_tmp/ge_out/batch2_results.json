@@ -1,0 +1,96 @@
+[
+ {
+  "label": "E3 graph export png",
+  "result": "PASS",
+  "detail": "(file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_sca\n> tter.png not found)\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_scat\n> ter.png written in PNG format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_scatter.png, 23.7 KB)\n(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_",
+  "secs": 0.76
+ },
+ {
+  "label": "E3 read_file info on png",
+  "result": "PASS",
+  "detail": "文件: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_scatter.png\n大小: 23.7 KB\n类型: image/png\n来源: stata_graph\n资源 URI: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_scatter.png\n提示: 用 resources/read 读取该 URI 可取回文件内容；stata_read_file(action=\"read\") 返回 base64。",
+  "secs": 0.0
+ },
+ {
+  "label": "E3 read_file read (base64) on png",
+  "result": "PASS",
+  "detail": "iVBORw0KGgoAAAANSUhEUgAAAyAAAAHgCAYAAABdBwn1AAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAEZ0FNQQAAsY58+1GTAAAAAXNSR0IArs4c6QAAAAZiS0dEAP8A/wD/oL2nkwAAAAlwSFlzAAAOxAAADsQBlSsOGwAAIABJREFUeNrs3Qd8FHX6x/FvEkKWXqT33gVFkKYIiA1UUAELoti72M7Ts/wtJ/ZyVrChchZQzwp3NqQqiooCUpSmSC/SySZk899nxk2dDQE2ye7m8369liGzM1t+O8/uPPNrCZlBAgAAAIBikEgRAAAAACABAQAAAEACAgAAAAAkIAAAAABIQAAAAACABAQAAAAACQgAAAAA",
+  "secs": 0.0
+ },
+ {
+  "label": "E3 list_resources",
+  "result": "PASS",
+  "detail": "已登记的文件资源（可用 resources/read 或 stata_read_file 读取）:\n路径                                                   大小        来源                    \n/Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_scatter.png 23.7 KB   stata_graph           \n\n完整 URI 用 stata_read_file(action=\"info\") 查看。",
+  "secs": 0.0
+ },
+ {
+  "label": "E3 read unregistered file (error expected)",
+  "result": "ERROR",
+  "detail": "错误: 文件未登记为可读资源: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_never_written.png。\n  · 导出工具（stata_graph/stata_export_*/stata_etable/stata_save_dataset）成功后会登记\n  · 已有文件用 stata_register_file 显式登记",
+  "secs": 0.0
+ },
+ {
+  "label": "E3 save_dataset",
+  "result": "PASS",
+  "detail": "(file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_aut\n    > o_save.dta not found)\nfile\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_aut\n    > o_save.dta saved\n(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_auto_save.dta)",
+  "secs": 0.01
+ },
+ {
+  "label": "E3 read dta info",
+  "result": "PASS",
+  "detail": "文件: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_auto_save.dta\n大小: 12.5 KB\n类型: application/octet-stream\n来源: stata_save_dataset\n资源 URI: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_auto_save.dta\n提示: 用 resources/read 读取该 URI 可取回文件内容；stata_read_file(action=\"read\") 返回 base64。",
+  "secs": 0.0
+ },
+ {
+  "label": "E3 read back dta in Stata",
+  "result": "PASS",
+  "detail": "(1978 automobile data)\nContains data from /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/\n> ge_out/e3_auto_save.dta\n Observations:            74                  1978 automobile data\n    Variables:            12                  2 Aug 2026 15:40\n                                              (_dta has notes)\n------------------------------------------------------------------------------",
+  "secs": 0.06
+ },
+ {
+  "label": "E4 regress (prep)",
+  "result": "PASS",
+  "detail": "Source |       SS           df       MS      Number of obs   =        74\n-------------+----------------------------------   F(3, 70)        =     23.29\n       Model |   317252881         3   105750960   Prob > F        =    0.0000\n    Residual |   317812515        70  4540178.78   R-squared       =    0.4996\n-------------+----------------------------------   Adj R-squared   =    0.4781\n       Tota",
+  "secs": 0.05
+ },
+ {
+  "label": "E4 etable export docx",
+  "result": "PASS",
+  "detail": "已导出 7.0 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e4_etable.docx\n---------------------------------\n                          price  \n---------------------------------\nWeight (lbs.)               3.465\n                          (0.631)\nMileage (mpg)              21.854\n                         (74.221)\nCar origin               3673.060\n                        (683.978",
+  "secs": 0.75,
+  "file_size": 7163
+ },
+ {
+  "label": "E4 etable export xlsx",
+  "result": "PASS",
+  "detail": "已导出 3.6 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e4_etable.xlsx\n---------------------------------\n                          price  \n---------------------------------\nWeight (lbs.)               3.465\n                          (0.631)\nMileage (mpg)              21.854\n                         (74.221)\nCar origin               3673.060\n                        (683.978",
+  "secs": 0.12,
+  "file_size": 3676
+ },
+ {
+  "label": "E4 etable export pdf",
+  "result": "PASS",
+  "detail": "已导出 1.3 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e4_etable.pdf\n---------------------------------\n                          price  \n---------------------------------\nWeight (lbs.)               3.465\n                          (0.631)\nMileage (mpg)              21.854\n                         (74.221)\nCar origin               3673.060\n                        (683.978)",
+  "secs": 0.12,
+  "file_size": 1356
+ },
+ {
+  "label": "E4 etable export tex",
+  "result": "PASS",
+  "detail": "已导出 881 B -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e4_etable.tex\n---------------------------------\n                          price  \n---------------------------------\nWeight (lbs.)               3.465\n                          (0.631)\nMileage (mpg)              21.854\n                         (74.221)\nCar origin               3673.060\n                        (683.978)\n",
+  "secs": 0.02,
+  "file_size": 881
+ },
+ {
+  "label": "E4 etable export csv (blocked expected)",
+  "result": "ERROR",
+  "detail": "错误: etable 不支持导出为 .csv（实测 .csv 与 .rtf 会 r(198)）。可用: .docx, .html, .md, .pdf, .smcl, .tex, .txt, .xls, .xlsx",
+  "secs": 0.0
+ },
+ {
+  "label": "E4 etable export to missing dir",
+  "result": "ERROR",
+  "detail": "[返回码: 602] 文件已存在（加 replace） — etable, export(\"/Volumes/ccc/Projects/stata-mcp/mcp-stata-se\n---------------------------------\n                          price  \n---------------------------------\nWeight (lbs.)               3.465\n                          (0.631)\nMileage (mpg)              21.854\n                         (74.221)\nCar origin               3673.060\n                        (683.978)\nInt",
+  "secs": 0.02
+ }
+]

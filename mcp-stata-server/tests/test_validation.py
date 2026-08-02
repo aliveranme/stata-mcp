@@ -46,7 +46,7 @@ from server import (
         "mata",
         'mata:\n_stata("!rm -rf /")\nend',
         "mata drop _all",
-        "summarize mpg\nmata:\n_stata(\"display 1\")\nend",
+        'summarize mpg\nmata:\n_stata("display 1")\nend',
     ],
 )
 def test_dangerous_command_prefix_blocks(cmd):
@@ -465,7 +465,7 @@ def test_validate_scheme_rejects_anything_outside_whitelist(scheme):
         ({"sheet": 'S1") cellrange(A1:A1) //'}, "sheet"),
         ({"cellrange": "A1:B2) clear //"}, "cellrange"),
         ({"encoding": 'utf-8") clear //'}, "encoding"),
-        ({"varnames": '1) clear //'}, "varnames"),
+        ({"varnames": "1) clear //"}, "varnames"),
     ],
 )
 def test_import_rejects_quote_and_paren_escapes(kwargs, keyword, tmp_path):
@@ -506,8 +506,8 @@ from server import _flag_macro_obfuscation, _precheck_command  # noqa: E402
         "global g shell ls\n$g -la",
         "global g shell ls\n${g} -la",
         'quietly local c "python: evil()"\n`c\'',
-        "capture local c \"!rm -rf /\"\n`c'",
-        "local c \"mata\"\n`c'",
+        'capture local c "!rm -rf /"\n`c\'',
+        'local c "mata"\n`c\'',
     ],
 )
 def test_macro_obfuscation_blocked(cmd):
@@ -518,11 +518,11 @@ def test_macro_obfuscation_blocked(cmd):
 @pytest.mark.parametrize(
     "cmd",
     [
-        'local p "data/auto.dta"\nuse "`p\'"',       # 数据路径宏，非命令
-        'local x "hello"\ndisplay "`x\'"',           # 字符串内引用
-        'local cmd "regress"\n`cmd\' price mpg',      # 值非危险命令
-        "summarize price",                           # 无宏
-        'global dir "/allowed"\nuse "$dir/f.dta"',   # 数据路径全局宏
+        'local p "data/auto.dta"\nuse "`p\'"',  # 数据路径宏，非命令
+        'local x "hello"\ndisplay "`x\'"',  # 字符串内引用
+        'local cmd "regress"\n`cmd\' price mpg',  # 值非危险命令
+        "summarize price",  # 无宏
+        'global dir "/allowed"\nuse "$dir/f.dta"',  # 数据路径全局宏
     ],
 )
 def test_macro_obfuscation_allows_safe(cmd):
@@ -539,7 +539,7 @@ def test_macro_obfuscation_allows_safe(cmd):
     [
         'local c = "shell whoami"\n`c\' whoami',
         'global g = "era /tmp/x"\n$g',
-        'local c `"shell whoami"\'\n`c\' whoami',
+        "local c `\"shell whoami\"'\n`c' whoami",
         'local c "sh whoami"\n`c\'',
     ],
 )

@@ -1,0 +1,14 @@
+
+PAGE1 has truncation notice: False
+--- PAGE1 tail ---
+---------------|
+ 121. |  121   -.6530445 |
+ 122. |  1
+── 第 1/31 页 — 使用 stata_more(page=2) 翻下页 — stata_more(page=0) 显示全部
+
+PAGE31 has truncation notice: True
+--- PAGE31 tail ---
+── 第 31/31 页（共 120095 字符）──
+
+(输出已截断：超过 120000 字符上限，后续内容已丢弃。请缩小范围后重试，例如用 in_range 限定观测、改用 summarize/tabulate 汇总，或先导出到文件再查看。)
+── 第 31/31 页 — stata_more(page=30) 翻上页 — stata_more(page=0) 显示全部

@@ -1,0 +1,9 @@
+
+full len: 4286
+has 完整输出已保存: True
+has 已截断: False
+note idx: 4095
+CONTEXT: |
+ 122. |  1
+── 第 1/31 页 — 使用 stata_more(page=2) 翻下页 — stata_more(page=0) 显示全部
+(完整输出已保存: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_big.txt | 资源 URI: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/c

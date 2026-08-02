@@ -40,18 +40,20 @@ def _make_deps(overrides=None):
         validate_filter_expr=lambda v, label: None,
         validate_no_injection=lambda v, label="参数": None,
         filter_clause=lambda c, r: (
-            " "
-            + " ".join(
-                x
-                for x in (
-                    f"if {c}" if c.strip() else "",
-                    f"in {r}" if r.strip() else "",
+            (
+                " "
+                + " ".join(
+                    x
+                    for x in (
+                        f"if {c}" if c.strip() else "",
+                        f"in {r}" if r.strip() else "",
+                    )
+                    if x
                 )
-                if x
             )
-        )
-        if (c.strip() or r.strip())
-        else "",
+            if (c.strip() or r.strip())
+            else ""
+        ),
     )
     if overrides:
         for key, value in overrides.items():
@@ -107,7 +109,9 @@ def test_all_tools_readonly_non_destructive(env):
 
 
 def test_lincom_full_command(env):
-    result, calls = _call(env, "stata_lincom", expression="_b[mpg] + _b[weight]", options="level(95)")
+    result, calls = _call(
+        env, "stata_lincom", expression="_b[mpg] + _b[weight]", options="level(95)"
+    )
     assert result == "lincom _b[mpg] + _b[weight], level(95)"
     assert calls == [("lincom _b[mpg] + _b[weight], level(95)", 60)]
 
@@ -135,9 +139,7 @@ def test_lincom_rejects_injection():
     mcp, deps, calls = _register_with(
         overrides={"validate_no_injection": lambda v, label="参数": bad}
     )
-    result, calls_after = _call(
-        (mcp, deps, calls), "stata_lincom", expression="_b[x] ; drop _all"
-    )
+    result, calls_after = _call((mcp, deps, calls), "stata_lincom", expression="_b[x] ; drop _all")
     assert result == bad
     assert calls_after == []
 
@@ -188,7 +190,9 @@ def test_nlcom_rejects_injection():
 
 
 def test_hausman_full_command(env):
-    result, calls = _call(env, "stata_hausman", consistent="fe", efficient="re", options="sigmamore")
+    result, calls = _call(
+        env, "stata_hausman", consistent="fe", efficient="re", options="sigmamore"
+    )
     assert result == "hausman fe re, sigmamore"
     assert calls == [("hausman fe re, sigmamore", 60)]
 
@@ -220,9 +224,7 @@ def test_hausman_rejects_bad_consistent():
             )
         }
     )
-    result, calls_after = _call(
-        (mcp, deps, calls), "stata_hausman", consistent="fe; drop"
-    )
+    result, calls_after = _call((mcp, deps, calls), "stata_hausman", consistent="fe; drop")
     assert result == bad
     assert calls_after == []
 

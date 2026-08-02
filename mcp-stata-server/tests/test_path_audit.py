@@ -83,8 +83,8 @@ def test_audit_rejects_cd(roots):
 
 def test_audit_ignores_non_data_commands(roots):
     assert _audit('display "hello world"') is None
-    assert _audit('summarize price if price > 5000') is None
-    assert _audit('regress price mpg, robust') is None
+    assert _audit("summarize price if price > 5000") is None
+    assert _audit("regress price mpg, robust") is None
 
 
 def test_audit_ignores_webuse_and_sysuse(roots):

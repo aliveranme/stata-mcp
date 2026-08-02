@@ -21,6 +21,7 @@ replace/drop/keep/rename/recode/destring）：
   ``_split_using_paths``），require_file 经 deps.run_stata_command(...) 透传，
   触发锁内权威路径解析
 """
+
 import os
 import re
 from typing import Any
@@ -30,9 +31,7 @@ _MERGE_KINDS = ("1:1", "m:1", "1:m", "m:m")
 
 
 # frame 的 action 集合与参数要求。
-_FRAME_ACTIONS = frozenset(
-    {"dir", "current", "create", "change", "drop", "copy", "rename"}
-)
+_FRAME_ACTIONS = frozenset({"dir", "current", "create", "change", "drop", "copy", "rename"})
 _FRAME_NEED_NAME = frozenset({"create", "change", "drop", "copy", "rename"})
 _FRAME_NEED_NEWNAME = frozenset({"copy", "rename"})
 
@@ -97,9 +96,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 f"frame {action} {name.strip()} {newname.strip()}",
                 timeout=safe_timeout,
             )
-        return deps.run_stata_command(
-            f"frame {action} {name.strip()}", timeout=safe_timeout
-        )
+        return deps.run_stata_command(f"frame {action} {name.strip()}", timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_verify(
@@ -134,13 +131,15 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             检查结果；``assert`` 不成立时以错误结果返回。
         """
         if check not in _VERIFY_CHECKS:
-            return deps.make_error(
-                f"错误: check 只能是 {sorted(_VERIFY_CHECKS)}（收到 {check!r}）"
-            )
+            return deps.make_error(f"错误: check 只能是 {sorted(_VERIFY_CHECKS)}（收到 {check!r}）")
         if err := deps.validate_varlist(varlist, "varlist"):
             return deps.result_or_error(err)
-        for value, label in ((expression, "expression"), (condition, "condition"),
-                             (in_range, "in_range"), (options, "options")):
+        for value, label in (
+            (expression, "expression"),
+            (condition, "condition"),
+            (in_range, "in_range"),
+            (options, "options"),
+        ):
             if err := deps.validate_no_injection(value, label):
                 return deps.result_or_error(err)
 
@@ -179,9 +178,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
 
         if check == "isid":
             if not varlist.strip():
-                return deps.make_error(
-                    '错误: check="isid" 必须提供 varlist（要检验唯一性的变量）'
-                )
+                return deps.make_error('错误: check="isid" 必须提供 varlist（要检验唯一性的变量）')
             cmd = f"isid {varlist.strip()}"
             if options.strip():
                 cmd += f", {options.strip()}"
@@ -227,17 +224,18 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             合并结果的匹配汇总表。
         """
         if kind not in _MERGE_KINDS:
-            return deps.make_error(
-                f"错误: kind 只能是 {list(_MERGE_KINDS)}（收到 {kind!r}）"
-            )
+            return deps.make_error(f"错误: kind 只能是 {list(_MERGE_KINDS)}（收到 {kind!r}）")
         if not keyvars.strip():
             return deps.make_error('错误: 请提供匹配键变量（按观测号合并传 "_n"）')
         if err := deps.validate_varlist(keyvars, "keyvars"):
             return deps.result_or_error(err)
         if err := deps.validate_varlist(keepusing, "keepusing"):
             return deps.result_or_error(err)
-        for value, label in ((condition, "condition"), (in_range, "in_range"),
-                             (options, "options")):
+        for value, label in (
+            (condition, "condition"),
+            (in_range, "in_range"),
+            (options, "options"),
+        ):
             if err := deps.validate_no_injection(value, label):
                 return deps.result_or_error(err)
         if condition.strip() or in_range.strip():
@@ -252,10 +250,12 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
 
         cmd = f'merge {kind} {keyvars.strip()} using "{paths[0]}"'
         opts = " ".join(
-            p for p in (
+            p
+            for p in (
                 f"keepusing({keepusing.strip()})" if keepusing.strip() else "",
                 options.strip(),
-            ) if p
+            )
+            if p
         )
         if opts:
             cmd += f", {opts}"
@@ -336,9 +336,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             转换前后的形态汇总。
         """
         if direction not in ("long", "wide"):
-            return deps.make_error(
-                f'错误: direction 只能是 "long" 或 "wide"（收到 {direction!r}）'
-            )
+            return deps.make_error(f'错误: direction 只能是 "long" 或 "wide"（收到 {direction!r}）')
         if not stub.strip():
             return deps.make_error('错误: 请提供变量名前缀 stub，如 "inc"')
         if not i.strip():
@@ -352,9 +350,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         if err := deps.validate_no_injection(options, "options"):
             return deps.result_or_error(err)
         if direction == "wide" and not j.strip():
-            return deps.make_error(
-                '错误: direction="wide" 时必须提供 j（已存在的区分列变量）'
-            )
+            return deps.make_error('错误: direction="wide" 时必须提供 j（已存在的区分列变量）')
 
         cmd = f"reshape {direction} {stub.strip()}, i({i.strip()})"
         if j.strip():
@@ -394,13 +390,15 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             聚合确认信息。
         """
         if not clist.strip():
-            return deps.make_error(
-                '错误: 请提供聚合表达式 clist，如 "(mean) price (sd) mpg"'
-            )
+            return deps.make_error('错误: 请提供聚合表达式 clist，如 "(mean) price (sd) mpg"')
         if err := deps.validate_varlist(by, "by"):
             return deps.result_or_error(err)
-        for value, label in ((clist, "clist"), (condition, "condition"),
-                             (in_range, "in_range"), (options, "options")):
+        for value, label in (
+            (clist, "clist"),
+            (condition, "condition"),
+            (in_range, "in_range"),
+            (options, "options"),
+        ):
             if err := deps.validate_no_injection(value, label):
                 return deps.result_or_error(err)
 

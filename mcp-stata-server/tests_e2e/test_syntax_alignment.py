@@ -47,8 +47,7 @@ def test_in_range_actually_restricts_estimation_sample(auto_data):
 
 
 def test_if_and_in_combine_on_estimation(auto_data):
-    out = _ok(auto_data.stata_regress("price", "weight",
-                                      condition="foreign == 0", in_range="1/40"))
+    out = _ok(auto_data.stata_regress("price", "weight", condition="foreign == 0", in_range="1/40"))
     assert "Number of obs" in out
 
 
@@ -108,10 +107,9 @@ def test_use_dataset_loads_only_requested_subset(auto_data, stata):
     if not os.path.isfile(dta):
         pytest.skip("找不到随 Stata 分发的 auto.dta")
 
-    _ok(stata.stata_use_dataset(dta, varlist="make price foreign",
-                                condition="foreign == 1"))
+    _ok(stata.stata_use_dataset(dta, varlist="make price foreign", condition="foreign == 1"))
     desc = _ok(stata.stata_describe())
-    assert "22" in desc, desc          # foreign==1 共 22 条
+    assert "22" in desc, desc  # foreign==1 共 22 条
     assert "mpg" not in desc, "未请求的变量不该被载入"
 
 

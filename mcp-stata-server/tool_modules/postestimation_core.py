@@ -22,6 +22,7 @@
 - 全部四个工具都不改动数据集（margins 会在内存中临时替换变量求值后自动还原，
   estimates 会改动已存储的估计结果 —— 后者 readOnlyHint=False）
 """
+
 from typing import Any
 
 # estimates 的子命令。store/restore/save/use/drop 需要名字；dir/clear/table/stats
@@ -98,9 +99,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def stata_test(
-        spec: str, options: str = "", timeout: int = 60
-    ) -> str | deps.ToolResult:
+    def stata_test(spec: str, options: str = "", timeout: int = 60) -> str | deps.ToolResult:
         """对上一个估计结果做 Wald 检验（test，后估计命令）。
 
         **前提**：先运行过一个估计命令。``test`` 作用于已存储的估计结果，
@@ -132,9 +131,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def stata_estat(
-        subcommand: str, options: str = "", timeout: int = 60
-    ) -> str | deps.ToolResult:
+    def stata_estat(subcommand: str, options: str = "", timeout: int = 60) -> str | deps.ToolResult:
         """运行后估计诊断（``estat``）。
 
         **前提**：先运行过一个估计命令（可用 ``stata_status`` 确认「当前活跃」）。

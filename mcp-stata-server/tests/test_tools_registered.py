@@ -123,7 +123,9 @@ def test_registered_tools_match_expected_set():
 def test_every_tool_has_description():
     """docstring 是 Agent 选择工具的唯一依据，缺失即等于该工具不可发现。"""
     server = _load_server()
-    missing = [t.name for t in asyncio.run(server.mcp.list_tools()) if not (t.description or "").strip()]
+    missing = [
+        t.name for t in asyncio.run(server.mcp.list_tools()) if not (t.description or "").strip()
+    ]
     assert not missing, f"以下工具缺少描述: {missing}"
 
 
@@ -142,7 +144,7 @@ def test_write_tools_are_not_marked_read_only():
         "stata_scheme",
         "stata_export_excel",
         "stata_export_delimited",
-    "stata_etable",
+        "stata_etable",
         "stata_install_package",
         "stata_uninstall_package",
         # 以下会创建变量，改动内存中的数据集
@@ -228,12 +230,12 @@ def test_docs_cover_every_registered_tool():
 
 # 只匹配「声明服务器规模」的计数，不匹配叙述性的「给 14 个工具补上参数」。
 _COUNT_PATTERNS = (
-    r"MCP 工具（(\d+) 个）",              # 章节标题
-    r"MCP 执行层：(\d+) 个工具",           # CLAUDE.md 架构图
-    r"把 (\d+) 个工具",                   # README 正文
-    r"主程序（(\d+) 个工具）",             # README 项目结构
-    r"`stata`，(\d+) 个工具",             # SKILL.md
-    r"badge/tools-(\d+)-",               # README 徽章
+    r"MCP 工具（(\d+) 个）",  # 章节标题
+    r"MCP 执行层：(\d+) 个工具",  # CLAUDE.md 架构图
+    r"把 (\d+) 个工具",  # README 正文
+    r"主程序（(\d+) 个工具）",  # README 项目结构
+    r"`stata`，(\d+) 个工具",  # SKILL.md
+    r"badge/tools-(\d+)-",  # README 徽章
 )
 
 
@@ -246,9 +248,7 @@ def test_tool_count_in_docs_matches_reality():
     n = len(_registered_tool_names())
     for path in _DOCS:
         text = _doc_text(path)
-        counts = {
-            int(c) for pat in _COUNT_PATTERNS for c in re.findall(pat, text)
-        }
+        counts = {int(c) for pat in _COUNT_PATTERNS for c in re.findall(pat, text)}
         wrong = sorted(c for c in counts if c != n)
         assert not wrong, f"{os.path.basename(path)} 的工具计数 {wrong} 与实际 {n} 不符"
 

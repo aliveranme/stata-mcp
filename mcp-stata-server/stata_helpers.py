@@ -303,10 +303,7 @@ def _validate_storage_type(vartype: str) -> str | None:
     if not vartype.strip():
         return None
     if not _STORAGE_TYPE_RE.match(vartype.strip()):
-        return (
-            "错误: vartype 只能是 byte/int/long/float/double/str#/strL"
-            f"（收到 {vartype!r}）"
-        )
+        return f"错误: vartype 只能是 byte/int/long/float/double/str#/strL（收到 {vartype!r}）"
     return None
 
 
@@ -345,18 +342,44 @@ def _validate_fontface(fontface: str) -> str | None:
 # 全写放前面，startswith 先命中更完整的形态，错误信息更清晰。
 _DANGEROUS_COMMAND_PREFIXES = (
     "!",
-    "shell", "sh", "xshell", "xsh", "winexec", "winex", "unixcmd", "unixc", "unix",
-    "erase", "era", "rmdir", "rmd",
-    "java", "plugin", "python:", "python(",
+    "shell",
+    "sh",
+    "xshell",
+    "xsh",
+    "winexec",
+    "winex",
+    "unixcmd",
+    "unixc",
+    "unix",
+    "erase",
+    "era",
+    "rmdir",
+    "rmd",
+    "java",
+    "plugin",
+    "python:",
+    "python(",
 )
 
 # Stata 通用前缀命令中**不带冒号**的一类，可任意叠加（`capture noisily …`）。
 # 官方允许从最短缩写到全写，逐一列出以免正则误伤同名变量/命令。
 _BARE_PREFIX_COMMANDS = frozenset(
     {
-        "cap", "capt", "captu", "captur", "capture",
-        "qui", "quie", "quiet", "quietl", "quietly",
-        "noi", "nois", "noisi", "noisil", "noisily",
+        "cap",
+        "capt",
+        "captu",
+        "captur",
+        "capture",
+        "qui",
+        "quie",
+        "quiet",
+        "quietl",
+        "quietly",
+        "noi",
+        "nois",
+        "noisi",
+        "noisil",
+        "noisily",
     }
 )
 
@@ -394,6 +417,7 @@ def _light_strip_prefixes(line: str) -> str:
                 continue
         return cur
     return cur
+
 
 # 前缀叠加的扫描上限：真实 Stata 最多几层，设上限纯粹为防御畸形输入死循环。
 _MAX_PREFIX_DEPTH = 8
@@ -743,11 +767,7 @@ def _parse_command_blocks(cmd: str) -> list[str]:
         if in_comment_line:
             in_comment_line = _comment_continues(line)
             continue
-        if (
-            not in_block_comment
-            and not in_continuation
-            and line.lstrip().startswith("*")
-        ):
+        if not in_block_comment and not in_continuation and line.lstrip().startswith("*"):
             in_comment_line = _comment_continues(line)
             continue
 
@@ -896,8 +916,7 @@ def _validate_command_blocks(command: str) -> str | None:
 def _has_delimit_change(command: str) -> bool:
     """检测行首的 ``#delimit``（含官方缩写 ``#d``；字符串内的同名字样不算）。"""
     return any(
-        _split_top_level(raw_line, '"')[0].strip().lower()
-        .startswith(("#delimit", "#d"))
+        _split_top_level(raw_line, '"')[0].strip().lower().startswith(("#delimit", "#d"))
         for raw_line in command.split("\n")
     )
 

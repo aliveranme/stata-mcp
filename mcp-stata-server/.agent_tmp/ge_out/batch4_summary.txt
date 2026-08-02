@@ -1,0 +1,65 @@
+E5 read back sheet Data2 via Stata           PASS        0.07s
+    (12 vars, 74 obs)
+Contains data
+ Observations:            74                  
+    Variables:            12                  
+-------------------------------------------------------------------------------
+Variable      Storage   Display    Value
+   
+E5 export excel sheetmode replace            PASS        0.04s
+    已导出 7.6 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_sheetmode2.xlsx
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_shee
+> tmode2.xlsx saved
+E5 sheet_mode replace overwrite same sheet   PASS        0.02s
+    已导出 7.6 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_sheetmode2.xlsx
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_shee
+> tmode2.xlsx saved
+E5 verify Main sheet obs after sheet replace PASS        0.04s
+    (12 vars, 74 obs)
+Contains data
+ Observations:            74                  
+    Variables:            12                  
+-------------------------------------------------------------------------------
+Variable      Storage   Display    Value
+   
+E6 list 8000 page1                           PASS        0.03s
+    ── 第 1/31 页（共 120095 字符）──
++------------------------------+
+      |   id          x1          x2 |
+      |------------------------------|
+   1. |    1    2.025588    1.150474 |
+   2. |    2    1.042631    .9364537 |
+   3. |    3    .2977124    .81191
+E6 stata_more page2                          PASS         0.0s
+    ── 第 2/31 页（共 120095 字符）──
+.8225834 |
+  85. |   85    .1403725   -.4321198 |
+      |------------------------------|
+  86. |   86   -.9984499   -1.187658 |
+  87. |   87   -1.291706   -.0884619 |
+  88. |   88    1.705364    .0551435 |
+  89. |   89   -.
+E6 stata_more page0 all                      PASS         0.0s
+    +------------------------------+
+      |   id          x1          x2 |
+      |------------------------------|
+   1. |    1    2.025588    1.150474 |
+   2. |    2    1.042631    .9364537 |
+   3. |    3    .2977124    .8119158 |
+   4. |    4   -1.7221
+E6 list save_output again                    PASS        0.03s
+    ── 第 1/31 页（共 120095 字符）──
++------------------------------+
+      |   id          x1          x2 |
+      |------------------------------|
+   1. |    1    2.025588    1.150474 |
+   2. |    2    1.042631    .9364537 |
+   3. |    3    .2977124    .81191
+E6 read_file read on 590KB file (blocked expected) ERROR        0.0s
+    错误: 文件过大（374518 字节），无法经 base64 工具返回（工具载荷上限约 81920 字节）。
+  · 请用 MCP 资源协议：resources/read 读 stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e6_big_list.txt（流式二进制，上限 16MB）
+  · 或先用 stata_list_resources 确认文件名。
+E6 read_file read on 23KB png (base64 ok)    ERROR        0.0s
+    错误: 文件未登记为可读资源: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e3_scatter.png。
+  · 导出工具（stata_graph/stata_export_*/stata_etable/stata_save_dataset）成功后会登记
+  · 已有文件用 stata_register_file 显式登记

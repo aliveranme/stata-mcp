@@ -6,6 +6,7 @@
 未被调用。工具自身的校验（mlogit 的 baseoutcome、qreg 的 quantile、mixed 的
 random）不依赖 deps 校验器，直接用默认 deps 即可断言。
 """
+
 import types
 
 import pytest
@@ -45,18 +46,20 @@ def _make_deps():
         validate_filter_expr=lambda v, label: None,
         validate_no_injection=lambda v, label="参数": None,
         filter_clause=lambda c, r: (
-            " "
-            + " ".join(
-                x
-                for x in (
-                    f"if {c}" if c.strip() else "",
-                    f"in {r}" if r.strip() else "",
+            (
+                " "
+                + " ".join(
+                    x
+                    for x in (
+                        f"if {c}" if c.strip() else "",
+                        f"in {r}" if r.strip() else "",
+                    )
+                    if x
                 )
-                if x
             )
-        )
-        if (c.strip() or r.strip())
-        else "",
+            if (c.strip() or r.strip())
+            else ""
+        ),
     )
     return d, calls
 
@@ -162,7 +165,9 @@ def test_logit_invalid_options_reports_error():
 def test_logit_invalid_condition_reports_error():
     d, calls = _make_error_deps("validate_filter_expr", "错误: condition 包含非法字符")
     mcp = _register(_FakeMcp(), d)
-    result = _call_env(mcp, "stata_logit", depvar="foreign", indepvars="mpg", condition="1 using x //")
+    result = _call_env(
+        mcp, "stata_logit", depvar="foreign", indepvars="mpg", condition="1 using x //"
+    )
     assert result.startswith("错误")
     assert calls == []
 
@@ -308,17 +313,13 @@ def test_qreg_default_quantile_omitted(env):
 
 def test_qreg_explicit_default_quantile_omitted(env):
     mcp, deps, calls = env
-    result = _call_env(
-        mcp, "stata_qreg", depvar="price", indepvars="mpg", quantile=0.5
-    )
+    result = _call_env(mcp, "stata_qreg", depvar="price", indepvars="mpg", quantile=0.5)
     assert result == "qreg price mpg"
 
 
 def test_qreg_quantile_appended(env):
     mcp, deps, calls = env
-    result = _call_env(
-        mcp, "stata_qreg", depvar="price", indepvars="mpg", quantile=0.9
-    )
+    result = _call_env(mcp, "stata_qreg", depvar="price", indepvars="mpg", quantile=0.9)
     assert result == "qreg price mpg, quantile(0.9)"
     assert calls == [("qreg price mpg, quantile(0.9)", 60)]
 
@@ -336,17 +337,13 @@ def test_qreg_quantile_with_filter_and_options(env):
         in_range="1/100",
     )
     assert result == "qreg price mpg if foreign == 1 in 1/100, quantile(0.25) vce(bootstrap)"
-    assert calls == [
-        ("qreg price mpg if foreign == 1 in 1/100, quantile(0.25) vce(bootstrap)", 60)
-    ]
+    assert calls == [("qreg price mpg if foreign == 1 in 1/100, quantile(0.25) vce(bootstrap)", 60)]
 
 
 @pytest.mark.parametrize("bad", [0, 1, -0.5, 1.5, 2])
 def test_qreg_invalid_quantile_reports_error(env, bad):
     mcp, deps, calls = env
-    result = _call_env(
-        mcp, "stata_qreg", depvar="price", indepvars="mpg", quantile=bad
-    )
+    result = _call_env(mcp, "stata_qreg", depvar="price", indepvars="mpg", quantile=bad)
     assert result.startswith("错误")
     assert "quantile" in result
     assert calls == []
@@ -354,9 +351,7 @@ def test_qreg_invalid_quantile_reports_error(env, bad):
 
 def test_qreg_non_numeric_quantile_reports_error(env):
     mcp, deps, calls = env
-    result = _call_env(
-        mcp, "stata_qreg", depvar="price", indepvars="mpg", quantile="median"
-    )
+    result = _call_env(mcp, "stata_qreg", depvar="price", indepvars="mpg", quantile="median")
     assert result.startswith("错误")
     assert calls == []
 
@@ -442,9 +437,7 @@ def test_mixed_random_must_start_with_pipes(env):
 def test_mixed_injected_random_reports_error():
     d, calls = _make_error_deps("validate_no_injection", "错误: random 包含非法字符")
     mcp = _register(_FakeMcp(), d)
-    result = _call_env(
-        mcp, "stata_mixed", depvar="y", indepvars="x1", random="|| id:\n!shell"
-    )
+    result = _call_env(mcp, "stata_mixed", depvar="y", indepvars="x1", random="|| id:\n!shell")
     assert result.startswith("错误")
     assert calls == []
 

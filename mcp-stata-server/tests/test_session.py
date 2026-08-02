@@ -29,9 +29,7 @@ def test_clear_data_command():
     with patch("server._run_stata_command") as mock_run:
         mock_run.return_value = "ok"
         stata_clear(scope="data")
-        assert mock_run.call_args.args[0] == (
-            "clear all\ncapture frame drop _all"
-        )
+        assert mock_run.call_args.args[0] == ("clear all\ncapture frame drop _all")
 
 
 def test_clear_all_command_and_state_reset(tmp_path):

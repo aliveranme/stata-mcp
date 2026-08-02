@@ -296,6 +296,7 @@ def test_install_deps_reports_timeout_instead_of_raising(tmp_path, setup_mod, mo
     OSError），而 ``pip install fastmcp`` 要拉 pydantic/uvicorn/starlette 一串
     依赖，慢网络超 180s 完全现实。
     """
+
     def fake_run(cmd, **kwargs):
         raise setup_mod.subprocess.TimeoutExpired(cmd, 180)
 

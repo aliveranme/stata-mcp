@@ -37,10 +37,15 @@ def _make_deps(**overrides):
         validate_filter_expr=lambda v, label: None,
         validate_no_injection=lambda v, label="参数": None,
         filter_clause=lambda c, r: (
-            " " + " ".join(
-                x for x in (f"if {c}" if c.strip() else "", f"in {r}" if r.strip() else "") if x
+            (
+                " "
+                + " ".join(
+                    x for x in (f"if {c}" if c.strip() else "", f"in {r}" if r.strip() else "") if x
+                )
             )
-        ) if (c.strip() or r.strip()) else "",
+            if (c.strip() or r.strip())
+            else ""
+        ),
     )
     for name, fn in overrides.items():
         if fn is not None:
@@ -64,6 +69,7 @@ def _call(env, name, **kw):
 
 # ---------- 校验器返回错误文本的 deps（用于错误分支测试） ----------
 
+
 def _bad_identifier(value, label="变量名", required=False):
     if not (value or "").strip():
         if required:
@@ -84,7 +90,12 @@ def _bad_no_injection(value, label="参数"):
     return f"错误: {label} 包含非法字符" if (value or "").strip() else None
 
 
-def _err_env(validate_identifier=None, validate_varlist=None, validate_filter_expr=None, validate_no_injection=None):
+def _err_env(
+    validate_identifier=None,
+    validate_varlist=None,
+    validate_filter_expr=None,
+    validate_no_injection=None,
+):
     deps, calls = _make_deps(
         validate_identifier=validate_identifier,
         validate_varlist=validate_varlist,
@@ -102,6 +113,7 @@ def _invoke(mcp, name, **kw):
 
 
 # ---------- 装配 ----------
+
 
 def test_registers_six_tools(env):
     mcp, deps, calls = env
@@ -133,11 +145,16 @@ def test_all_tools_are_destructive(env):
 
 # ---------- stata_replace ----------
 
+
 def test_replace_full_command(env):
     result, calls = _call(
-        env, "stata_replace",
-        varname="mpg", expression="weight/100",
-        condition="foreign == 1", in_range="1/50", options="nopromote",
+        env,
+        "stata_replace",
+        varname="mpg",
+        expression="weight/100",
+        condition="foreign == 1",
+        in_range="1/50",
+        options="nopromote",
     )
     expected = "replace mpg = weight/100 if foreign == 1 in 1/50, nopromote"
     assert result == expected
@@ -179,7 +196,9 @@ def test_replace_condition_error():
 def test_replace_expression_comment_rejected():
     """expression 里的 // 会把尾部保护性 if/in 注释掉，必须在入口拦下。"""
     mcp, deps, calls = _err_env(validate_filter_expr=_bad_filter_expr)
-    result = _invoke(mcp, "stata_replace", varname="mpg", expression="weight // evil", condition="foreign==1")
+    result = _invoke(
+        mcp, "stata_replace", varname="mpg", expression="weight // evil", condition="foreign==1"
+    )
     assert result.startswith("错误")
     assert calls == []
 
@@ -192,6 +211,7 @@ def test_replace_options_error():
 
 
 # ---------- stata_drop ----------
+
 
 def test_drop_varlist_command(env):
     result, calls = _call(env, "stata_drop", varlist="price mpg")
@@ -232,6 +252,7 @@ def test_drop_invalid_varlist_error():
 
 # ---------- stata_keep ----------
 
+
 def test_keep_varlist_command(env):
     result, calls = _call(env, "stata_keep", varlist="price mpg")
     assert result == "keep price mpg"
@@ -258,6 +279,7 @@ def test_keep_neither_error(env):
 
 
 # ---------- stata_rename ----------
+
 
 def test_rename_single_command(env):
     result, calls = _call(env, "stata_rename", oldname="price", newname="price_new")
@@ -310,6 +332,7 @@ def test_rename_options_error():
 
 # ---------- stata_recode ----------
 
+
 def test_recode_command(env):
     result, calls = _call(env, "stata_recode", varlist="price", values="(1=0) (2/4=1)")
     expected = "recode price (1=0) (2/4=1)"
@@ -319,9 +342,13 @@ def test_recode_command(env):
 
 def test_recode_full_command(env):
     result, _ = _call(
-        env, "stata_recode",
-        varlist="price mpg", values="(1=0) (2/4=1)",
-        condition="foreign == 1", in_range="1/100", options="generate(newvar)",
+        env,
+        "stata_recode",
+        varlist="price mpg",
+        values="(1=0) (2/4=1)",
+        condition="foreign == 1",
+        in_range="1/100",
+        options="generate(newvar)",
     )
     assert result == "recode price mpg (1=0) (2/4=1) if foreign == 1 in 1/100, generate(newvar)"
 
@@ -377,6 +404,7 @@ def test_recode_invalid_values_error():
 
 # ---------- stata_destring ----------
 
+
 def test_destring_replace_force_command(env):
     result, calls = _call(env, "stata_destring", varlist="price mpg", replace=True, force=True)
     expected = "destring price mpg, replace force"
@@ -417,7 +445,9 @@ def test_destring_replace_and_generate_conflict_error(env):
 
 
 def test_destring_force_ignore_conflict_error(env):
-    result, calls = _call(env, "stata_destring", varlist="price", replace=True, force=True, ignore="-")
+    result, calls = _call(
+        env, "stata_destring", varlist="price", replace=True, force=True, ignore="-"
+    )
     assert result.startswith("ERR:")
     assert "二选一" in result
     assert calls == []

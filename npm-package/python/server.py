@@ -108,7 +108,9 @@ STATA_EDITION = os.environ.get("STATA_EDITION", "mp")
 # 日志同时写入 stderr（避免污染 MCP stdio）和日志文件，便于故障排查。
 # 默认优先写项目内 logs，便于源码运行；安装到只读目录时回退到用户临时目录，
 # 不能因为日志目录不可写而让整个 MCP 在 import 阶段退出。
-_DEFAULT_LOG_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs"))
+_DEFAULT_LOG_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+)
 _LOG_DIR = os.path.normpath(os.environ.get("STATA_MCP_LOG_DIR", _DEFAULT_LOG_DIR))
 _LOG_FILE = os.path.join(_LOG_DIR, "stata-mcp.log")
 
@@ -358,8 +360,6 @@ _STATA_ALLOW_UNC = os.environ.get("STATA_ALLOW_UNC", "") == "1"
 _ALLOWED_ROOTS_CACHE: tuple[str, ...] | None = None
 
 
-
-
 def _init_allowed_roots() -> tuple[str, ...]:
     """从环境变量解析允许的根目录列表（懒加载）。"""
     global _ALLOWED_ROOTS_CACHE
@@ -397,10 +397,6 @@ def _is_path_allowed(path: str) -> bool:
     # 确保路径以 / 结尾，避免前缀误匹配（如 /data 匹配 /data2）
     check = canonical if canonical.endswith("/") else canonical + "/"
     return any(check.startswith(root) for root in roots)
-
-
-
-
 
 
 def _check_abs_path_safety(abs_path: str) -> str | None:
@@ -467,10 +463,6 @@ def _validate_path(path: str) -> str | None:
     if err := _check_abs_path_safety(normalized.replace("\\", "/")):
         return err
     return None
-
-
-
-
 
 
 def _drain_output(min_wait: float = 0.1, quiet_gap: float = 0.02) -> str:
@@ -960,14 +952,37 @@ def _result_or_error(value: str | ToolResult) -> str | ToolResult:
 # 官方最小缩写也纳入（实战审查发现全写匹配可被 `sav`/`imp`/`cop` 等缩写绕过；
 # 精确 token 匹配，`lowess` 不会被误当 `lo`）。
 _PATH_USING_COMMANDS = frozenset(
-    {"import", "imp", "insheet", "ins", "infile", "inf", "infix", "infi",
-     "merge", "mer", "append", "app", "joinby", "join",
-     "export", "exp", "log", "lo", "graph", "gr",
-     "filefilter", "fif", "translate", "tra", "copy", "cop"}
+    {
+        "import",
+        "imp",
+        "insheet",
+        "ins",
+        "infile",
+        "inf",
+        "infix",
+        "infi",
+        "merge",
+        "mer",
+        "append",
+        "app",
+        "joinby",
+        "join",
+        "export",
+        "exp",
+        "log",
+        "lo",
+        "graph",
+        "gr",
+        "filefilter",
+        "fif",
+        "translate",
+        "tra",
+        "copy",
+        "cop",
+    }
 )
 _PATH_ARG_COMMANDS = frozenset(
-    {"use", "us", "save", "sav", "do", "run", "include", "inc", "cd",
-     "mkdir", "rmdir", "erase"}
+    {"use", "us", "save", "sav", "do", "run", "include", "inc", "cd", "mkdir", "rmdir", "erase"}
 )
 
 
@@ -991,8 +1006,19 @@ def _audit_block_paths(block: str) -> str | None:
     # 先把「命令 + 首个子命令」拼回，便于匹配 _PATH_USING_COMMANDS
     sub_tokens = rest.split()
     cmd_key = command
-    if sub_tokens and sub_tokens[0] in ("export", "excel", "delimited", "sas", "spss",
-                                         "dbase", "parquet", "using", "save", "append", "replace"):
+    if sub_tokens and sub_tokens[0] in (
+        "export",
+        "excel",
+        "delimited",
+        "sas",
+        "spss",
+        "dbase",
+        "parquet",
+        "using",
+        "save",
+        "append",
+        "replace",
+    ):
         cmd_key = f"{command} {sub_tokens[0].lower()}"
     base_cmd = cmd_key.split()[0]
 
@@ -1005,8 +1031,16 @@ def _audit_block_paths(block: str) -> str | None:
         # 无 using 的引号路径（graph export "x.png" / copy "a" "b" /
         # export delimited "x.csv"）—— 含官方缩写
         if base_cmd in (
-            "graph", "gr", "copy", "cop", "filefilter", "fif",
-            "translate", "tra", "export", "exp",
+            "graph",
+            "gr",
+            "copy",
+            "cop",
+            "filefilter",
+            "fif",
+            "translate",
+            "tra",
+            "export",
+            "exp",
         ):
             candidates.extend(re.findall(r"\"([^\"]+)\"", line))
     elif base_cmd in _PATH_ARG_COMMANDS:
@@ -1085,9 +1119,7 @@ def _run_stata_command(
             with open(full_output_path, "wb"):
                 pass
         except OSError as e:
-            return _make_error_result(
-                f"错误: 无法写入完整输出文件 {full_output_path}: {e}"
-            )
+            return _make_error_result(f"错误: 无法写入完整输出文件 {full_output_path}: {e}")
 
     with _stata_lock:
         # 锁内路径解析：用 Stata cwd 解析 require_file 为绝对路径并经沙箱权威校验，
@@ -1207,7 +1239,7 @@ def _run_stata_command(
             # 超过硬上限（实测 170K），且把提示后的超时指引整条丢弃。
             idx = full.find(_TRUNCATION_NOTICE)
             if idx != -1:
-                after = full[idx + len(_TRUNCATION_NOTICE):]  # 提示后内容（超时说明等）
+                after = full[idx + len(_TRUNCATION_NOTICE) :]  # 提示后内容（超时说明等）
                 room_for_head = MAX_OUTPUT_CHARS - len(_TRUNCATION_NOTICE) - len(after)
                 full = full[: max(0, room_for_head)] + _TRUNCATION_NOTICE + after
             else:
@@ -1234,12 +1266,6 @@ def _run_stata_command(
             return _paginate(full, page, truncated=truncated)
 
         return full
-
-
-
-
-
-
 
 
 def _register_resource(path: str, source: str) -> str | None:
@@ -1294,10 +1320,6 @@ def _clear_resources() -> None:
     """
     with _resource_lock:
         _resource_registry.clear()
-
-
-
-
 
 
 def _get_stata_cwd_locked() -> str:
@@ -1413,9 +1435,9 @@ class _BackgroundTask:
     task_id: str
     command: str
     timeout: int
-    status: str = "queued"          # queued | running | done | failed | cancelled
+    status: str = "queued"  # queued | running | done | failed | cancelled
     blocks: list = field(default_factory=list)
-    block_index: int = -1           # 当前执行到的块下标（-1 = 未开始）
+    block_index: int = -1  # 当前执行到的块下标（-1 = 未开始）
     current_block: str = ""
     result: str = ""
     is_error: bool = False
@@ -1437,10 +1459,7 @@ def _prune_bg_tasks() -> None:
     with _bg_lock:
         if len(_bg_tasks) <= _MAX_BG_TASKS:
             return
-        finished = [
-            t for t in _bg_tasks.values()
-            if t.status in ("done", "failed", "cancelled")
-        ]
+        finished = [t for t in _bg_tasks.values() if t.status in ("done", "failed", "cancelled")]
         finished.sort(key=lambda t: t.created_at)
         for t in finished[: len(_bg_tasks) - _MAX_BG_TASKS]:
             _bg_tasks.pop(t.task_id, None)
@@ -1492,9 +1511,7 @@ def _bg_worker(task: _BackgroundTask) -> None:
                         return
                 task.block_index = index
                 task.current_block = block
-                rc, out = _execute_safe(
-                    block, task.timeout, cancel_event=task.cancel_event
-                )
+                rc, out = _execute_safe(block, task.timeout, cancel_event=task.cancel_event)
 
                 # 取消请求可能在看门狗窗口内到达（事件触发 SetBreak）：以取消为准
                 if task.cancel_requested:
@@ -1564,7 +1581,7 @@ def _bg_worker(task: _BackgroundTask) -> None:
         if len(full) > MAX_OUTPUT_CHARS:
             idx = full.find(_TRUNCATION_NOTICE)
             if idx != -1:
-                after = full[idx + len(_TRUNCATION_NOTICE):]
+                after = full[idx + len(_TRUNCATION_NOTICE) :]
                 room_for_head = MAX_OUTPUT_CHARS - len(_TRUNCATION_NOTICE) - len(after)
                 full = full[: max(0, room_for_head)] + _TRUNCATION_NOTICE + after
             else:
@@ -1582,9 +1599,7 @@ def _submit_bg_task(command: str, timeout: int) -> str:
     一个在跑，排队的任务多了只会累积 daemon 线程，毫无吞吐收益。
     """
     with _bg_lock:
-        active = sum(
-            1 for t in _bg_tasks.values() if t.status in ("queued", "running")
-        )
+        active = sum(1 for t in _bg_tasks.values() if t.status in ("queued", "running"))
         if active >= _MAX_BG_TASKS:
             raise ValueError(
                 f"错误: 已有 {active} 个后台任务在排队/运行（上限 {_MAX_BG_TASKS}）。"
@@ -1704,9 +1719,7 @@ def stata_run(
         return _make_error_result(reason)
 
     if not save_output:
-        return _apply_compact(
-            _run_stata_command(command, page, timeout=safe_timeout), compact
-        )
+        return _apply_compact(_run_stata_command(command, page, timeout=safe_timeout), compact)
 
     # save_output：完整输出落盘 + 登记为资源。路径经沙箱校验；覆盖式写入。
     if err := _validate_path(save_output):
@@ -1715,9 +1728,7 @@ def stata_run(
     # 记录调用前状态：_run_stata_command 对空命令/超长命令会**早退**（不截断文件），
     # 此时 mtime 不变 —— 不登记陈旧文件，也不附「完整输出已保存」的误导说明。
     before_ns = _mtime_ns(out_path) if os.path.isfile(out_path) else None
-    result = _run_stata_command(
-        command, page, timeout=safe_timeout, full_output_path=out_path
-    )
+    result = _run_stata_command(command, page, timeout=safe_timeout, full_output_path=out_path)
     written = _file_written_since(out_path, before_ns)
     note = f"\n(完整输出已保存: {out_path} | 资源 URI: {_resource_uri(out_path)})"
     if isinstance(result, ToolResult) and result.is_error and not written:
@@ -1762,7 +1773,7 @@ def _extract_ssc_installs(do_text: str) -> tuple[str, list[tuple[str, bool]]]:
         brace_depth = max(0, brace_depth + raw.count("{") - raw.count("}"))
         if m:
             pkg = m.group(1)
-            opts = (m.group("opts") or "")
+            opts = m.group("opts") or ""
             replace = bool(re.search(r"\breplace\b", opts, re.IGNORECASE))
             if pkg not in seen:
                 seen.add(pkg)
@@ -1873,9 +1884,7 @@ def _append_text(result: str | ToolResult, extra: str) -> str | ToolResult:
     （FastMCP 的 ToolResult 是数据类，不能原地改 content）。
     """
     if isinstance(result, ToolResult):
-        return ToolResult(
-            content=_result_text(result) + extra, is_error=result.is_error
-        )
+        return ToolResult(content=_result_text(result) + extra, is_error=result.is_error)
     return result + extra
 
 
@@ -1908,9 +1917,7 @@ def _apply_compact(result: str | ToolResult, compact: bool) -> str | ToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_run_do_file(
-    filepath: str, timeout: int = 300, compact: bool = False
-) -> str | ToolResult:
+def stata_run_do_file(filepath: str, timeout: int = 300, compact: bool = False) -> str | ToolResult:
     """执行一个 Stata .do 文件并返回全部输出。
 
     .do 文件是 Stata 的批处理脚本。此工具会执行指定路径的 .do 文件。
@@ -1957,9 +1964,7 @@ def stata_run_do_file(
             do_text = f.read()
     except (OSError, UnicodeDecodeError):
         return _apply_compact(
-            _run_stata_command(
-                f'do "{normalized}"', require_file=filepath, timeout=safe_timeout
-            ),
+            _run_stata_command(f'do "{normalized}"', require_file=filepath, timeout=safe_timeout),
             compact,
         )
 
@@ -1989,10 +1994,7 @@ def stata_run_do_file(
             "如确有必要，请通过操作系统或 Stata 界面直接执行。"
         )
     if reason := _flag_macro_obfuscation(do_text):
-        return _make_error_result(
-            "错误: do 文件通过宏间接调用危险命令，已拒绝执行：\n"
-            f"  {reason}"
-        )
+        return _make_error_result(f"错误: do 文件通过宏间接调用危险命令，已拒绝执行：\n  {reason}")
 
     # do 文件**内容**里的数据命令路径同样受沙箱约束（配置 STATA_ALLOWED_ROOTS 时）。
     # 此前只审计外层 `do "path"`，内容里的 `use "越界"` 完全漏审（实战审查发现）。
@@ -2010,31 +2012,19 @@ def stata_run_do_file(
     if not installs:
         # 无 ssc install：原样执行，走标准 require_file 权威路径，行为不变。
         return _apply_compact(
-            _run_stata_command(
-                f'do "{normalized}"', require_file=filepath, timeout=safe_timeout
-            ),
+            _run_stata_command(f'do "{normalized}"', require_file=filepath, timeout=safe_timeout),
             compact,
         )
 
     report = _prepare_ssc_installs(installs, timeout=safe_timeout)
     header = (
-        "已在执行前处理 do 文件中的 ssc install：\n"
-        + "\n".join(report)
-        + "\n"
-        + "-" * 40
-        + "\n"
+        "已在执行前处理 do 文件中的 ssc install：\n" + "\n".join(report) + "\n" + "-" * 40 + "\n"
     )
-    if any(
-        marker in line
-        for line in report
-        for marker in ("安装失败", "安装未完成", "探测失败")
-    ):
+    if any(marker in line for line in report for marker in ("安装失败", "安装未完成", "探测失败")):
         # 预安装失败时，清理后的主体必然缺少所需包；继续执行只会制造一串
         # 次生错误（更糟的是把旧会话状态当成成功）。把原始安装输出保留给
         # 调用方，并要求修复后整体重试。
-        return _make_error_result(
-            header + "脚本主体未执行：上述 SSC 安装未完成，请修复后重试。"
-        )
+        return _make_error_result(header + "脚本主体未执行：上述 SSC 安装未完成，请修复后重试。")
 
     # 清理后的脚本写入 Stata 临时 do 文件执行（临时文件由 Stata 会话末清理，
     # 且 _cleanup 不适用于 do；此处即用即删）。
@@ -2071,12 +2061,9 @@ def stata_run_do_file(
 # =============================================================================
 
 
-
-
 # =============================================================================
 # MCP 工具 — 图形 (readOnlyHint=True)
 # =============================================================================
-
 
 
 def _mtime_ns(path: str) -> int | None:
@@ -2281,11 +2268,15 @@ def _read_registered_file(path: str) -> tuple[bytes | None, dict | None, str | N
     """
     entry = _resource_lookup(path)
     if entry is None:
-        return None, None, (
-            f"错误: 文件未登记为可读资源: {unquote(path)}。\n"
-            "  · 导出工具（stata_graph/stata_export_*/stata_etable/"
-            "stata_save_dataset/stata_run save_output）成功后会登记\n"
-            "  · 已有文件可用 stata_register_file 显式登记"
+        return (
+            None,
+            None,
+            (
+                f"错误: 文件未登记为可读资源: {unquote(path)}。\n"
+                "  · 导出工具（stata_graph/stata_export_*/stata_etable/"
+                "stata_save_dataset/stata_run save_output）成功后会登记\n"
+                "  · 已有文件可用 stata_register_file 显式登记"
+            ),
         )
     abs_path = entry["path"]
     try:
@@ -2293,9 +2284,13 @@ def _read_registered_file(path: str) -> tuple[bytes | None, dict | None, str | N
     except OSError as e:
         return None, entry, f"错误: 无法读取文件大小: {e}"
     if size > _MAX_RESOURCE_READ_BYTES:
-        return None, entry, (
-            f"错误: 文件过大（{size} 字节，上限 {_MAX_RESOURCE_READ_BYTES}）。"
-            "请缩小文件，或仍经 resources/read 读取（流式）。"
+        return (
+            None,
+            entry,
+            (
+                f"错误: 文件过大（{size} 字节，上限 {_MAX_RESOURCE_READ_BYTES}）。"
+                "请缩小文件，或仍经 resources/read 读取（流式）。"
+            ),
         )
     try:
         with open(abs_path, "rb") as f:
@@ -2305,9 +2300,13 @@ def _read_registered_file(path: str) -> tuple[bytes | None, dict | None, str | N
     except OSError as e:
         return None, entry, f"错误: 读取文件失败: {e}"
     if len(data) > _MAX_RESOURCE_READ_BYTES:
-        return None, entry, (
-            f"错误: 文件在读取时超过上限（{len(data)} 字节 > "
-            f"{_MAX_RESOURCE_READ_BYTES}），拒绝读取。"
+        return (
+            None,
+            entry,
+            (
+                f"错误: 文件在读取时超过上限（{len(data)} 字节 > "
+                f"{_MAX_RESOURCE_READ_BYTES}），拒绝读取。"
+            ),
         )
     return data, entry, None
 
@@ -2372,9 +2371,7 @@ def stata_read_file(
         info：元数据文本；read：base64 内容（上限 16MB）。
     """
     if action not in ("info", "read"):
-        return _make_error_result(
-            f'错误: action 只能是 "info" 或 "read"（收到 {action!r}）'
-        )
+        return _make_error_result(f'错误: action 只能是 "info" 或 "read"（收到 {action!r}）')
     if err := _validate_path(filepath):
         return _result_or_error(err)
     entry = _resource_lookup(filepath)
@@ -2402,9 +2399,7 @@ def stata_read_file(
         return _make_error_result(err2)
     if encoding == "base64":
         return base64.b64encode(data).decode("ascii")
-    return _make_error_result(
-        f'错误: encoding 只支持 "base64"（收到 {encoding!r}）'
-    )
+    return _make_error_result(f'错误: encoding 只支持 "base64"（收到 {encoding!r}）')
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -2445,8 +2440,7 @@ def stata_list_resources() -> str | ToolResult:
         entries = sorted(_resource_registry.values(), key=lambda e: e["ts"])
     if not entries:
         return (
-            "(当前没有已登记的文件资源。"
-            "导出工具成功后会登记；stata_register_file 可登记已有文件。)"
+            "(当前没有已登记的文件资源。导出工具成功后会登记；stata_register_file 可登记已有文件。)"
         )
     lines = [
         "已登记的文件资源（可用 resources/read 或 stata_read_file 读取）:",
@@ -2490,8 +2484,7 @@ def stata_clear(scope: str = "all") -> str | ToolResult:
     """
     if scope not in ("data", "estimates", "graphs", "panels", "all"):
         return _make_error_result(
-            f'错误: scope 只能是 "data"/"estimates"/"graphs"/"panels"/"all"'
-            f"（收到 {scope!r}）"
+            f'错误: scope 只能是 "data"/"estimates"/"graphs"/"panels"/"all"（收到 {scope!r}）'
         )
     cmds = []
     if scope in ("data", "all"):
@@ -2507,9 +2500,7 @@ def stata_clear(scope: str = "all") -> str | ToolResult:
     result = _run_stata_command("\n".join(cmds), timeout=120)
     # 清空后 c(N)=0，_describe_empty_result 会误报「请先载入数据」（实战发现：
     # Agent 可能以为 clear 失败而多余地重新载入）。清空是**故意的**，返回确认。
-    if isinstance(result, str) and (
-        "当前内存中没有数据集" in result or "无文本输出" in result
-    ):
+    if isinstance(result, str) and ("当前内存中没有数据集" in result or "无文本输出" in result):
         result = f"已清理会话（scope={scope}）：数据集/估计/图形/面板已重置。"
     if scope == "all":
         # 命令执行完（成功或失败）才撤内存侧状态；磁盘文件本身不删除。
@@ -2522,9 +2513,7 @@ def stata_clear(scope: str = "all") -> str | ToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-def stata_snapshot(
-    action: str = "save", number: int = 0, label: str = ""
-) -> str | ToolResult:
+def stata_snapshot(action: str = "save", number: int = 0, label: str = "") -> str | ToolResult:
     """会话内快照：保存 / 恢复 / 列出 / 删除当前内存数据集。
 
     包 Stata 原生 ``snapshot`` 命令 —— 同一会话内可在不同数据处理阶段间快速
@@ -2546,9 +2535,7 @@ def stata_snapshot(
         )
     if action in ("restore", "erase"):
         if number <= 0:
-            return _make_error_result(
-                f'错误: action="{action}" 必须提供正整数 number（快照编号）'
-            )
+            return _make_error_result(f'错误: action="{action}" 必须提供正整数 number（快照编号）')
         return _run_stata_command(f"snapshot {action} {number}", timeout=120)
     if action == "list":
         return _run_stata_command("snapshot list", timeout=60)
@@ -2721,9 +2708,7 @@ def stata_read_log(action: str = "tail", lines: int = 200) -> str | ToolResult:
         日志末尾文本或日志路径。
     """
     if action not in ("tail", "path"):
-        return _make_error_result(
-            f'错误: action 只能是 "tail" 或 "path"（收到 {action!r}）'
-        )
+        return _make_error_result(f'错误: action 只能是 "tail" 或 "path"（收到 {action!r}）')
     if action == "path":
         return f"日志文件: {_LOG_FILE}"
     if not os.path.isfile(_LOG_FILE):
@@ -2777,7 +2762,9 @@ _API_DEPS = SimpleNamespace(
     run_stata_command=lambda *a, **k: _run_stata_command(*a, **k),
     make_error=lambda msg: _make_error_result(msg),
     result_or_error=lambda v: _result_or_error(v),
-    validate_identifier=lambda v, label="变量名", required=False: _validate_identifier(v, label, required),
+    validate_identifier=lambda v, label="变量名", required=False: _validate_identifier(
+        v, label, required
+    ),
     validate_varlist=lambda v, label="varlist": _validate_varlist(v, label),
     validate_filter_expr=lambda v, label: _validate_filter_expr(v, label),
     validate_no_injection=lambda v, label="参数": _validate_no_injection(v, label),

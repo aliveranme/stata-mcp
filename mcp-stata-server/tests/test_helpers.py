@@ -112,15 +112,15 @@ def test_format_error_known_rc():
     [
         # 真机（Stata 19.5 MP）逐条触发核对过的释义，防止再次凭印象改写。
         # 括号内是 Stata 自己的原文与触发方式。
-        (4, "未保存"),        # no; dataset in memory has changed since last saved
-        (5, "排序"),          # not sorted
-        (9, "assert"),        # assertion is false ← 旧表误标为「变量类型不匹配」
-        (109, "类型不匹配"),   # type mismatch ← 「变量类型不匹配」实际属于这里
-        (110, "已存在"),       # variable already defined
-        (111, "未找到"),       # variable not found
-        (199, "命令不存在"),   # command is unrecognized ← 旧表误标为「选项语法错误」
-        (459, "唯一识别"),     # does not uniquely identify the observations（isid）
-        (601, "文件不存在"),   # file not found
+        (4, "未保存"),  # no; dataset in memory has changed since last saved
+        (5, "排序"),  # not sorted
+        (9, "assert"),  # assertion is false ← 旧表误标为「变量类型不匹配」
+        (109, "类型不匹配"),  # type mismatch ← 「变量类型不匹配」实际属于这里
+        (110, "已存在"),  # variable already defined
+        (111, "未找到"),  # variable not found
+        (199, "命令不存在"),  # command is unrecognized ← 旧表误标为「选项语法错误」
+        (459, "唯一识别"),  # does not uniquely identify the observations（isid）
+        (601, "文件不存在"),  # file not found
         (2000, "没有观测值"),  # no observations
     ],
 )
@@ -221,7 +221,7 @@ def test_materialize_block_passes_single_line_through():
 
 
 def test_materialize_block_writes_multiline_to_temp_do():
-    block = 'forvalues i = 1/3 {\n    display `i\'\n}'
+    block = "forvalues i = 1/3 {\n    display `i'\n}"
     cmd, path = _materialize_block(block)
     assert cmd == f'include "{path}"'
     with open(path, encoding="utf-8") as f:
@@ -557,9 +557,7 @@ def test_graph_format_fontface_dropped_for_bitmap():
 
 
 def test_graph_format_combines_applicable_options():
-    opts, note = _graph_format_options(
-        "/tmp/a.pdf", quality=0, mag=150, fontface="Helvetica"
-    )
+    opts, note = _graph_format_options("/tmp/a.pdf", quality=0, mag=150, fontface="Helvetica")
     assert opts == 'mag(150) fontface("Helvetica")'
     assert note == ""
 

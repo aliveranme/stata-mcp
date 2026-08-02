@@ -15,6 +15,7 @@ readOnlyHint=True、destructiveHint=False。
 - 校验失败一律 return deps.result_or_error(err)；错误文本以 "错误: " 开头、中文
 - 估计类工具统一 timeout=60
 """
+
 import re
 from typing import Any
 
@@ -111,7 +112,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             return deps.result_or_error(err)
         if baseoutcome.strip() and not _BASEOUTCOME_RE.match(baseoutcome.strip()):
             return deps.result_or_error(
-                "错误: baseoutcome 必须是类别取值（非负整数 str），如 \"0\" 或 \"2\"。"
+                '错误: baseoutcome 必须是类别取值（非负整数 str），如 "0" 或 "2"。'
                 f"收到: '{baseoutcome}'。合法取值示例：baseoutcome=\"1\"、"
                 'baseoutcome="0"。不传则使用 Stata 默认基准类别。'
             )
@@ -215,8 +216,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             q = float(quantile)
         except (TypeError, ValueError):
             return deps.result_or_error(
-                "错误: quantile 必须是 (0,1) 之间的数值，如 0.25 / 0.5 / 0.9。"
-                f"收到: {quantile!r}。"
+                f"错误: quantile 必须是 (0,1) 之间的数值，如 0.25 / 0.5 / 0.9。收到: {quantile!r}。"
             )
         if not (0.0 < q < 1.0):
             return deps.result_or_error(

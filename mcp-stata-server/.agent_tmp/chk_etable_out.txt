@@ -1,0 +1,43 @@
+
+--- raw etable to missing dir ---
+is_error= True
+[返回码: 603] 文件无法打开 — etable, export("/Volumes/ccc/Projects/stata-mcp/mcp-stata-se
+---------------------------------
+                          price  
+---------------------------------
+Weight (lbs.)               3.465
+                          (0.631)
+Mileage (mpg)              21.854
+                         (74.221)
+Car origin               3673.060
+                        (683.978)
+Intercept               -5853.696
+                       (3376.987)
+Number of observations         74
+---------------------------------
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/no_suc
+    > h_dir/e4raw.xlsx could not be opened
+r(603);
+no_such_dir exists: False
+--- raw etable to missing dir with replace ---
+is_error= True
+[返回码: 602] 文件已存在（加 replace） — etable, export("/Volumes/ccc/Projects/stata-mcp/mcp-stata-se
+---------------------------------
+                          price  
+---------------------------------
+Weight (lbs.)               3.465
+                          (0.631)
+Mileage (mpg)              21.854
+                         (74.221)
+Car origin               3673.060
+                        (683.978)
+Intercept               -5853.696
+                       (3376.987)
+Number of observations         74
+---------------------------------
+file
+/Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/no_such_dir/
+> e4raw2.xlsx already exists; you must specify either option modify or option
+replace
+r(602);

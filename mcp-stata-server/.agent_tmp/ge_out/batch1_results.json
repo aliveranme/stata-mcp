@@ -1,0 +1,128 @@
+[
+ {
+  "label": "E1 export png",
+  "result": "PASS",
+  "detail": "(file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca\n> tter.png not found)\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_scat\n> ter.png written in PNG format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_scatter.",
+  "secs": 1.27,
+  "file": {
+   "exists": true,
+   "size": 24228
+  }
+ },
+ {
+  "label": "E1 export jpg",
+  "result": "PASS",
+  "detail": "(file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca\n> tter.jpg not found)\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_scat\n> ter.jpg written in JPEG format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_scatter",
+  "secs": 0.15,
+  "file": {
+   "exists": true,
+   "size": 29749
+  }
+ },
+ {
+  "label": "E1 export pdf",
+  "result": "PASS",
+  "detail": "file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca\n    > tter.pdf saved as PDF format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_scatter.pdf, 12.6 KB)\n(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp",
+  "secs": 0.08,
+  "file": {
+   "exists": true,
+   "size": 12853
+  }
+ },
+ {
+  "label": "E1 export svg",
+  "result": "PASS",
+  "detail": "(file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca\n    > tter.svg not found)\nfile\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca\n    > tter.svg saved as SVG format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_o",
+  "secs": 0.08,
+  "file": {
+   "exists": true,
+   "size": 40997
+  }
+ },
+ {
+  "label": "E1 export eps",
+  "result": "PASS",
+  "detail": "(file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca\n    > tter.eps not found)\nfile\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca\n    > tter.eps saved as EPS format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_o",
+  "secs": 0.08,
+  "file": {
+   "exists": true,
+   "size": 23370
+  }
+ },
+ {
+  "label": "E2 png width=400 height=300",
+  "result": "PASS",
+  "detail": "(file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_png\n> _400x300.png not found)\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_png_\n> 400x300.png written in PNG format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_",
+  "secs": 0.12,
+  "file": {
+   "exists": true,
+   "size": 11013
+  }
+ },
+ {
+  "label": "E2 pdf width=800 default (inches, dropped)",
+  "result": "PASS",
+  "detail": "file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_pdf\n    > _800.pdf saved as PDF format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_pdf_800.pdf, 12.6 KB)\n(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp",
+  "secs": 0.08,
+  "file": {
+   "exists": true,
+   "size": 12853
+  }
+ },
+ {
+  "label": "E2 pdf width=6 inches (kept)",
+  "result": "PASS",
+  "detail": "file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_pdf\n    > _6.pdf saved as PDF format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_pdf_6.pdf, 11.6 KB)\n(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_",
+  "secs": 0.08,
+  "file": {
+   "exists": true,
+   "size": 11908
+  }
+ },
+ {
+  "label": "E2 svg width=800 pixels (kept)",
+  "result": "PASS",
+  "detail": "(file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_svg\n    > _800.svg not found)\nfile\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_svg\n    > _800.svg saved as SVG format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_o",
+  "secs": 0.1,
+  "file": {
+   "exists": true,
+   "size": 40997
+  }
+ },
+ {
+  "label": "E2 eps width=800 (no-size, dropped)",
+  "result": "PASS",
+  "detail": "(file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_eps\n    > _800.eps not found)\nfile\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_eps\n    > _800.eps saved as EPS format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_o",
+  "secs": 0.09,
+  "file": {
+   "exists": true,
+   "size": 23370
+  }
+ },
+ {
+  "label": "E2 png quality=80 (dropped)",
+  "result": "PASS",
+  "detail": "(file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_png\n> _quality.png not found)\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_png_\n> quality.png written in PNG format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_",
+  "secs": 0.14,
+  "file": {
+   "exists": true,
+   "size": 24228
+  }
+ },
+ {
+  "label": "E2 jpg quality=80 (kept)",
+  "result": "PASS",
+  "detail": "(file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_jpg\n> _q80.jpg not found)\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_jpg_\n> q80.jpg written in JPEG format\n(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_jpg_q80",
+  "secs": 0.11,
+  "file": {
+   "exists": true,
+   "size": 22966
+  }
+ },
+ {
+  "label": "E2 png width=-100 (rejected)",
+  "result": "ERROR",
+  "detail": "错误: width 不能为负数（-100）",
+  "secs": 0.0
+ }
+]

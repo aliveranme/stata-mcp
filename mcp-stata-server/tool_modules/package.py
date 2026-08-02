@@ -23,6 +23,7 @@
 - 校验失败一律 return deps.result_or_error(err)；错误文本以 "错误: " 开头、中文
 - 工具经 deps.run_stata_command 执行，patch("server._run_stata_command") 依然截获
 """
+
 import re
 from typing import Any
 
@@ -184,13 +185,15 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             )
 
         opts = " ".join(
-            p for p in (
+            p
+            for p in (
                 scope,
                 "or" if match_any else "",
                 "nosj" if exclude_sj else "",
                 "errnone" if error_if_none else "",
                 options.strip(),
-            ) if p
+            )
+            if p
         )
         cmd = f"net search {keyword.strip()}"
         if opts:

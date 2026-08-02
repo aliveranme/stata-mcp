@@ -108,8 +108,7 @@ def _isolate_server_log():
     import server
 
     server.logger.handlers = [
-        h for h in server.logger.handlers
-        if not isinstance(h, logging.handlers.RotatingFileHandler)
+        h for h in server.logger.handlers if not isinstance(h, logging.handlers.RotatingFileHandler)
     ]
     yield
 

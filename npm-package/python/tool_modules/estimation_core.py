@@ -15,6 +15,7 @@ readOnlyHint=True、destructiveHint=False。
 - 校验失败一律 return deps.result_or_error(err)；错误文本以 "错误: " 开头、中文
 - 估计类工具统一 timeout=60
 """
+
 from typing import Any
 
 # 面板估计量白名单：作为 xtreg 的选项拼接，用正向白名单杜绝注入
@@ -177,7 +178,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 '  · 单样本检验均值是否等于某值 → compare_to="5000"\n'
                 '  · 按组比较两样本         → byvar="foreign"\n'
                 '  · 配对/非配对比较两变量   → compare_to="另一变量"'
-                "（非配对再加 options=\"unpaired\"）"
+                '（非配对再加 options="unpaired"）'
             )
 
         lhs = f"{varname} == {compare_to.strip()}" if compare_to.strip() else varname

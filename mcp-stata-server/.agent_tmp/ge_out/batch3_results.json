@@ -1,0 +1,122 @@
+[
+ {
+  "label": "E5 export excel xlsx",
+  "result": "PASS",
+  "detail": "已导出 7.6 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_auto.xlsx\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_auto\n> .xlsx saved",
+  "secs": 0.05
+ },
+ {
+  "label": "E5 read back xlsx via Stata",
+  "result": "PASS",
+  "detail": "(12 vars, 74 obs)\nContains data\n Observations:            74                  \n    Variables:            12                  \n-------------------------------------------------------------------------------\nVariable      Storage   Display    Value\n    name         type    format    label      Variable label\n-------------------------------------------------------------------------------\nmake        ",
+  "secs": 0.07
+ },
+ {
+  "label": "E5 export delimited csv",
+  "result": "PASS",
+  "detail": "已导出 5.2 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_auto.csv\n(file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_aut\n    > o.csv not found)\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_auto\n> .csv saved",
+  "secs": 0.01
+ },
+ {
+  "label": "E5 CSV python readback",
+  "result": "PASS",
+  "detail": "rows(data)=74 cols=12 (expect 74/12)",
+  "secs": 0
+ },
+ {
+  "label": "E5 export delimited replace=False when exists",
+  "result": "ERROR",
+  "detail": "[返回码: 602] 文件已存在（加 replace） — export delimited using \"/Volumes/ccc/Projects/stata-mcp/mcp-\nfile\n/Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_auto.csv\nalready exists\nr(602);",
+  "secs": 0.01
+ },
+ {
+  "label": "E5 export delimited replace=True overwrite",
+  "result": "PASS",
+  "detail": "已导出 5.2 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_auto.csv\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_auto\n> .csv saved",
+  "secs": 0.01
+ },
+ {
+  "label": "E5 sheet_mode + replace conflict blocked",
+  "result": "ERROR",
+  "detail": "错误: sheet_mode 与 replace 不能同时使用（Stata 会 r(198)）。\n  · 想重建整个文件 → 只传 replace=True\n  · 想保留文件、改写其中一张表 → 只传 sheet_mode=\"replace\"",
+  "secs": 0.0
+ },
+ {
+  "label": "E5 export excel first",
+  "result": "PASS",
+  "detail": "已导出 7.6 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_sheetmode.xlsx\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_shee\n> tmode.xlsx saved",
+  "secs": 0.01
+ },
+ {
+  "label": "E5 sheet_mode modify second sheet",
+  "result": "PASS",
+  "detail": "已导出 12.5 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_sheetmode.xlsx\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e5_shee\n> tmode.xlsx saved",
+  "secs": 0.02
+ },
+ {
+  "label": "E6 export delimited tab all 74 obs",
+  "result": "PASS",
+  "detail": "已导出 5.2 KB -> /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e6_auto.tsv\n(file\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e6_aut\n    > o.tsv not found)\nfile /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e6_auto\n> .tsv saved",
+  "secs": 0.01
+ },
+ {
+  "label": "E6 TSV python readback",
+  "result": "PASS",
+  "detail": "rows(with header)=75 (expect 75)",
+  "secs": 0
+ },
+ {
+  "label": "E6 list 8000 obs save_output",
+  "result": "PASS",
+  "detail": "── 第 1/31 页（共 120095 字符）──\n+------------------------------------------------------+\n      |   id          x1          x2          x3          x4 |\n      |------------------------------------------------------|\n   1. |    1    2.025588    1.150474   -.4649468    2.430305 |\n   2. |    2    1.042631    .9364537     .145377   -.1537203 |\n   3. |    3    .2977124    .8119158    .6126399   -.0449605 |\n ",
+  "secs": 0.04
+ },
+ {
+  "label": "E6 save_output file size",
+  "result": "PASS",
+  "detail": "size=604990",
+  "secs": 0
+ },
+ {
+  "label": "E6 read save_output info",
+  "result": "PASS",
+  "detail": "文件: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e6_big_list.txt\n大小: 590.8 KB\n类型: text/plain\n来源: stata_run save_output\n资源 URI: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e6_big_list.txt\n提示: 用 resources/read 读取该 URI 可取回文件内容；stata_read_file(action=\"read\") 返回 base64。",
+  "secs": 0.0
+ },
+ {
+  "label": "E6 save_output content lines",
+  "result": "PASS",
+  "detail": "chars=604990, has_header=True",
+  "secs": 0
+ },
+ {
+  "label": "E7 graph on empty data",
+  "result": "ERROR",
+  "detail": "错误: 图形导出失败，未生成文件或文件为空 /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e7_empty.png\nvariable price not found\nr(111);\ngraph Graph not found\nno graphs dropped",
+  "secs": 0.14
+ },
+ {
+  "label": "E7 illegal scheme rejected",
+  "result": "ERROR",
+  "detail": "错误: scheme 只允许字母、数字、下划线和连字符",
+  "secs": 0.0
+ },
+ {
+  "label": "E7 valid scheme economist",
+  "result": "PASS",
+  "detail": "(命令执行成功，无文本输出)",
+  "secs": 0.2
+ },
+ {
+  "label": "E7 graph export to missing dir",
+  "result": "ERROR",
+  "detail": "错误: 图形导出失败，未生成文件或文件为空 /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/no_dir_e7/e7.png\n(file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/no_dir\n> _e7/e7.png not found)\nfailed to export to the specified format.\nr(198);",
+  "secs": 0.21
+ },
+ {
+  "label": "E7 graph export replace=False when exists",
+  "result": "ERROR",
+  "detail": "错误: 图形导出失败，未生成文件或文件为空 /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e7_exist.png\n提示：目标文件已存在且 replace=False，如需覆盖请传 replace=True。\nfile\n    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e7_exi\n    > st.png already exists\nr(602);",
+  "secs": 0.09
+ }
+]

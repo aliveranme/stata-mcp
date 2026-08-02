@@ -23,6 +23,7 @@
 - 四个工具都会改动内存数据集（创建变量 / 声明结构），readOnlyHint=False、
   destructiveHint=False（与 server.py 原注解一致）
 """
+
 from typing import Any
 
 

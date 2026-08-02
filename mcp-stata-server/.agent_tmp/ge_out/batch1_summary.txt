@@ -1,0 +1,70 @@
+E1 export png                PASS        1.27s  file={'exists': True, 'size': 24228}
+    (file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca
+> tter.png not found)
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_scat
+> ter.png written 
+E1 export jpg                PASS        0.15s  file={'exists': True, 'size': 29749}
+    (file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca
+> tter.jpg not found)
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_scat
+> ter.jpg written 
+E1 export pdf                PASS        0.08s  file={'exists': True, 'size': 12853}
+    file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca
+    > tter.pdf saved as PDF format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_scat
+E1 export svg                PASS        0.08s  file={'exists': True, 'size': 40997}
+    (file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca
+    > tter.svg not found)
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca
+    > t
+E1 export eps                PASS        0.08s  file={'exists': True, 'size': 23370}
+    (file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca
+    > tter.eps not found)
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e1_sca
+    > t
+E2 png width=400 height=300  PASS        0.12s  file={'exists': True, 'size': 11013}
+    (file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_png
+> _400x300.png not found)
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_png_
+> 400x300.png 
+E2 pdf width=800 default (inches, dropped) PASS        0.08s  file={'exists': True, 'size': 12853}
+    file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_pdf
+    > _800.pdf saved as PDF format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_pdf_
+E2 pdf width=6 inches (kept) PASS        0.08s  file={'exists': True, 'size': 11908}
+    file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_pdf
+    > _6.pdf saved as PDF format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_pdf_6.
+E2 svg width=800 pixels (kept) PASS         0.1s  file={'exists': True, 'size': 40997}
+    (file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_svg
+    > _800.svg not found)
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_svg
+    > _
+E2 eps width=800 (no-size, dropped) PASS        0.09s  file={'exists': True, 'size': 23370}
+    (file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_eps
+    > _800.eps not found)
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_eps
+    > _
+E2 png quality=80 (dropped)  PASS        0.14s  file={'exists': True, 'size': 24228}
+    (file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_png
+> _quality.png not found)
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_png_
+> quality.png 
+E2 jpg quality=80 (kept)     PASS        0.11s  file={'exists': True, 'size': 22966}
+    (file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_jpg
+> _q80.jpg not found)
+file /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/e2_jpg_
+> q80.jpg written 
+E2 png width=-100 (rejected) ERROR        0.0s  file=None
+    错误: width 不能为负数（-100）

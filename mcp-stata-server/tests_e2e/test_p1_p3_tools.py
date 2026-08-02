@@ -70,8 +70,7 @@ def test_estimates_store_table_roundtrip(stata):
     listing = _ok(stata.stata_estimates(action="dir"))
     assert "mw" in listing and "mm" in listing, listing[:300]
 
-    table = _ok(stata.stata_estimates(action="table", name="mw mm",
-                                      options="stats(N r2)"))
+    table = _ok(stata.stata_estimates(action="table", name="mw mm", options="stats(N r2)"))
     assert "mw" in table and "mm" in table, table[:300]
 
     _ok(stata.stata_estimates(action="restore", name="mw"))
@@ -105,8 +104,11 @@ def test_merge_keepusing_limits_incoming_variables(stata, outdir):
 
     stata.stata_run("sysuse auto, clear")
     stata.stata_run("keep make price")
-    _ok(stata.stata_merge(kind="1:1", keyvars="make", using=str(using),
-                          keepusing="mpg", options="nogenerate"))
+    _ok(
+        stata.stata_merge(
+            kind="1:1", keyvars="make", using=str(using), keepusing="mpg", options="nogenerate"
+        )
+    )
     desc = _ok(stata.stata_describe())
     assert "mpg" in desc
     assert "headroom" not in desc, "keepusing 应挡住其余变量"
@@ -149,8 +151,7 @@ def test_collapse_aggregates_by_group(stata):
 
 def test_collapse_respects_filters(stata):
     stata.stata_run("sysuse auto, clear")
-    _ok(stata.stata_collapse(clist="(mean) price", by="foreign",
-                             condition="price < 10000"))
+    _ok(stata.stata_collapse(clist="(mean) price", by="foreign", condition="price < 10000"))
     assert "2" in _ok(stata.stata_verify(check="count"))
 
 
@@ -240,14 +241,14 @@ def test_find_package_error_if_none_is_opt_in(stata):
 
 def test_find_package_scope_toc_shrinks_output(stata):
     """实测宽泛查询默认 94K 字符，scope="toc" 收窄到 12K 量级。"""
+
     def _chars(result):
         text = result_text(result)
         m = re.search(r"共 ([\d,]+) 字符", text)
         return int(m.group(1).replace(",", "")) if m else len(text)
 
     wide = _chars(_ok(stata.stata_find_package("difference in differences")))
-    narrow = _chars(_ok(stata.stata_find_package("difference in differences",
-                                                 scope="toc")))
+    narrow = _chars(_ok(stata.stata_find_package("difference in differences", scope="toc")))
     assert narrow < wide / 2, f"toc 应显著收窄：{wide} → {narrow}"
 
 

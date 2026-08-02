@@ -150,7 +150,9 @@ def test_xtreg_fe_and_re(stata):
 def test_ivregress_all_estimators(stata):
     _ok(stata.stata_run("webuse hsng2, clear"))
     for est in ("2sls", "liml", "gmm"):
-        out = _ok(stata.stata_ivregress("rent", "pop", "pcturban", exogenous="faminc", estimator=est))
+        out = _ok(
+            stata.stata_ivregress("rent", "pop", "pcturban", exogenous="faminc", estimator=est)
+        )
         assert "Instrumental-variables" in out and est.upper() in out, f"{est}: {out[:300]}"
 
 

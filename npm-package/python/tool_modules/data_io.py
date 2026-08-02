@@ -21,6 +21,7 @@
 - 校验失败一律 return deps.result_or_error(err)；错误文本以 "错误: " 开头、中文
 - 全部五个工具都改数据 / 换目录，readOnlyHint=False、destructiveHint=True
 """
+
 import os
 import re
 from typing import Any
@@ -32,10 +33,15 @@ from stata_helpers import _normalize_path, _path_has_extension  # noqa: E402
 # 扩展名 → 官方 import 子命令（依据 [D] import 的方法表）。
 # .dta 不在此列 —— 它走 `use`，不属于 import 命令族。
 _IMPORT_FORMAT_BY_EXT = {
-    ".xlsx": "excel", ".xls": "excel",
-    ".csv": "delimited", ".tsv": "delimited", ".txt": "delimited", ".dat": "delimited",
+    ".xlsx": "excel",
+    ".xls": "excel",
+    ".csv": "delimited",
+    ".tsv": "delimited",
+    ".txt": "delimited",
+    ".dat": "delimited",
     ".sas7bdat": "sas",
-    ".sav": "spss", ".zsav": "spss",
+    ".sav": "spss",
+    ".zsav": "spss",
     ".dbf": "dbase",
     ".parquet": "parquet",
 }
@@ -78,9 +84,7 @@ def _resolve_import_path(filepath: str, fmt: str) -> str:
     if _path_has_extension(normalized):
         return normalized
     candidates = [normalized]
-    candidates.extend(
-        f"{normalized}{ext}" for ext in _IMPORT_DEFAULT_EXTENSIONS.get(fmt, ())
-    )
+    candidates.extend(f"{normalized}{ext}" for ext in _IMPORT_DEFAULT_EXTENSIONS.get(fmt, ()))
     # 先保留一个真正存在的无扩展名文件；否则按官方默认扩展名优先级选取。
     for candidate in candidates:
         if os.path.isfile(candidate):
@@ -173,9 +177,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             return result  # 保存失败，不登记资源
         reg_err = deps.register_resource(normalized, "stata_save_dataset")
         if reg_err is None:
-            return deps.append_text(
-                result, f"\n(已登记为资源: {deps.resource_uri(normalized)})"
-            )
+            return deps.append_text(result, f"\n(已登记为资源: {deps.resource_uri(normalized)})")
         return deps.append_text(result, f"\n(文件已保存，但登记为资源失败: {reg_err})")
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
@@ -192,9 +194,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         if err := deps.validate_path(path):
             return deps.result_or_error(err)
         safe_timeout = max(10, min(timeout, 1800))
-        return deps.run_stata_command(
-            f'cd "{deps.normalize_path(path)}"', timeout=safe_timeout
-        )
+        return deps.run_stata_command(f'cd "{deps.normalize_path(path)}"', timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_use_example(
@@ -223,13 +223,9 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             加载确认与数据集概览。
         """
         if source not in ("sysuse", "webuse"):
-            return deps.make_error(
-                f'错误: source 只能是 "sysuse" 或 "webuse"（收到 {source!r}）'
-            )
+            return deps.make_error(f'错误: source 只能是 "sysuse" 或 "webuse"（收到 {source!r}）')
         if action not in ("load", "list"):
-            return deps.make_error(
-                f'错误: action 只能是 "load" 或 "list"（收到 {action!r}）'
-            )
+            return deps.make_error(f'错误: action 只能是 "load" 或 "list"（收到 {action!r}）')
         # timeout=0（默认）表示「自动」：webuse 联网取数给足 120s，其余 60s；
         # 显式传值则以用户指定的为准。
         effective = timeout if timeout else (120 if source == "webuse" else 60)

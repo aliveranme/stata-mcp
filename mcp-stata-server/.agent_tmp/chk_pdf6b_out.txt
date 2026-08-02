@@ -1,0 +1,7 @@
+
+file
+    /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pd
+    > f6b.pdf saved as PDF format
+(图形已导出: /Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pdf6b.pdf, 11.6 KB)
+(已登记为资源: stata-file:////Volumes/ccc/Projects/stata-mcp/mcp-stata-server/.agent_tmp/ge_out/chk_pdf6b.pdf)
+SIZE: 11908

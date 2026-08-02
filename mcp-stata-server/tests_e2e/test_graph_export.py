@@ -27,9 +27,7 @@ def _svg_header(path: str) -> str:
 def test_png_export_writes_a_real_file(auto_data, outdir):
     """复合块把 graph + export 原子执行；headless 下必须真的产出文件。"""
     target = outdir / "scatter.png"
-    result = auto_data.stata_graph(
-        "scatter price weight", export=str(target), replace=True
-    )
+    result = auto_data.stata_graph("scatter price weight", export=str(target), replace=True)
     assert not getattr(result, "is_error", False), result_text(result)
     assert target.stat().st_size > 1000, "图形文件不该只有几个字节"
 
@@ -57,9 +55,7 @@ def test_export_without_any_option_is_valid_stata_syntax(auto_data, outdir):
     实测 Stata 接受这种空选项列表；若哪天不接受，导出会整体失效。
     """
     target = outdir / "bare.png"
-    result = auto_data.stata_graph(
-        "scatter price weight", export=str(target), width=0, height=0
-    )
+    result = auto_data.stata_graph("scatter price weight", export=str(target), width=0, height=0)
     assert not getattr(result, "is_error", False), result_text(result)
     assert target.is_file()
 
@@ -138,9 +134,7 @@ def test_postscript_export_drops_unsupported_size_options(auto_data, outdir):
 
 def test_export_drops_cached_graphs(auto_data, outdir):
     """graph drop _all 在复合块外执行，导出后不该有图形对象残留。"""
-    auto_data.stata_graph(
-        "scatter price weight", export=str(outdir / "a.png"), replace=True
-    )
+    auto_data.stata_graph("scatter price weight", export=str(outdir / "a.png"), replace=True)
     listing = result_text(auto_data.stata_run("graph dir"))
     assert "Graph" not in listing, f"图形对象未清理：{listing}"
 
@@ -189,9 +183,7 @@ def test_export_results_rewrites_xlsx_to_csv(auto_data, outdir):
         pytest.skip("未安装 estout")
 
     auto_data.stata_run("regress price weight mpg")
-    result = auto_data.stata_export_excel(
-        str(outdir / "res.xlsx"), results=True, replace=True
-    )
+    result = auto_data.stata_export_excel(str(outdir / "res.xlsx"), results=True, replace=True)
     text = result_text(result)
     assert not getattr(result, "is_error", False), text
     assert "已自动改用 CSV" in text
@@ -211,9 +203,7 @@ def test_export_results_without_estimates_fails_loudly(auto_data, outdir):
         pytest.skip("未安装 estout")
 
     auto_data.stata_run("ereturn clear")
-    result = auto_data.stata_export_excel(
-        str(outdir / "empty.csv"), results=True, replace=True
-    )
+    result = auto_data.stata_export_excel(str(outdir / "empty.csv"), results=True, replace=True)
     assert getattr(result, "is_error", False), result_text(result)
 
 
@@ -260,20 +250,16 @@ def test_scheme_tool_lists_get_and_set(auto_data):
 def test_graph_applies_scheme_when_requested(auto_data, outdir):
     """显式传 scheme 时确实影响产物 —— 彩色与灰度的 svg 内容应不同。"""
     color, mono = outdir / "c.svg", outdir / "m.svg"
-    auto_data.stata_graph("scatter price weight", export=str(color),
-                          scheme="s2color", replace=True)
-    auto_data.stata_graph("scatter price weight", export=str(mono),
-                          scheme="s2mono", replace=True)
+    auto_data.stata_graph("scatter price weight", export=str(color), scheme="s2color", replace=True)
+    auto_data.stata_graph("scatter price weight", export=str(mono), scheme="s2mono", replace=True)
     assert color.read_text(errors="replace") != mono.read_text(errors="replace")
 
 
 def test_jpg_quality_is_applied(auto_data, outdir):
     """quality() 仅 jpg 支持；低质量文件必须明显更小。"""
     low, high = outdir / "l.jpg", outdir / "h.jpg"
-    r1 = auto_data.stata_graph("scatter price weight", export=str(low),
-                               quality=10, replace=True)
-    r2 = auto_data.stata_graph("scatter price weight", export=str(high),
-                               quality=100, replace=True)
+    r1 = auto_data.stata_graph("scatter price weight", export=str(low), quality=10, replace=True)
+    r2 = auto_data.stata_graph("scatter price weight", export=str(high), quality=100, replace=True)
     assert not getattr(r1, "is_error", False), result_text(r1)
     assert not getattr(r2, "is_error", False), result_text(r2)
     assert low.stat().st_size < high.stat().st_size
@@ -282,8 +268,9 @@ def test_jpg_quality_is_applied(auto_data, outdir):
 def test_quality_dropped_for_png_instead_of_failing(auto_data, outdir):
     """png 传 quality 会 option quality() not allowed，且错误被 capture 吞掉。"""
     target = outdir / "q.png"
-    result = auto_data.stata_graph("scatter price weight", export=str(target),
-                                   quality=50, replace=True)
+    result = auto_data.stata_graph(
+        "scatter price weight", export=str(target), quality=50, replace=True
+    )
     text = result_text(result)
     assert not getattr(result, "is_error", False), text
     assert target.is_file()
@@ -293,14 +280,14 @@ def test_quality_dropped_for_png_instead_of_failing(auto_data, outdir):
 def test_mag_applies_to_pdf_only(auto_data, outdir):
     """mag() 仅 pdf/eps/ps；png 上要被丢弃而不是让导出失败。"""
     scaled = outdir / "m.pdf"
-    r = auto_data.stata_graph("scatter price weight", export=str(scaled),
-                              width=0, mag=200, replace=True)
+    r = auto_data.stata_graph(
+        "scatter price weight", export=str(scaled), width=0, mag=200, replace=True
+    )
     assert not getattr(r, "is_error", False), result_text(r)
     assert scaled.is_file()
 
     png = outdir / "m.png"
-    r2 = auto_data.stata_graph("scatter price weight", export=str(png),
-                               mag=200, replace=True)
+    r2 = auto_data.stata_graph("scatter price weight", export=str(png), mag=200, replace=True)
     assert not getattr(r2, "is_error", False), result_text(r2)
     assert png.is_file()
     assert "mag" in result_text(r2)
@@ -309,8 +296,9 @@ def test_mag_applies_to_pdf_only(auto_data, outdir):
 def test_fontface_applies_to_vector_formats(auto_data, outdir):
     """fontface() 在 pdf/svg 上生效；字体名含空格也要能传。"""
     target = outdir / "f.svg"
-    r = auto_data.stata_graph("scatter price weight", export=str(target),
-                              fontface="Times New Roman", replace=True)
+    r = auto_data.stata_graph(
+        "scatter price weight", export=str(target), fontface="Times New Roman", replace=True
+    )
     assert not getattr(r, "is_error", False), result_text(r)
     assert "Times New Roman" in target.read_text(errors="replace")
 
@@ -318,9 +306,9 @@ def test_fontface_applies_to_vector_formats(auto_data, outdir):
 def test_emf_and_wmf_get_no_size_options(auto_data, outdir):
     """两者无 override_options；本环境（Unix）还会直接拒绝创建，错误须透传。"""
     for ext in ("emf", "wmf"):
-        result = auto_data.stata_graph("scatter price weight",
-                                       export=str(outdir / f"x.{ext}"),
-                                       width=6, replace=True)
+        result = auto_data.stata_graph(
+            "scatter price weight", export=str(outdir / f"x.{ext}"), width=6, replace=True
+        )
         text = result_text(result)
         assert getattr(result, "is_error", False), f".{ext} 在 Unix 上不可创建"
         assert "cannot create" in text, text[:150]
@@ -340,8 +328,7 @@ def test_export_delimited_writes_csv(auto_data, outdir):
 def test_export_delimited_tab_and_novarnames(auto_data, outdir):
     target = outdir / "d.txt"
     result = auto_data.stata_export_delimited(
-        str(target), varlist="make price", delimiter="tab",
-        novarnames=True, replace=True
+        str(target), varlist="make price", delimiter="tab", novarnames=True, replace=True
     )
     assert not getattr(result, "is_error", False), result_text(result)
     first = target.read_text(errors="replace").splitlines()[0]
@@ -352,8 +339,12 @@ def test_export_delimited_tab_and_novarnames(auto_data, outdir):
 def test_export_delimited_custom_delimiter_and_filters(auto_data, outdir):
     target = outdir / "d2.csv"
     result = auto_data.stata_export_delimited(
-        str(target), varlist="make price", delimiter=";",
-        condition="foreign == 1", in_range="1/5", replace=True
+        str(target),
+        varlist="make price",
+        delimiter=";",
+        condition="foreign == 1",
+        in_range="1/5",
+        replace=True,
     )
     assert not getattr(result, "is_error", False), result_text(result)
     lines = target.read_text(errors="replace").splitlines()
@@ -368,9 +359,7 @@ def test_export_excel_sheet_replace_resolves_conflict(auto_data, outdir):
     """官方对 worksheet 已存在的解法：sheet(..., replace)，且不能叠加文件级 replace。"""
     target = outdir / "d.xlsx"
     auto_data.stata_export_excel(str(target), sheet="Data", replace=True)
-    result = auto_data.stata_export_excel(
-        str(target), sheet="Data", sheet_mode="replace"
-    )
+    result = auto_data.stata_export_excel(str(target), sheet="Data", sheet_mode="replace")
     assert not getattr(result, "is_error", False), result_text(result)
 
 
@@ -394,8 +383,12 @@ def test_export_excel_filters_and_cell_offset(auto_data, outdir):
     """
     target = outdir / "sub.xlsx"
     result = auto_data.stata_export_excel(
-        str(target), varlist="make price", condition="foreign == 1",
-        in_range="50/70", cell="B2", replace=True
+        str(target),
+        varlist="make price",
+        condition="foreign == 1",
+        in_range="50/70",
+        cell="B2",
+        replace=True,
     )
     assert not getattr(result, "is_error", False), result_text(result)
     assert target.is_file()
@@ -407,8 +400,7 @@ def test_export_excel_empty_selection_gets_readable_hint(auto_data, outdir):
     下界是 1，所以 0 条也算越界；原始诊断与真实原因毫无关系，必须翻译。
     """
     result = auto_data.stata_export_excel(
-        str(outdir / "empty.xlsx"), condition="foreign == 1",
-        in_range="1/10", replace=True
+        str(outdir / "empty.xlsx"), condition="foreign == 1", in_range="1/10", replace=True
     )
     text = result_text(result)
     assert getattr(result, "is_error", False)
@@ -428,7 +420,6 @@ def test_export_excel_options_escape_hatch(auto_data, outdir):
     """长尾官方选项走 options 自由文本，须真能被 Stata 接受。"""
     target = outdir / "na.xlsx"
     result = auto_data.stata_export_excel(
-        str(target), varlist="make price rep78", replace=True,
-        options='missing("NA")'
+        str(target), varlist="make price rep78", replace=True, options='missing("NA")'
     )
     assert not getattr(result, "is_error", False), result_text(result)
