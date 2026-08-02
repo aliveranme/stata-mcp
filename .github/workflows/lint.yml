@@ -20,8 +20,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装 ruff
-        run: pip install ruff
+      - name: 安装 ruff（锁定版本，与本地 .venv 一致，避免格式规则漂移）
+        run: pip install ruff==0.16.0
 
       - name: ruff check（lint）
         working-directory: mcp-stata-server
