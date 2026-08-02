@@ -67,6 +67,38 @@ EXPECTED_TOOLS = {
     "stata_more",
     "stata_status",
     "stata_ping",
+    # 文件资源回传
+    "stata_read_file",
+    "stata_register_file",
+    "stata_list_resources",
+    # 会话生命周期
+    "stata_clear",
+    "stata_snapshot",
+    # 长任务控制
+    "stata_background",
+    "stata_task_status",
+    "stata_task_cancel",
+    "stata_task_result",
+    "stata_task_list",
+    # 数据重构
+    "stata_replace",
+    "stata_drop",
+    "stata_keep",
+    "stata_rename",
+    "stata_recode",
+    "stata_destring",
+    # 扩展估计
+    "stata_logit",
+    "stata_mlogit",
+    "stata_nbreg",
+    "stata_qreg",
+    "stata_mixed",
+    # 后估计
+    "stata_lincom",
+    "stata_nlcom",
+    "stata_hausman",
+    # 服务器日志
+    "stata_read_log",
 }
 
 
@@ -125,6 +157,21 @@ def test_write_tools_are_not_marked_read_only():
         "stata_collapse",
         "stata_frame",
         "stata_predict",
+        # 数据重构：覆盖/删除/重命名/重编码原变量，改内存数据集
+        "stata_replace",
+        "stata_drop",
+        "stata_keep",
+        "stata_rename",
+        "stata_recode",
+        "stata_destring",
+        # 会话生命周期：clear 全清、snapshot 可恢复/擦除
+        "stata_clear",
+        "stata_snapshot",
+        # 长任务：后台执行会改动 Stata 状态、取消会打断
+        "stata_background",
+        "stata_task_cancel",
+        # 资源登记是会话状态变更
+        "stata_register_file",
     }
     wrong = [
         name

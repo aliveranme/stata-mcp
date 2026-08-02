@@ -5,6 +5,7 @@ import pytest
 
 from server import (
     _cleanup_temp_block,
+    _ensure_java_headless,
     _file_written_since,
     _format_size,
     _graph_size_options,
@@ -13,6 +14,27 @@ from server import (
     _normalize_path,
     _paginate,
 )
+
+
+def test_ensure_java_headless_appends_default_when_unspecified(monkeypatch):
+    monkeypatch.delenv("JAVA_TOOL_OPTIONS", raising=False)
+
+    assert _ensure_java_headless() is True
+    assert os.environ["JAVA_TOOL_OPTIONS"] == "-Djava.awt.headless=true"
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "-Xmx1g -Djava.awt.headless=true",
+        "-Djava.awt.headless=false -Xmx1g",
+    ],
+)
+def test_ensure_java_headless_preserves_explicit_setting(monkeypatch, existing):
+    monkeypatch.setenv("JAVA_TOOL_OPTIONS", existing)
+
+    assert _ensure_java_headless() is False
+    assert os.environ["JAVA_TOOL_OPTIONS"] == existing
 
 
 def test_normalize_path_converts_backslashes_to_slashes():
@@ -117,6 +139,21 @@ def test_format_error_drops_unverified_codes():
 
     for rc in (6, 8, 10, 20, 99):
         assert f"未知返回码({rc})" in _format_error(rc, "cmd", "")
+
+
+def test_format_error_rc459_uses_xtset_context_for_xtreg():
+    from server import _format_error
+
+    result = _format_error(459, "xtreg price weight, fe", "must specify panelvar; use xtset")
+    assert "xtset/tsset" in result
+    assert "唯一识别" not in result
+
+
+def test_format_error_rc459_keeps_isid_context():
+    from server import _format_error
+
+    result = _format_error(459, "isid id", "variables id do not uniquely identify the observations")
+    assert "唯一识别" in result
 
 
 def test_format_error_unknown_rc():
@@ -388,6 +425,15 @@ def test_file_written_since_treats_stat_race_as_written(tmp_path):
         assert _file_written_since(str(p), before) is True
 
 
+def test_file_written_since_false_when_file_is_deleted_after_start(tmp_path):
+    """导出产物在 stat 竞态后被删除时，不能误报为成功。"""
+    p = tmp_path / "fig.png"
+    p.write_bytes(b"old")
+    before = os.stat(p).st_mtime_ns
+    p.unlink()
+    assert _file_written_since(str(p), before) is False
+
+
 # ============================================================================
 # do 文件的 ssc install 拆分（_extract_ssc_installs）
 # ============================================================================
@@ -530,3 +576,43 @@ def test_graph_format_jpeg_suffix_is_not_official():
     opts, note = _graph_format_options("/tmp/a.jpeg", quality=60, mag=0, fontface="")
     assert opts == "", ".jpeg 不是官方后缀，不该当 jpg 处理"
     assert "quality" in note
+
+
+# ---------------------------------------------------------------------------
+# compact 输出压缩
+# ---------------------------------------------------------------------------
+
+
+def test_compact_removes_count_lines_keeps_tables():
+    from server import _compact_output
+
+    text = (
+        "sysuse auto\n"
+        "\n"
+        "(22 real changes made)\n"
+        "\n"
+        "    Variable |        Obs        Mean\n"
+        "-------------+-------------------------\n"
+        "       price |         74    6165.257\n"
+        "\n"
+        "\n"
+        "\n"
+        "(1 observation deleted)\n"
+        "done"
+    )
+    out = _compact_output(text)
+    assert "(22 real changes made)" not in out
+    assert "(1 observation deleted)" not in out
+    assert "price |" in out  # 结果表保留
+    assert "6165.257" in out
+    assert "done" in out
+    assert "\n\n\n" not in out  # 空行被折叠
+
+
+def test_compact_keeps_error_text():
+    from server import _compact_output
+
+    text = "(10 real changes made)\n[返回码: 601] file not found\nsome context"
+    out = _compact_output(text)
+    assert "[返回码: 601] file not found" in out
+    assert "some context" in out

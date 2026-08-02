@@ -7,7 +7,7 @@
   <a href="https://www.stata.com"><img src="https://img.shields.io/badge/Stata-Now%2019.5%20MP-1a476f" alt="Stata"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.10+-4a90d9" alt="Python"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-stdio-f4a259" alt="MCP"></a>
-  <img src="https://img.shields.io/badge/tools-50-6fcf97" alt="50 tools">
+  <img src="https://img.shields.io/badge/tools-75-6fcf97" alt="75 tools">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT">
 </p>
 
@@ -35,10 +35,10 @@ stata_graph("rvfplot", export="…png")  →  残差图导出为文件
 
 两部分组成，一起装进 Claude Code：
 
-- **执行层（MCP Server）** —— 经 `pystata` 直接调用 Stata 的运行时，把 50 个工具
+- **执行层（MCP Server）** —— 经 `pystata` 直接调用 Stata 的运行时，把 75 个工具
   暴露给 Agent。`stata_run` 执行任意命令、`stata_help` 查任意命令的官方语法，二者
-  合起来即「全量内置命令支持」；其余专用工具（回归 / 面板 / IV / 生成变量 …）是给
-  高频命令加结构化参数与校验的便利层。
+  合起来即「全量内置命令支持」；其余专用工具（回归 / 面板 / IV / 生成变量 / 数据
+  清洗 / 后估计 / 文件资源 / 后台任务 …）是给高频命令加结构化参数与校验的便利层。
 - **知识层（Skill）** —— 一份 Stata 编程指南：语法要点、分析模板、常见陷阱、命令
   地图与常用外置包。Agent 据此知道**该用什么命令**，而不是靠猜。
 
@@ -97,7 +97,7 @@ cd mcp-stata-server
 uv venv
 source .venv/Scripts/activate      # Windows Git Bash
 # source .venv/bin/activate        # macOS / Linux
-uv pip install fastmcp
+uv pip install "fastmcp>=3.2.0"
 
 # 3. 生成配置
 cd ..
@@ -114,22 +114,25 @@ cp .mcp.json.example .mcp.json     # 编辑其中的 <repo-path>
 
 Agent 会自动走 `stata_use_dataset` → `stata_describe` → `stata_summarize`。
 
-## MCP 工具（50 个）
+## MCP 工具（75 个）
 
 > 能力边界不在工具数量上：`stata_run` + `stata_help` 已覆盖全部内置命令。下面的
 > 专用工具是给高频命令加结构化参数与校验的便利层。
 
 | 类别 | 工具 |
 |------|------|
-| **核心执行** | `stata_run`（任意命令，含危险前缀拦截）· `stata_run_do_file`（执行前自动拆出 `ssc install` 单独安装，已装跳过） |
+| **核心执行** | `stata_run`（任意命令，含危险前缀拦截；`save_output=` 完整输出落盘并登记为资源）· `stata_run_do_file`（执行前自动拆出 `ssc install` 单独安装，已装跳过） |
 | **数据管理** | `stata_use_dataset` · `stata_import`（excel/csv/sas/spss/dbase/parquet）· `stata_use_example`（sysuse/webuse）· `stata_save_dataset` · `stata_set_cwd` · `stata_generate` · `stata_egen` · `stata_xtset`（面板/时序声明） |
-| **数据重构 / 校验** | `stata_merge` · `stata_append` · `stata_reshape` · `stata_collapse` · `stata_frame`（多数据集）· `stata_verify`（count/assert/duplicates/isid/missing） |
+| **数据重构 / 校验** | `stata_merge` · `stata_append` · `stata_reshape` · `stata_collapse` · `stata_frame`（多数据集）· `stata_verify`（count/assert/duplicates/isid/missing）· `stata_replace` · `stata_drop` · `stata_keep` · `stata_rename` · `stata_recode` · `stata_destring` |
 | **数据探索** | `stata_describe` · `stata_codebook` · `stata_summarize` · `stata_list` · `stata_tabulate` · `stata_correlate` · `stata_display` |
-| **估计** | `stata_regress` · `stata_logistic` · `stata_probit` · `stata_poisson` · `stata_ttest` · `stata_xtreg` · `stata_ivregress` |
-| **后估计** | `stata_margins` · `stata_test` · `stata_predict` · `stata_estat`（vif/hettest/ovtest/ic）· `stata_estimates`（存取与并排比较）· `stata_return_list` |
+| **估计** | `stata_regress` · `stata_logistic` · `stata_probit` · `stata_poisson` · `stata_ttest` · `stata_xtreg` · `stata_ivregress` · `stata_logit` · `stata_mlogit` · `stata_nbreg` · `stata_qreg` · `stata_mixed` |
+| **后估计** | `stata_margins` · `stata_test` · `stata_predict` · `stata_estat`（vif/hettest/ovtest/ic）· `stata_estimates`（存取与并排比较）· `stata_lincom` · `stata_nlcom` · `stata_hausman` · `stata_return_list` |
 | **图形 / 导出** | `stata_graph`（导出即验证文件写入）· `stata_scheme`（主题）· `stata_export_excel` · `stata_export_delimited` · `stata_etable`（回归表直出 Word/Excel） |
+| **文件资源回传** | `stata_list_resources` · `stata_read_file`（info/base64）· `stata_register_file` —— 导出产物经资源协议（`resources/read` 读 `stata-file:///`）取回二进制 |
 | **包管理与帮助** | `stata_help`（查任意命令帮助）· `stata_install_package` · `stata_uninstall_package` · `stata_describe_package` · `stata_find_package` · `stata_list_packages` |
-| **会话** | `stata_more`（翻页）· `stata_status` · `stata_ping` |
+| **会话生命周期** | `stata_clear`（scope 重置）· `stata_snapshot`（save/list/restore/erase）· `stata_more`（翻页）· `stata_status` · `stata_ping` |
+| **长任务控制** | `stata_background`（后台执行，单块上限 3600s）· `stata_task_status` · `stata_task_cancel` · `stata_task_result` · `stata_task_list` |
+| **服务器日志** | `stata_read_log`（tail/path） |
 
 <details>
 <summary><b>各工具的参数与说明</b></summary>
@@ -146,10 +149,19 @@ import 命令族，按扩展名推断格式；`stata_save_dataset` 保存；`sta
 **估计** — `stata_regress`（OLS）、`stata_logistic`、`stata_probit`（可选
 `marginal_effects`）、`stata_poisson`（可选 `irr`）、`stata_ttest`（可按组）、
 `stata_xtreg`（`effects` = fe/re/be/mle/pa，需先 `xtset`）、`stata_ivregress`
-（2sls/liml/gmm）。
+（2sls/liml/gmm）。扩展族：`stata_logit`（报告原始系数，OR 用 `logistic`）、
+`stata_mlogit`（多分类，`baseoutcome` 定基准）、`stata_nbreg`（负二项）、
+`stata_qreg`（分位，`quantile` 默认 0.5）、`stata_mixed`（多水平，`random="|| id:"`）。
+
+**数据清洗** — `stata_replace` 覆盖变量值、`stata_drop`/`stata_keep` 删/留变量或观测
+（两种形态二选一）、`stata_rename` 重命名（单个或批量）、`stata_recode` 重编码
+（`values="(1=0) (2/4=1)"` 官方规则组）、`stata_destring` 字符串转数值（必须
+`replace=True` 或 `generate()`）。
 
 **后估计**（须先跑估计命令）— `stata_margins`（`dydx` / `at`）、`stata_test`
-（Wald 检验）、`stata_predict`（预测值 / 残差，会创建变量）。
+（Wald 检验）、`stata_predict`（预测值 / 残差，会创建变量）、`stata_lincom` /
+`stata_nlcom`（线性 / 非线性组合检验）、`stata_hausman`（模型比较，需先
+`stata_estimates action="store"` 存两个模型）。
 
 **图形 / 导出** — `stata_graph` 把 graph 与 export 原子执行，以文件是否真被写入判定
 成败。导出选项按格式自动适配官方边界：尺寸单位（位图与 svg 用像素、pdf 用英寸、
@@ -171,7 +183,20 @@ eps/ps/emf 不支持）、`quality`（仅 jpg）、`mag`（仅 pdf/eps/ps）、`
 
 **会话** — `stata_more` 翻上一条命令的完整输出；`stata_status` 一次给出数据集、工作目录、
 **frame**、**面板/时序设定**、**已存与活跃的估计结果**、内存 —— 即 Agent 调 `xtreg` /
-`margins` / `predict` 前需要确认的全部前提；`stata_ping` 心跳。
+`margins` / `predict` 前需要确认的全部前提；`stata_ping` 心跳。`stata_clear` 按 scope
+重置会话（data/estimates/graphs/panels/all）；`stata_snapshot` 用 Stata 原生快照在数据
+阶段间快速回退（save/list/restore/erase）。
+
+**文件资源回传** — 导出工具（`stata_graph` / `stata_export_*` / `stata_etable` /
+`stata_save_dataset` / `stata_run save_output=`）成功后把文件登记为 MCP 资源。远程
+客户端经 `resources/read` 读 `stata-file:///<路径>` 取回图表 / Excel / CSV / dta 的
+二进制，或 `stata_read_file` 取 base64 / 元信息；`stata_list_resources` 列出全部登记
+文件，`stata_register_file` 登记已有的磁盘文件。安全边界：**只读登记过的文件**。
+
+**长任务控制** — `stata_background` 把耗时长命令放到后台（立即返回任务号，单块超时
+上限 3600s，运行期间其他调用会等待共享的 `_stata_lock`）；`stata_task_status` 查进度、
+`stata_task_cancel` 显式取消、`stata_task_result` 取结果、`stata_task_list` 列全部。
+`stata_read_log` 读本服务器运行日志排查问题。
 </details>
 
 ## Stata 知识 Skill
@@ -210,6 +235,7 @@ eps/ps/emf 不支持）、`quality`（仅 jpg）、`mag`（仅 pdf/eps/ps）、`
 | `STATA_EDITION` | `mp` | Stata 版本（mp / se / be） |
 | `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。未设置时不限制绝对路径；**即便设置也只校验工具的路径参数**，不覆盖 `stata_run` 里的自由文本命令。 |
 | `STATA_ALLOW_UNC` | 未设置 | 设为 `1` 允许 UNC 网络路径，默认拒绝。 |
+| `JAVA_TOOL_OPTIONS` | 自动追加 `-Djava.awt.headless=true` | MCP 无 GUI 会话时自动启用 Java headless，避免图形导出触发 AWT 渲染错误。若已显式设置 `-Djava.awt.headless=true/false`，则保留原值。 |
 </details>
 
 <details>
@@ -224,7 +250,7 @@ python server.py
 # 单元测试（无需 Stata）
 python -m pytest tests/ -q
 
-# 端到端测试（需真实 Stata；未检测到安装时整目录跳过）
+# 端到端测试（需真实 Stata；未检测到安装时整目录跳过；网络用例需可访问 Stata 官网）
 # 必须与 tests/ 分开跑：tests/conftest.py 会把 pystata 换成 mock，同进程内换不回来
 STATA_HOME=/path/to/StataNow python -m pytest tests_e2e/ -q
 
@@ -244,7 +270,8 @@ uv pip freeze > requirements.txt
 stata-mcp/
 ├── setup.py                        # 一键安装（跨平台检测 Stata）
 ├── mcp-stata-server/
-│   ├── server.py                   # MCP Server 主程序（50 个工具）
+│   ├── server.py                   # MCP Server 主程序（75 个工具）
+│   ├── tool_modules/               # 便利工具模块（数据重构/扩展估计/后估计）
 │   ├── tests/                      # 单元测试（mock pystata，无需 Stata）
 │   └── tests_e2e/                  # 端到端测试（需真实 Stata）
 ├── .claude/skills/stata/SKILL.md   # Stata 编程知识 Skill

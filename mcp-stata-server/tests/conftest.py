@@ -101,11 +101,20 @@ def _reset_server_globals():
     _last_ping_time 会被多个用例真实写入（stata_ping 成功路径、_ping_stata），
     残留值会让后续用例在 2 秒缓存窗口内跳过心跳，走上与单独运行时不同的分支；
     _last_output 同理会让 stata_more 的用例读到上一个用例的输出。
+    _resource_registry / _bg_tasks 由资源与后台任务用例写入，残留会污染后续用例。
     """
     import server
 
     server._last_ping_time = 0.0
     with server._output_lock:
         server._last_output = ""
+    with server._resource_lock:
+        server._resource_registry.clear()
+    with server._bg_lock:
+        server._bg_tasks.clear()
     yield
     server._last_ping_time = 0.0
+    with server._resource_lock:
+        server._resource_registry.clear()
+    with server._bg_lock:
+        server._bg_tasks.clear()

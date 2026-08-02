@@ -6,7 +6,8 @@
 
 ```
 stata-mcp/
-├── mcp-stata-server/server.py       # MCP 执行层：50 个工具，通过 pystata 调用 Stata DLL
+├── mcp-stata-server/server.py       # MCP 执行层：75 个工具，通过 pystata 调用 Stata DLL
+├── mcp-stata-server/tool_modules/   # 便利工具模块（数据重构/扩展估计/后估计），register() 装配
 ├── .claude/skills/stata/SKILL.md    # 知识层：Stata 语法、模板、陷阱、Agent 协作规范
 ├── setup.py                         # 安装层：检测 Stata、创建 venv、生成 .mcp.json
 ├── .gitignore                       # 忽略 .mcp.json(生成) .venv dta/log/smcl
@@ -24,7 +25,7 @@ stata-mcp/
 | `cd mcp-stata-server && source .venv/Scripts/activate && python server.py` | 调试模式启动 |
 | `uv pip install fastmcp && uv pip freeze > requirements.txt` | 添加新依赖 |
 
-## MCP 工具（50 个）
+## MCP 工具（75 个）
 
 > **能力边界不在工具数上**：`stata_run` 执行任意命令、`stata_help` 查任意命令的
 > 官方语法，二者即「全量内置命令支持」。专用工具（回归/面板/IV/生成变量等）是
@@ -32,23 +33,27 @@ stata-mcp/
 
 | 类别 | 工具 | 只读? | 说明 |
 |------|------|:-----:|------|
-| 核心执行 | `stata_run`, `stata_run_do_file` | — | 通用命令执行；`run_do_file` 执行前自动拆出 `ssc install` 单独安装（已装跳过） |
-| 数据管理 | `stata_use_dataset`, `stata_import`, `stata_save_dataset`, `stata_set_cwd` | — | 读写 .dta、cd；`stata_import` 覆盖官方 import 族（excel/delimited/sas/spss/dbase/parquet，按扩展名推断） |
+| 核心执行 | `stata_run`, `stata_run_do_file` | — | 通用命令执行；`run_do_file` 执行前自动拆出 `ssc install` 单独安装（已装跳过）。`stata_run` 另有 `save_output`：完整输出（不受 120K 裁剪）落盘并登记为文件资源 |
+| 数据管理 | `stata_use_dataset`, `stata_import`, `stata_save_dataset`, `stata_set_cwd` | — | 读写 .dta、cd；`stata_import` 覆盖官方 import 族（excel/delimited/sas/spss/dbase/parquet，按扩展名推断）。`save_dataset` 成功后自动登记为资源 |
 | 面板/时序 | `stata_xtset` | — | 声明/查询/清除 `xtset`(面板) 与 `tsset`(纯时序) —— 是 `stata_xtreg` 的前提 |
 | 示例数据 | `stata_use_example` | — | `sysuse`(本地) / `webuse`(联网) 加载官方示例数据集；`action="list"` 列出可用 |
 | 数据生成 | `stata_generate`, `stata_egen` | — | 创建变量（改数据集，非只读）；支持官方 `[type]` 存储类型与 `[if] [in]` |
-| 数据重构 | `stata_merge`, `stata_append`, `stata_reshape`, `stata_collapse`, `stata_frame` | — | 横向合并(1:1/m:1/1:m/m:m)、纵向追加(可多文件)、长宽转换、按组聚合、多数据集 frame |
+| 数据重构 | `stata_merge`, `stata_append`, `stata_reshape`, `stata_collapse`, `stata_frame`, `stata_replace`, `stata_drop`, `stata_keep`, `stata_rename`, `stata_recode`, `stata_destring` | — | 横向合并(1:1/m:1/1:m/m:m)、纵向追加(可多文件)、长宽转换、按组聚合、多数据集 frame；后六个是变量级清洗：`replace`/`recode` 覆盖原变量，`drop`/`keep` 支持「删变量」或「删观测」两种形态（二选一），`destring` 强制 `replace` 或 `generate()` 二选一 |
 | 数据校验 | `stata_verify` | ✓ | `count`/`assert`/`duplicates`/`isid`/`misstable` 五合一 |
 | 数据探索 | `stata_describe`, `stata_codebook`, `stata_summarize`, `stata_list`, `stata_tabulate`, `stata_correlate`, `stata_display` | ✓ | 只读探索 |
-| 估计 | `stata_regress`, `stata_logistic`, `stata_probit`, `stata_poisson`, `stata_ttest`, `stata_xtreg`, `stata_ivregress` | ✓ | OLS/Logit/Probit/Poisson/t 检验/面板/IV |
-| 后估计 | `stata_margins`, `stata_test`, `stata_predict`, `stata_estat`, `stata_estimates` | ✓* | 边际效应/Wald 检验/预测（`stata_predict` 会创建变量，非只读）；`stata_estat` 诊断(vif/hettest/ovtest/ic)；`stata_estimates` 存取与并排比较模型 |
+| 估计 | `stata_regress`, `stata_logistic`, `stata_probit`, `stata_poisson`, `stata_ttest`, `stata_xtreg`, `stata_ivregress`, `stata_logit`, `stata_mlogit`, `stata_nbreg`, `stata_qreg`, `stata_mixed` | ✓ | OLS/Logit/Probit/Poisson/t 检验/面板/IV + 扩展族：`logit`（原始系数，`logistic` 是 OR）、`mlogit` 多分类、`nbreg` 负二项、`qreg` 分位（`quantile` 默认 0.5）、`mixed` 多水平（`random` 以 `\|\|` 开头） |
+| 后估计 | `stata_margins`, `stata_test`, `stata_predict`, `stata_estat`, `stata_estimates`, `stata_lincom`, `stata_nlcom`, `stata_hausman` | ✓* | 边际效应/Wald 检验/预测（`stata_predict` 会创建变量，非只读）；`stata_estat` 诊断(vif/hettest/ovtest/ic)；`stata_estimates` 存取与并排比较模型；`lincom` 线性组合、`nlcom` 非线性组合（delta 法）、`hausman` 模型比较（需先 `estimates store` 两个模型） |
 | 返回值 | `stata_return_list` | ✓ | 一次列出 `r()`/`e()`/`c()` 全部返回值，不必逐个 `display` |
-| 图形 | `stata_graph`, `stata_scheme` | — / ✓* | 绘图并可选导出（选项按格式自动适配，见下）；`stata_scheme` 列出/查询/设置主题（`action="set"` 非只读） |
-| 导出 | `stata_export_excel`, `stata_export_delimited`, `stata_etable` | — | 数据集导出为 .xlsx 或 CSV/TSV/自定义分隔符（replace 默认 False）；**回归表导出优先用 `stata_etable`**（官方 `etable`，无第三方依赖，直出 .docx/.xlsx/.pdf/.tex）。`export_excel(results=True)` 是旧路径：依赖第三方 estout 且只能产出 CSV |
+| 图形 | `stata_graph`, `stata_scheme` | — / ✓* | 绘图并可选导出（选项按格式自动适配，见下）；`stata_scheme` 列出/查询/设置主题（`action="set"` 非只读）。`stata_graph` 导出成功后自动登记为资源 |
+| 导出 | `stata_export_excel`, `stata_export_delimited`, `stata_etable` | — | 数据集导出为 .xlsx 或 CSV/TSV/自定义分隔符（replace 默认 False）；**回归表导出优先用 `stata_etable`**（官方 `etable`，无第三方依赖，直出 .docx/.xlsx/.pdf/.tex）。`export_excel(results=True)` 是旧路径：依赖第三方 estout 且只能产出 CSV。导出成功即登记为资源 |
+| 文件资源回传 | `stata_read_file`, `stata_register_file`, `stata_list_resources` | ✓ / — | 导出工具成功后会**登记输出文件**，远程客户端可经 MCP 资源协议（`resources/read` 读 `stata-file:///<路径>`）或 `stata_read_file`（base64）取回图表/Excel/CSV/dta 的**实际内容**，而不只是路径。安全边界：**只读登记过的文件**，未登记报错并提示登记方式 |
 | 包管理与帮助 | `stata_install_package`, `stata_uninstall_package`, `stata_describe_package`, `stata_find_package`, `stata_list_packages`, `stata_help` | — / ✓ | 装/卸（`ado uninstall` 本地安全）/查详情（本地 `ado describe` 或联网 `ssc describe`）/`net search` 找包/`ado dir` 列包/`stata_help` 查任意命令帮助 |
+| 会话生命周期 | `stata_clear`, `stata_snapshot` | — | `clear` 按 scope 重置（data/estimates/graphs/panels/all）；`snapshot` 包 Stata 原生快照 save/list/restore/erase，同会话内数据阶段间快速回退 |
+| 长任务控制 | `stata_background`, `stata_task_status`, `stata_task_cancel`, `stata_task_result`, `stata_task_list` | — / ✓ | 后台执行长任务（大循环/复杂回归/联网，单块最长 3600s），立即返回任务号；进度轮询、显式取消、取结果。后台任务仍持 `_stata_lock`，运行期间其他调用会等待 |
 | 翻页 | `stata_more` | ✓ | 大输出分页浏览（缓存 120K chars） |
 | 会话 | `stata_status` | ✓ | 数据集 + 工作目录 + **frame** + **面板/时序设定** + **已存/活跃估计** + 内存 —— 覆盖 Agent 调 `xtreg`/`margins`/`predict` 前需确认的全部前提 |
 | 心跳 | `stata_ping` | ✓ | 快速检测 Stata DLL 存活状态 |
+| 服务器日志 | `stata_read_log` | ✓ | 读取本 MCP Server 的运行日志（tail/path），排查远程客户端看不到的服务器侧问题 |
 
 ### 语法位置对齐（`[varlist] [if] [in] [, options]`）
 
@@ -71,7 +76,7 @@ stata-mcp/
 |------|------|------|
 | `STATA_HOME` | `C:\Program Files\StataNow\StataNow19` | Stata 安装目录。优先级：环境变量 > `setup.py` 自动检测 > 该默认值；手动安装时可在 `.mcp.json` 中覆盖。 |
 | `STATA_EDITION` | `mp` | 版本 (mp/se/be) |
-| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。**两重限制**：① 未设置时不限制任何绝对路径，`_is_path_allowed` 直接放行；② 即便设置了，也**只校验工具的路径参数**，不覆盖 `stata_run` / `stata_run_do_file` 里的自由文本命令 —— 实测配置白名单后 `stata_use_dataset("越界路径")` 被拒、`stata_run('use "越界路径"')` 照常执行。需要强制隔离请在操作系统层面限制本进程可访问的目录。 |
+| `STATA_ALLOWED_ROOTS` | 未设置 | 路径沙箱白名单，分号分隔（例 `C:/data;D:/projects`）。**两重限制**：① 未设置时不限制任何绝对路径，`_is_path_allowed` 直接放行；② 设置后**既校验工具的路径参数**（`stata_use_dataset("越界路径")` 被拒），**也审计自由文本命令的引号路径**（`stata_run('use "越界路径"')` 同样被拒）—— 审计在 `_run_stata_command` 锁内做权威校验，只审数据命令的引号路径（裸单 token 可能是 varlist 跳过、宏路径 fail-open）。需要强制隔离请在操作系统层面限制本进程可访问的目录。 |
 | `STATA_ALLOW_UNC` | 未设置（=拒绝） | 设为 `1` 时允许 UNC 网络路径（`\\server\share`），默认拒绝。 |
 
 ## 关键设计决策
@@ -106,7 +111,7 @@ stata-mcp/
 
 ### 安全护栏
 
-- `_has_dangerous_command_prefix` 逐行做**行首**匹配，拦截 `!`、`shell`、`winexec`、`python:`、`python (`、裸 `python`，以及一切 `mata` 开头的命令。如确需此类操作，请通过操作系统或 Stata 界面直接执行，不要经由 Stata MCP。
+- `_has_dangerous_command_prefix` 逐行做**行首**匹配，拦截 shell-out / 文件销毁 / 代码执行四族的**全写与最小缩写**：`!`、`sh`/`shell`/`xsh`/`xshell`、`winex`/`winexec`、`unix`/`unixc`/`unixcmd`、`era`/`erase`、`rmd`/`rmdir`、`java`、`plugin`、`python`/`python:`/`python (`、以及一切 `mata` 开头的命令。缩写形态是真实旁路：真机确认 `sh whoami`、`era /tmp/x`（erase，**删文件**）曾原样穿过旧护栏。如确需此类操作，请通过操作系统或 Stata 界面直接执行，不要经由 Stata MCP。
 - **接受自由文本命令的工具都必须过这层护栏**：目前是 `stata_run` 与 `stata_graph(command=)`。`stata_graph` 曾遗漏该检查，实测 `stata_graph(command='!touch /tmp/x')` 能真实创建文件 —— 该参数会被原样拼进执行串，导出模式下还会进入临时 do 文件。新增此类参数时务必同步加检查。
 - **Mata 与内嵌 Python 同等禁止**：Mata 是可执行任意代码的子语言，块内 `_stata("...")` 能调用任意 Stata 命令（含 `!` shell out），`unlink()` / `fopen()` 能直接读写文件，而行首前缀匹配对块内代码完全无效。为策略一致，`mata describe` 这类只读子命令也一并拒绝。
 - 结构化参数的校验强度**不一致，且必须如此**：`condition` / `options` 只拒绝换行、回车、空字节、分号（要留出表达式与宏展开的空间）；`varlist` 另外拒绝 `!`、`|`、`&`、反引号、`$`、`/`、`,` 和独立的 `using`。
@@ -191,6 +196,46 @@ do 文件常在开头写 `ssc install foo`，内联执行会让整段脚本卡�
 文件路径参数经两层校验，确保「校验路径 == 执行路径」：
 - **入口预检 `_validate_path`**（进锁前，基于 Python cwd）：拒绝空字节、双引号、分号、换行、回车；拒绝 UNC（默认，`STATA_ALLOW_UNC=1` 开启）；相对路径不得超出 Python cwd；沙箱初筛。
 - **权威校验 `_resolve_stata_path_locked`**（锁内，基于 Stata cwd）：用 Stata 实际工作目录解析相对路径为绝对路径，再经 `_check_abs_path_safety` 做沙箱 + UNC 权威校验，并把命令中嵌入的 Python-cwd 路径替换为 Stata 绝对路径。此层消除 Python cwd 与 Stata cwd 不一致导致的沙箱绕过（`use_dataset`/`run_do_file` 的 `require_file` 路径）。
+
+### 文件资源回传（MCP resources）
+
+导出工具（`stata_graph` / `stata_export_excel` / `stata_etable` / `stata_export_delimited` /
+`stata_save_dataset` / `stata_run(save_output=)`）在**确认文件真正写入后**调用
+`_register_resource` 登记；资源模板 `stata-file:///{path*}` 只服务登记过的文件。
+
+- **为什么是 `{path*}` 而非 `{path}`**：`{path}` 占位符只匹配单个路径段（不含 `/`），
+  POSIX/Windows 绝对路径必然含 `/`，会全部匹配失败。`{path*}` 是 RFC 6570 通配符，
+  跨段匹配，实测两者行为差异显著。
+- **安全边界就是注册表**：不查注册表的话，远程客户端可用任意 URI 请求 `stata-file:///...`，
+  变成服务器端任意文件读取原语。`stata_read_file` 与资源模板共用 `_read_registered_file`，
+  先查注册表 → 校验大小上限（16MB）→ 才读二进制。
+- **读取上限**：单次资源读取钳在 `_MAX_RESOURCE_READ_BYTES`（16MB），防止把超大文件
+  一次性读进内存撑爆 MCP 传输。
+- **登记 ≠ 复制**：文件留在磁盘原位，登记只是把路径记进注册表（含 mime/size/来源/URI）。
+  `stata_clear(scope="all")` 清空注册表但**不删文件**。
+- `stata_run(save_output=)` 是配套：超大输出在内存里截断 120K，完整文本写进文件并登记，
+  远程客户端可经资源协议取回完整输出。
+
+### 会话生命周期（clear / snapshot）
+
+- **`stata_clear` 不重启 DLL**：pystata 的 shutdown/init 循环有崩溃风险，`clear all` +
+  `capture frame drop _all` + `estimates clear` + `graph drop _all` + `xtset, clear` 已覆盖
+  可观测的会话状态。scope 细分让 Agent 只清需要的部分，不必整锅端。
+- **`stata_snapshot` 包 Stata 原生 snapshot**：同一会话内数据阶段的快速回退。只快照
+  内存数据集（估计结果/宏不在其中），是「多会话隔离」的轻量近似 —— 真正隔离需多个
+  Stata 实例（受许可证约束，见已知局限）。
+
+### 长任务控制（后台任务）
+
+后台任务**不改变并发性**（Stata DLL 单线程，`_bg_worker` 同样持 `_stata_lock`），改变的是
+**交互模型**：提交方立即拿到 task_id，不必在 MCP 请求里阻塞数分钟；进度可轮询、任务可
+显式取消，单块超时上限放宽到 3600s。
+
+- **取消语义**：`_bg_cancel` 置位 `cancel_requested`；任务正卡在 `StataSO_Execute` 里
+  （`in_execute`）时同时 `_set_break()` —— 与超时看门狗的跨线程 SetBreak 是同一个已接受的
+  并发风险。块与块之间靠命令返回后检查取消标志终止，因此**晚到的 break 不会被下一条
+  命令消费**（不再复现「打断下一条无辜命令」的历史缺陷）。
+- **进度粒度**：以「命令块」为单位（当前块/总块数），do 文件整体是一条命令块，粒度到此为止。
 
 ## Gotchas
 
@@ -428,6 +473,23 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | 一行 `ssc install` 让 do 文件的错误报告不可读 | 失败时走 `_result_text_inline`（换行变 `" | "`），而该函数是为并入单行**报告条目**设计的，套在可达 120K 的完整输出上会把错误上下文、表格、行号压成一条巨型单行；同一 do 文件不含 `ssc install` 时走原路径、格式完好 | 抽出保留换行的 `_result_text`，失败路径改用它；`_result_text_inline` 的 docstring 写明只可用于单行条目 |
 | 回归表导出被第三方包与 CSV 锁死 | 唯一路径 `stata_export_excel(results=True)` 依赖第三方 `estout`，名叫 excel 却只能产出 CSV；而 Stata 17+ 自带的 `etable` 无需任何第三方包，直出 .docx/.xlsx/.pdf/.tex | 新增 `stata_etable`。导出格式经真机逐一实测（9 种可用，`.csv`/`.rtf` 报 r(198)），不支持的格式在入口拦下 —— `etable` 会先打印表格再报错，只看输出会把失败当成功；成败以文件 mtime 判定（与 `stata_graph` 同思路） |
 | 晚到的 break 打断下一条无辜命令 | 看门狗的二次确认（`if exec_done.is_set(): return` 紧跟 `_set_break()`）留有窗口，而主线程要走完 `RedirectOutput.__exit__` 与临时文件清理（多行块含一次磁盘 unlink）才置位事件。break 不会被任何代码消费，而是被**下一次** `StataSO_Execute` 吃掉 → 无关命令报 rc=1 | 命令一返回就立即置位；置位与「确认+break」共用 `break_guard` 锁，合成原子步骤。另把 `did_break = True` 移到 `_set_break()` **之前** —— 此前主线程可能读到中间态，既不清 break 残渣也不追加超时说明 |
+| `stata_read_file(action="read")` 可回传 ~21MB base64 | `_MAX_RESOURCE_READ_BYTES=16MB` 只约束读入内存的文件字节，base64 编码后再膨胀 4/3，直接作为工具结果返回，绕过代码库 120K 输出上限，可能撑爆 stdio 传输 | 新增 `_MAX_TOOL_READ_BYTES=80KB`（base64 后约 106K 贴近传输上限），超限报错并引导用资源协议 `resources/read`（流式二进制，上限仍 16MB） |
+| 资源读取的 TOCTOU / 符号链接换靶 | size 复查与 `open().read()` 之间文件被替换/增长时，无长度参数会整段读入超限内容；登记与读取之间不校验 inode | `_read_registered_file` 改**有界读取**（`read(_MAX_RESOURCE_READ_BYTES + 1)`），超限即拒；即便换靶也不会一次性持有超限内容 |
+| 文件名含字面 `%xx` 的资源读不回 | fastmcp 已对模板 `{path*}` 解码一次，`_resource_lookup` 再 unquote 一次 → `a%20b.csv` 二次解码成 `a b.csv` 查表 miss（功能性拒绝） | 移除 `_resource_lookup` 的二次 unquote；模板路径由 fastmcp 解码，工具路径本就是文件系统路径 |
+| `stata_run(save_output=)` 早退时登记陈旧文件 | 空命令/超长命令在 `_run_stata_command` 内早退（不截断文件），`stata_run` 仍把上一次留下的旧文件登记并附「完整输出已保存」 | 记录调用前 mtime，`_file_written_since` 判定未写入则不登记、不附误导说明（与导出工具同一判定思路） |
+| 取消的晚到 break 会打断后续无关命令 | `_bg_cancel` 直接跨线程 `_set_break()`，若命令恰在置位后完成，break 被下一次 `StataSO_Execute` 消费 → 无关命令 rc=1 | 取消改由看门狗处理：`_execute_single` 新增 `cancel_event`，看门狗以与超时相同的**锁内二次确认**发出 break —— break 只在 exec_done 未置位时发出，永远不晚到 |
+| `replace`/`recode` 的自由文本可注释掉保护性 `if/in` | `expression`/`values` 只过 `_validate_no_injection`（放行 `//`），而它们拼在 `if`/`in` 之前 —— `//` 把尾部子句整段注释，破坏性命令静默作用于全部观测 | 改用 `_validate_filter_expr`（拒字符串外的 `//`/`/*`/`*/`/独立 using/未闭合引号），与 `stata_import` 的筛选子句同一层级 |
+| 多变量 `recode` 用裸规则拼出非法命令 | 官方仅单变量（且不定义值标签）可省略括号；`recode price mpg nonmiss=1` 是非法语法 | 入口校验：varlist 含多变量（空格/范围 `-`）且 values 无括号 → 报错引导写 `(1=0) (2/4=1)` 括号组 |
+| `destring` 同时给 `replace` 与 `generate()` | 二者互斥（Stata 报 r(198)），错误留给 Stata 报 | 入口拦下并说明二选一（与 `export excel` 的 sheet_mode/replace 同思路） |
+| `rename` 批量形式不配对 | 一个带 `(a b)` 一个不带拼出 `rename (a b c) x` 非法命令 | 入口校验 oldname/newname 要么都带括号要么都不带 |
+| `mixed` 的 `[if]` 拼在 `||` 之后 | 官方语法 `[if]`/`[in]` 属于固定效应方程、在随机效应 `||` **之前**；拼在之后虽实测可用但语义偏移 | 改为 `filter_clause` 先于 `random` 拼接 |
+| `mlogit` 的 `baseoutcome` 拒绝 0 | 正则 `^[1-9]\d*$` 拒绝 0 —— 而 0/1/2 编码是最常见的分类写法 | 放宽为 `^(0|[1-9]\d*)$`（允许 0、仍拒前导零与非数字） |
+| 危险命令缩写穿透护栏 | `_DANGEROUS_COMMAND_PREFIXES` 只有 `!`/`shell`/`winexec`/`python:`/`python(`，而 Stata 允许最小缩写 —— 真机确认 `sh whoami`（shell）、`era /tmp/x`（erase，**删文件**）、`unixcmd ls`、`rmdir` 都能原样穿过 | 扩展覆盖四族全写与缩写：shell-out（sh/shell/xsh/xshell/winex/winexec/unix/unixc/unixcmd）、销毁（era/erase/rmd/rmdir）、代码执行（java/plugin/python）；`capture sh`/`by g: sh` 等前缀藏匿形态同步拦截 |
+| 自由文本命令绕过路径沙箱 | 配置 `STATA_ALLOWED_ROOTS` 后 `stata_run('use "越界路径"')` 照常执行 —— 审计只覆盖结构化工具的路径参数（CLAUDE.md 文档化缺口） | `_audit_block_paths`：锁内对数据命令的**引号路径**（use/save/import/merge/graph export/do/run/include/cd…）做权威沙箱校验，越界即拒；只审引号路径避免 varlist 误伤、宏路径 fail-open、未配置白名单时不启用（向后兼容） |
+| `merge 1:1` 被前缀剥离器吞掉命令名 | `_strip_command_prefixes` 对未知冒号形态一律剥离（护栏「多剥更严格」的刻意设计），`merge 1:1 price using "f"` 的 `1:1` 匹配规格被当冒号前缀剥掉，命令名丢失 | 审计改用 `_light_strip_prefixes`：只剥已知前缀（capture/quietly/by/version/svy/xi），保留命令身份 |
+| 宏间接调用绕过全部前缀护栏 | `local c "shell whoami"` 后 `` `c' whoami `` 展开成 `shell whoami` —— 真机确认旧护栏放行且主机 shell 真实执行（输出 MACRO_EXECUTED） | `_flag_macro_obfuscation`：扫描 local/global 字面量定义，值为危险命令的宏名 + 命令位（行首剥前缀后）引用即拒；只查命令位引用，`display "\`c'"` 字符串内引用不误伤 |
+| do 文件的第三方包安装不可控 | `net install`（任意 from() URL）/`github install`/`adoupdate`/`update all` 在 do 文件里原样执行，不经过受控预装路径与来源白名单 | `_flag_unmanaged_package_commands`：do 文件含这些命令即整体拒绝并引导改用 `stata_install_package`（ssc 或完整 https from() URL，带 timeout）；`ssc install` 仍走受控预装 |
+| do 文件/长命令输出含噪声计数行 | `(22 real changes made)` 等统计计数行每条命令打一行，挤占 token；连续空行同样浪费 | `compact=True`（stata_run / stata_run_do_file opt-in）：`_compact_output` 删计数行 + 折叠空行，结果表与错误文本绝不动（真机验证） |
 
 ## 权限配置
 
@@ -454,9 +516,13 @@ server 选择「始终允许」）。
 
 - **CI 实际不运行**：`.github/workflows/test.yml` 是 GitHub Actions 格式，而本仓库的 `origin` 是自建 Gitea（`gitea.aliveranme.space`）。除非该 Gitea 启用 Actions 并注册了 runner，推送**不会触发任何检查**。这份 workflow 目前只是「若迁到 GitHub 即可用」的配置，**不能当作质量门禁**。
   - 它描述的内容：ubuntu-latest × py3.10/3.11/3.12，跑 `ruff check .` 加对仓库根 `setup.py` 的单独 lint，再跑 `pytest --cov`（ruff 规则见 `pyproject.toml` 的 `[tool.ruff]`）。
-  - 提交前请在本地手动执行：`cd mcp-stata-server && .venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check server.py tests/ tests_e2e/ && .venv/bin/python -m ruff check --config pyproject.toml ../setup.py`
+  - 提交前请在本地手动执行：`cd mcp-stata-server && .venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check server.py tool_modules/ tests/ tests_e2e/ && .venv/bin/python -m ruff check --config pyproject.toml ../setup.py`
   - 即便迁到 GitHub，也只覆盖 Linux；本项目主要面向 Windows（`STATA_HOME` 默认即 Windows 路径），Windows 与 macOS 都无覆盖。
   - 测试用 `conftest.abs_path()` 构造平台原生绝对路径，不要硬编码 `C:/` —— POSIX 下 `os.path.isabs("C:/x")` 为假，路径会被当相对路径拼上 cwd。
+- **`stata_snapshot` 只覆盖内存数据集，不是全会话快照**：Stata 原生 `snapshot` 保存的是数据 + 值标签，估计结果、宏、program、frame 结构都不在其中；`restore` 后这些需要重跑。真「多会话隔离」需多个 Stata 实例（受许可证并发实例数约束），snapshot 是单会话内的轻量回退。
+- **后台任务不提供真正的并行**：Stata DLL 单线程，`stata_background` 的任务与前台命令共享同一把 `_stata_lock` —— 任务运行期间其他工具调用会**阻塞等待**，`stata_task_status` 不受此限（不持锁）。它的价值是交互模型：提交不阻塞、进度可查、可显式取消、单块超时上限放宽到 3600s，而不是并发提速。
+- **资源注册表是会话级的**：MCP Server 重启后 `_resource_registry` 清空，磁盘上的导出文件仍在但需重新登记（`stata_register_file`）才能经资源协议读取。
+- **`stata_run(save_output=)` 是覆盖式写入**：已存在的目标文件会被截断（与导出工具的 `replace=False` 默认不同），这是刻意设计 —— 它服务「重跑同一分析、重新抓完整输出」的场景。
 - **`tests/` 与 `tests_e2e/` 必须分开跑**：`tests/conftest.py` 在导入时就把 `pystata` / `sfi` 换成 `MagicMock`（且只在 `sys.modules` 里没有时才装桩），同一个 pytest 进程里再也换不回真 Stata。
   - 单元测试（无需 Stata，默认 `testpaths`）：`.venv/bin/python -m pytest tests/ -q`
   - 端到端（需真 Stata）：`STATA_HOME=/path/to/StataNow .venv/bin/python -m pytest tests_e2e/ -q`；未检测到安装时整目录自动跳过。混跑 `tests/ tests_e2e/` 时 E2E 会带明确原因跳过，不会静默对着 mock 断言。

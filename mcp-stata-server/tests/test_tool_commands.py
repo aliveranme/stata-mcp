@@ -132,6 +132,14 @@ def test_install_package_ssc():
         assert cmd == "ssc install outreg2, replace"
 
 
+def test_install_package_requires_name():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_install_package("")
+    assert getattr(result, "is_error", False)
+    assert "不能为空" in _result_text(result)
+    mock_run.assert_not_called()
+
+
 def test_install_package_net_url():
     with patch("server._run_stata_command") as mock_run:
         stata_install_package("somepkg", source="https://example.com/pkg")
@@ -556,6 +564,24 @@ def test_graph_export_succeeds_when_file_freshly_written(tmp_path):
     assert "图形已导出" in _result_text(result)
 
 
+def test_graph_export_rejects_zero_byte_file(tmp_path):
+    """capture 会吞掉图形转换器错误，0 字节产物不能算导出成功。"""
+    target = tmp_path / "empty.png"
+
+    def _write_empty(*_a, **_kw):
+        target.write_bytes(b"")
+        return "graph export translator failed\nr(5100);"
+
+    with patch("server._run_stata_command", side_effect=_write_empty):
+        result = stata_graph(
+            "twoway scatter price weight", export=str(target), replace=True
+        )
+    assert getattr(result, "is_error", False)
+    text = _result_text(result)
+    assert "文件为空" in text
+    assert "图形已导出" not in text
+
+
 def test_graph_pdf_export_notes_dropped_pixel_size(tmp_path):
     target = tmp_path / "fig.pdf"
 
@@ -691,6 +717,21 @@ def test_export_excel_succeeds_when_file_freshly_written(tmp_path):
         result = stata_export_excel(str(target), replace=True)
     assert not getattr(result, "is_error", False)
     assert "已导出 2.0 KB" in _result_text(result)
+
+
+def test_export_excel_extensionless_path_uses_stata_xlsx_default(tmp_path):
+    target = tmp_path / "data"
+    actual = target.with_suffix(".xlsx")
+
+    def _write(*_a, **_kw):
+        actual.write_bytes(b"xlsx")
+        return "file saved"
+
+    with patch("server._run_stata_command", side_effect=_write) as mock_run:
+        result = stata_export_excel(str(target), replace=True)
+    assert not getattr(result, "is_error", False)
+    assert f'using "{actual}"' in mock_run.call_args[0][0]
+    assert str(actual) in _result_text(result)
 
 
 def test_export_excel_rejects_varlist_path_injection(tmp_path):
@@ -1612,6 +1653,14 @@ def test_export_excel_supports_cell_and_nolabel():
     assert "nolabel" in cmd
 
 
+def test_export_excel_rejects_invalid_cell_reference():
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_export_excel(abs_path("out", "d.xlsx"), cell="B3) replace")
+    assert getattr(result, "is_error", False)
+    assert "单元格引用" in _result_text(result)
+    mock_run.assert_not_called()
+
+
 def test_export_excel_options_escape_hatch_covers_long_tail():
     """keepcellfmt / datestring() / locale() 等长尾选项走 options 自由文本。"""
     with patch("server._run_stata_command", return_value="ok") as mock_run:
@@ -1701,6 +1750,23 @@ def test_export_delimited_reports_failure_when_not_written(tmp_path):
     text = _result_text(result)
     assert getattr(result, "is_error", False)
     assert "replace=True" in text
+
+
+def test_export_delimited_extensionless_path_uses_csv_default(tmp_path):
+    from server import stata_export_delimited
+
+    target = tmp_path / "data"
+    actual = target.with_suffix(".csv")
+
+    def _write(*_a, **_kw):
+        actual.write_bytes(b"a,b\n1,2\n")
+        return "file saved"
+
+    with patch("server._run_stata_command", side_effect=_write) as mock_run:
+        result = stata_export_delimited(str(target), replace=True)
+    assert not getattr(result, "is_error", False)
+    assert f'using "{actual}"' in mock_run.call_args[0][0]
+    assert str(actual) in _result_text(result)
 
 
 def test_export_excel_rejects_sheet_mode_combined_with_file_replace():
@@ -2126,6 +2192,32 @@ def test_import_explicit_format_overrides_extension():
     assert cmd.startswith("import delimited")
 
 
+def test_import_explicit_format_resolves_default_extension(tmp_path):
+    from server import stata_import
+
+    base = tmp_path / "data"
+    actual = base.with_suffix(".csv")
+    actual.write_text("id\n1\n", encoding="utf-8")
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_import(filepath=str(base), format="delimited")
+    cmd = mock_run.call_args[0][0]
+    assert f'using "{actual}"' in cmd
+    assert mock_run.call_args.kwargs["require_file"] == str(actual)
+
+
+def test_import_explicit_delimited_resolves_dat_extension(tmp_path):
+    from server import stata_import
+
+    base = tmp_path / "data"
+    actual = base.with_suffix(".dat")
+    actual.write_text("id\n1\n", encoding="utf-8")
+    with patch("server._run_stata_command", return_value="ok") as mock_run:
+        stata_import(filepath=str(base), format="delimited")
+    cmd = mock_run.call_args[0][0]
+    assert f'using "{actual}"' in cmd
+    assert mock_run.call_args.kwargs["require_file"] == str(actual)
+
+
 def test_import_excel_options():
     _r, cmd = _import(filepath=abs_path("d", "a.xlsx"), sheet="Q1",
                       cellrange="A1:C10", firstrow=True, case="lower")
@@ -2143,9 +2235,21 @@ def test_import_delimited_options():
     assert 'encoding("utf-8")' in cmd
 
 
+def test_import_sas_and_spss_forward_encoding():
+    for fname, fmt in (("a.sas7bdat", "sas"), ("a.sav", "spss")):
+        _r, cmd = _import(filepath=abs_path("d", fname), format=fmt, encoding="gbk")
+        assert 'encoding("gbk")' in cmd
+
+
 def test_import_delimited_tab_keyword():
     _r, cmd = _import(filepath=abs_path("d", "a.tsv"), delimiter="tab")
     assert "delimiters(tab)" in cmd
+
+
+def test_import_rejects_control_character_delimiter():
+    result, cmd = _import(filepath=abs_path("d", "a.csv"), delimiter="\n")
+    assert getattr(result, "is_error", False)
+    assert cmd is None
 
 
 def test_import_drops_options_not_applicable_to_format():
@@ -2402,6 +2506,23 @@ def test_merge_options_and_keep_filter():
     assert "keep(match master) nogenerate" in cmd
 
 
+def test_merge_rejects_unsupported_if_and_in_clauses():
+    for kw in (
+        {"condition": "foreign == 1"},
+        {"in_range": "1/100"},
+    ):
+        result, cmd = _call(
+            "stata_merge",
+            kind="1:1",
+            keyvars="id",
+            using=abs_path("d", "b.dta"),
+            **kw,
+        )
+        assert getattr(result, "is_error", False), kw
+        assert "不支持" in _result_text(result)
+        assert cmd is None
+
+
 def test_merge_rejects_unknown_kind():
     result, cmd = _call("stata_merge", kind="1:n", keyvars="id",
                         using=abs_path("d", "b.dta"))
@@ -2419,7 +2540,8 @@ def test_merge_requires_keyvars_and_using():
 
 def test_append_accepts_multiple_files():
     a, b = abs_path("d", "a.dta"), abs_path("d", "b.dta")
-    _r, cmd = _call("stata_append", using=f"{a} {b}", options="generate(src)")
+    with patch("server.os.path.isfile", return_value=True):
+        _r, cmd = _call("stata_append", using=f"{a} {b}", options="generate(src)")
     assert f'append using "{a}" "{b}"' in cmd
     assert "generate(src)" in cmd
 
@@ -2452,6 +2574,13 @@ def test_reshape_requires_direction_stub_and_i():
         result, cmd = _call("stata_reshape", **kw)
         assert getattr(result, "is_error", False), kw
         assert cmd is None
+
+
+def test_reshape_wide_requires_j_variable():
+    result, cmd = _call("stata_reshape", direction="wide", stub="inc", i="id")
+    assert getattr(result, "is_error", False)
+    assert "必须提供 j" in _result_text(result)
+    assert cmd is None
 
 
 def test_collapse_builds_stat_list():
@@ -2673,6 +2802,21 @@ def test_append_accepts_quoted_paths_with_spaces():
     assert mock_run.call_args.kwargs["require_file"] == a
 
 
+def test_append_rejects_any_missing_input_before_stata():
+    from server import stata_append
+
+    a = abs_path("tmp", "a.dta")
+    b = abs_path("tmp", "missing.dta")
+    with (
+        patch("server._run_stata_command") as mock_run,
+        patch("server.os.path.isfile", side_effect=lambda path: path == a),
+    ):
+        result = stata_append(using=f'"{a}" "{b}"')
+    assert getattr(result, "is_error", False)
+    assert "missing.dta" in _result_text(result)
+    mock_run.assert_not_called()
+
+
 def test_append_still_splits_plain_space_separated_paths():
     from server import stata_append
 
@@ -2776,6 +2920,26 @@ def test_run_do_file_keeps_error_output_multiline(tmp_path):
     assert "variable bad not found" in text
     assert " | " not in text
     assert text.count("\n") >= 3
+
+
+def test_run_do_file_aborts_body_when_ssc_install_did_not_execute(tmp_path):
+    from server import stata_run_do_file
+
+    target = tmp_path / "s.do"
+    target.write_text("ssc install estout\nregress price weight\n", encoding="utf-8")
+    with (
+        patch(
+            "server._prepare_ssc_installs",
+            return_value=["  · estout: 安装未完成（Stata 已自动恢复，请重试）"],
+        ),
+        patch("server._run_stata_command") as mock_run,
+    ):
+        result = stata_run_do_file(str(target))
+
+    text = _result_text(result)
+    assert getattr(result, "is_error", False)
+    assert "脚本主体未执行" in text
+    mock_run.assert_not_called()
 
 
 # --- stata_etable：官方回归表导出 ------------------------------------------------

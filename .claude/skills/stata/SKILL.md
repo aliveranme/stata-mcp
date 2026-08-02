@@ -18,7 +18,7 @@ description: >
 结果输出全流程。
 
 **MCP Server 信息：**
-- 名称：`stata`，50 个工具覆盖数据管理/生成、探索、估计、后估计、图形导出、包管理与帮助、会话控制；`stata_run` + `stata_help` 覆盖全部内置命令
+- 名称：`stata`，75 个工具覆盖数据管理/生成、数据清洗、探索、估计、后估计、图形导出、文件资源回传、包管理与帮助、会话生命周期、长任务控制；`stata_run` + `stata_help` 覆盖全部内置命令
 - Stata 版本：StataNow 19 / Stata 18+（取决于安装的版本）
 - 连接方式：本地 stdio，通过 pystata 直接调用 DLL
 - **会话持久**：Stata 在服务器启动时初始化一次，所有命令共享同一会话。
@@ -97,6 +97,12 @@ description: >
 | `stata_set_cwd` | 更改工作目录 | ✓ |
 | `stata_generate` | 创建新变量（`generate`）；支持 `condition` | 改数据集 |
 | `stata_egen` | 扩展生成（`egen`）；支持 `by` 组内聚合 | 改数据集 |
+| `stata_replace` | 覆盖已有变量值：`replace varname = expr`；`expression` 自由文本，支持 `condition`/`in_range` | ✓ |
+| `stata_drop` | 删变量（`varlist`，可为 `_all`）**或**删观测（`condition`/`in_range`）；两种形态二选一 | ✓ |
+| `stata_keep` | 保留变量**或**保留观测；与 `drop` 同构，二选一 | ✓ |
+| `stata_rename` | 重命名变量（单个 `a→b`，或批量 `(a b) (c d)` 以 `(` 开头触发） | ✓ |
+| `stata_recode` | 重编码：`values="(1=0) (2/4=1)"` 官方规则组；可 `gen()` 保留原值 | ✓ |
+| `stata_destring` | 字符串转数值；**必须 `replace=True` 或 options 给 `generate()`**，二选一 | ✓ |
 
 ### 数据探索（只读）
 | 工具 | 用途 |
@@ -119,6 +125,11 @@ description: >
 | `stata_ttest` | t 检验四形式：`compare_to="5000"`（单样本）/ `byvar=`（按组）/ `compare_to="v2"`（配对，加 `options="unpaired"` 为非配对）。**二者必给其一** —— 裸 `ttest var` 是非法命令 | 均值比较 |
 | `stata_xtreg` | 面板回归；`effects` = fe/re/be/mle/pa（需先 `xtset`） | 面板 |
 | `stata_ivregress` | 工具变量 2SLS/LIML/GMM | 内生性 |
+| `stata_logit` | Logit（**报告原始系数**，对数几率）；优势比用 `stata_logistic` | 二元选择 |
+| `stata_mlogit` | 多分类 Logit；`baseoutcome` 指定基准类别（正整数） | 多分类 |
+| `stata_nbreg` | 负二项回归（计数数据过度离散）；`options="exposure(pop)"` | 计数 |
+| `stata_qreg` | 分位回归；`quantile` 默认 0.5（中位数），取值 (0,1) | 分位 |
+| `stata_mixed` | 多水平混合模型；`random="|| id:"` 或 `"|| id: time"`，以 `\|\|` 开头，无需先 `xtset` | 分层 |
 
 ### 后估计（只读，须先跑估计命令）
 | 工具 | 用途 |
@@ -128,13 +139,16 @@ description: >
 | `stata_predict` | 生成预测值/残差（会创建新变量，改数据集） |
 | `stata_estat` | 诊断：`vif` 多重共线 / `hettest` 异方差 / `ovtest` 遗漏变量 / `ic` AIC-BIC / `firststage` IV 第一阶段 |
 | `stata_estimates` | 存取模型：`store`/`restore`/`drop`（需 name）、`table`/`stats`（可多个 name 并排比较）、`dir`/`clear` |
+| `stata_lincom` | 线性组合的 Wald 检验：`expression="_b[mpg] + _b[weight]"` |
+| `stata_nlcom` | 非线性组合（delta 法）：`expression="exp(_b[mpg])"` |
+| `stata_hausman` | 模型比较：`hausman <consistent> [<efficient>]`；需先 `stata_estimates action="store"` 存两个模型，`options="sigmamore"` 常用 |
 
 ### 通用执行
 | 工具 | 用途 |
 |------|------|
-| `stata_run` | **执行任意 Stata 命令**（专用工具未覆盖的操作全走这里） |
-| `stata_run_do_file` | 执行 .do 文件；执行前自动拆出 `ssc install` 单独安装（已装跳过），避免脚本卡在网络请求 |
-| `stata_graph` | 生成图形（推荐用 `export` 参数直接导出）；选项按格式自动适配官方边界 |
+| `stata_run` | **执行任意 Stata 命令**（专用工具未覆盖的操作全走这里）；`save_output=` 把完整输出（不受 120K 裁剪）落盘并登记为文件资源；`compact=True` 删统计计数行省 token |
+| `stata_run_do_file` | 执行 .do 文件；执行前自动拆出 `ssc install` 单独安装（已装跳过）；**`net install`/`github install`/`adoupdate`/`update all` 被拒绝**并引导用 `stata_install_package`；`compact=True` 删统计计数行 |
+| `stata_graph` | 生成图形（推荐用 `export` 参数直接导出）；选项按格式自动适配官方边界。导出成功后自动登记为资源 |
 | `stata_scheme` | 主题：`action="list"` 列出全部方案 / `"get"` 查当前 / `"set"` 切换（可 `permanently`） |
 
 ### 结果导出
@@ -143,6 +157,11 @@ description: >
 | `stata_etable` | **回归表导出首选**（官方 `etable`，Stata 17+，无第三方依赖）。`estimates="m1 m2"` 并排多模型，`stars=True` 加星号，`stats="N r2"` 附统计量，`export=` 直出 .docx/.xlsx/.pdf/.tex/.html/.md |
 | `stata_export_excel` | 导出数据集为 .xlsx（`sheet_mode`/`cell`/`firstrow`/`if`-`in`）；`results=True` 是回归表的**旧路径**：依赖第三方 estout 且只能产出 CSV，新代码用 `stata_etable` |
 | `stata_export_delimited` | 导出为 CSV / TSV / 自定义分隔符（`delimiter`、`novarnames`、`quote` 等） |
+
+> **导出即登记**：以上导出工具（含 `stata_graph` / `stata_save_dataset`）成功后都会把
+> 文件登记为 MCP 资源。远程客户端可用 `resources/read` 读 `stata-file:///<路径>` 取回
+> 图表/Excel/CSV/dta 的二进制内容，或经 `stata_read_file` 取 base64 —— 不必只拿到一个
+> 本地路径。
 
 ### 包管理与帮助
 | 工具 | 用途 |
@@ -160,6 +179,36 @@ description: >
 | `stata_status` | 会话状态：数据集、工作目录、**frame**、**面板/时序设定**、**已存与活跃估计**、内存。调 `xtreg`/`margins`/`predict` 前先看这个 |
 | `stata_return_list` | 一次列出 `r()`（kind="r"）/ `e()`（"e"）/ `c()`（"c"）全部返回值 |
 | `stata_ping` | 快速检测 Stata DLL 存活 |
+
+### 文件资源回传（远程客户端取回产物）
+| 工具 | 用途 |
+|------|------|
+| `stata_list_resources` | 列出本会话已登记的文件资源（导出工具成功即登记） |
+| `stata_read_file` | 读取登记过的文件：`action="info"` 元信息 / `action="read"` base64 内容（≤16MB） |
+| `stata_register_file` | 显式登记磁盘上已有文件为资源（`stata_run` 自由文本生成的产物用它） |
+
+> 资源协议：`resources/read` 读 `stata-file:///<绝对路径>` 取回二进制。**只读登记过
+> 的文件** —— 未登记报错并提示登记方式，这是安全边界。
+
+### 会话生命周期
+| 工具 | 用途 |
+|------|------|
+| `stata_clear` | 重置会话：`scope` = data（`clear all`）/ estimates / graphs / panels / all |
+| `stata_snapshot` | 会话内数据快照：`action` = save/list/restore/erase（restore/erase 需 `number`） |
+
+### 长任务控制
+| 工具 | 用途 |
+|------|------|
+| `stata_background` | 后台执行长命令，立即返回 task_id（单块超时上限 3600s）。运行期间其他调用会等待 |
+| `stata_task_status` | 查状态/进度（当前块/总块数） |
+| `stata_task_cancel` | 请求取消（正卡在命令里则 SetBreak 打断） |
+| `stata_task_result` | 取完整输出结果 |
+| `stata_task_list` | 列出全部任务 |
+
+### 服务器日志
+| 工具 | 用途 |
+|------|------|
+| `stata_read_log` | 读本 MCP Server 运行日志：`action="tail"`（默认，末尾 `lines` 行）/ `"path"` |
 
 ### 参数与官方语法位置的对应
 

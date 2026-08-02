@@ -84,18 +84,44 @@ class TestValidatePathWithSandbox:
         assert result is not None
         assert "相对路径不能超出" in result
 
+    def test_dangling_symlink_to_outside_root_is_rejected(self, tmp_path, monkeypatch):
+        """叶子文件尚不存在时，符号链接也不能绕过允许根目录。"""
+        allowed = tmp_path / "allowed"
+        outside = tmp_path / "outside"
+        allowed.mkdir()
+        outside.mkdir()
+        link = allowed / "export.csv"
+        try:
+            link.symlink_to(outside / "real.csv")
+        except OSError as exc:
+            pytest.skip(f"当前平台不允许创建符号链接: {exc}")
+
+        monkeypatch.setenv("STATA_ALLOWED_ROOTS", str(allowed))
+        _reset_roots_cache()
+        result = _validate_path(str(link))
+        assert result is not None
+        assert "不在允许目录下" in result
+
+    def test_nonexistent_regular_file_inside_root_still_passes(self, tmp_path, monkeypatch):
+        """修复 dangling symlink 不应误伤普通的新建保存目标。"""
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        monkeypatch.setenv("STATA_ALLOWED_ROOTS", str(allowed))
+        _reset_roots_cache()
+        assert _validate_path(str(allowed / "new.csv")) is None
+
 
 def test_sandbox_boundary_is_documented_on_stata_run():
-    """沙箱不覆盖 stata_run —— 这个边界必须写在 Agent 读得到的地方。
+    """沙箱对 stata_run 的覆盖边界必须写在 Agent 读得到的地方。
 
-    实测：配置 STATA_ALLOWED_ROOTS 后 stata_use_dataset 拒绝越界路径，而
-    stata_run('use "越界路径"') 照常执行。做部分路径提取只会给出虚假安全感
-    （路径可出现在 use/save/import/export/log using/merge…using/include 等
-    任意位置，还能由宏运行时拼出），故如实记录而非半吊子拦截。
+    配置 STATA_ALLOWED_ROOTS 后，stata_run 的**引号路径**（use/save/import/merge/
+    graph export 等数据命令）会做锁内权威审计；裸单 token（可能是 varlist）与
+    宏路径不审。docstring 必须如实说明覆盖范围与局限，不能给 Agent 虚假安全感。
     """
     from server import stata_run
 
     doc = (stata_run.fn if hasattr(stata_run, "fn") else stata_run).__doc__ or ""
     assert "STATA_ALLOWED_ROOTS" in doc, "必须点名是哪个变量"
-    assert "不覆盖本工具" in doc
-    assert "虚假的" in doc, "要说明为何不做部分校验"
+    assert "引号路径" in doc, "必须说明审计的是引号路径"
+    assert "fail-open" in doc or "宏" in doc, "必须说明宏路径的局限"
+    assert "未配置白名单时不启用" in doc, "必须说明未配置时的行为"

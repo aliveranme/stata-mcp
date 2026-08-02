@@ -288,6 +288,21 @@ def test_prepare_ssc_installs_aborts_when_dll_dead():
     assert any("无响应" in line or "中止" in line for line in report)
 
 
+def test_prepare_ssc_installs_does_not_misreport_recovered_command():
+    """997 的 install 命令未执行，不能被报告成「已安装」。"""
+    import server
+
+    recovered = "StataSO_Execute 崩溃: boom\n(Stata 已自动恢复，请重试命令)"
+    with patch("server._execute_safe", return_value=(111, "not found")), \
+         patch("server._run_stata_command", return_value=recovered):
+        report = server._prepare_ssc_installs([("estout", False)], timeout=30)
+
+    text = "\n".join(report)
+    assert "安装未完成" in text
+    assert "已安装" not in text
+    assert "已自动恢复" in text
+
+
 def test_execute_single_collects_consecutive_chunks():
     """L3/P1: 阶段 1 取到输出后应立即复取（continue），连续多块输出都收集。
 
@@ -449,6 +464,75 @@ def test_extract_ssc_installs_resumes_after_block_closes():
     text = "forvalues i=1/2 {\n    display `i'\n}\nssc install estout"
     _, installs = _extract_ssc_installs(text)
     assert installs == [("estout", False)]
+
+
+# ---------------------------------------------------------------------------
+# 不受控第三方包安装拦截（net/github install、adoupdate、update all）
+# ---------------------------------------------------------------------------
+
+
+def test_flag_unmanaged_package_commands_detects_variants():
+    from server import _flag_unmanaged_package_commands
+
+    text = (
+        "sysuse auto, clear\n"
+        "net install foo, from(https://example.com)\n"
+        "qui github install bar\n"
+        "cap adoupdate, update\n"
+        "update all\n"
+        "ssc install estout\n"  # ssc 是受控预装路径，不拦
+    )
+    blocked = _flag_unmanaged_package_commands(text)
+    assert blocked == [
+        "net install foo, from(https://example.com)",
+        "qui github install bar",
+        "cap adoupdate, update",
+        "update all",
+    ]
+
+
+def test_flag_unmanaged_package_ignores_ssc_and_normal():
+    from server import _flag_unmanaged_package_commands
+
+    assert _flag_unmanaged_package_commands("ssc install estout\nsummarize price") == []
+
+
+def test_run_do_file_rejects_unmanaged_package_install(tmp_path):
+    """do 文件含 net/github install → 拒绝执行并重定向到受控工具。"""
+    from unittest.mock import patch
+
+    from fastmcp.tools.base import ToolResult
+
+    from server import stata_run_do_file
+
+    do_file = tmp_path / "bad.do"
+    do_file.write_text(
+        'net install foo, from("https://example.com/x")\nsummarize price\n',
+        encoding="utf-8",
+    )
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run_do_file(str(do_file))
+    assert isinstance(result, ToolResult) and result.is_error
+    text = result.content[0].text
+    assert "不受控的包安装" in text
+    assert "stata_install_package" in text
+    mock_run.assert_not_called()  # 未执行任何命令
+
+
+def test_run_do_file_allows_ssc_install(tmp_path):
+    """ssc install 走受控预装路径，不被拦截。"""
+    from unittest.mock import patch
+
+    from server import stata_run_do_file
+
+    do_file = tmp_path / "ok.do"
+    do_file.write_text("ssc install estout\nsummarize price\n", encoding="utf-8")
+    with patch("server._prepare_ssc_installs", return_value=["已安装 estout"]):
+        with patch("server._run_stata_command") as mock_run:
+            mock_run.return_value = "ok"
+            result = stata_run_do_file(str(do_file))
+    assert not getattr(result, "is_error", False)
+    mock_run.assert_called()
 
 
 def test_watchdog_does_not_break_after_command_completes(exec_mocks):

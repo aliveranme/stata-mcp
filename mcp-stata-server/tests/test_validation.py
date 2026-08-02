@@ -24,6 +24,20 @@ from server import (
         " summarize mpg\n!dir",
         # winexec 在 Windows 上直接启动程序，与 shell 等价
         "winexec notepad.exe",
+        # 官方最小缩写是真实旁路（Stata 把 sh→shell、era→erase 等）：
+        # 真机确认 sh whoami / era /tmp/x / unixcmd ls / rmdir 都曾穿过旧护栏
+        "sh whoami",
+        "xsh ls",
+        "xshell ls",
+        "winex notepad.exe",
+        "unixc ls",
+        "unixcmd ls",
+        "era /tmp/x",
+        "erase /tmp/x",
+        "rmd /tmp/x",
+        "rmdir /tmp/x",
+        "java -version",
+        "plugin call lib.dylib",
         # Mata 是可执行任意代码的子语言：_stata() 能调用任意 Stata 命令（含 !），
         # unlink()/fopen() 能直接读写文件。行首前缀检查对块内代码无效，
         # 实测 `mata:` + `_stata("display 12345")` 曾原样穿过并执行成功。
@@ -70,6 +84,11 @@ def test_dangerous_command_prefix_allows_safe(cmd):
         'quietly mata: _stata("shell touch /tmp/x")',
         'cap mata: unlink("/tmp/x")',
         "qui python: import os",
+        # 缩写形态同样可被前缀藏起来
+        "capture sh echo hi",
+        "quietly era /tmp/x",
+        "noisily rmdir /tmp/x",
+        "by foreign: sh whoami",
         # 带冒号的前缀（by/bysort/version/svy/xi）同理
         "by foreign: shell echo hi",
         "bysort foreign: shell echo hi",
@@ -470,3 +489,41 @@ def test_import_allows_normal_sheet_name(tmp_path):
     with patch("server._run_stata_command") as mock_run:
         stata_import(filepath=str(target), sheet="Q1 (2024)")
     assert 'sheet("Q1 (2024)")' in mock_run.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# 宏混淆防御（local/global 危险值 → 命令位引用）
+# ---------------------------------------------------------------------------
+
+from server import _flag_macro_obfuscation, _precheck_command  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'local c "shell whoami"\n`c\' whoami',
+        'local c "era /tmp/x"\n`c\' /tmp/y',
+        "global g shell ls\n$g -la",
+        "global g shell ls\n${g} -la",
+        'quietly local c "python: evil()"\n`c\'',
+        "capture local c \"!rm -rf /\"\n`c'",
+        "local c \"mata\"\n`c'",
+    ],
+)
+def test_macro_obfuscation_blocked(cmd):
+    assert _flag_macro_obfuscation(cmd) is not None, f"应拦截宏混淆: {cmd}"
+    assert _precheck_command(cmd) is not None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'local p "data/auto.dta"\nuse "`p\'"',       # 数据路径宏，非命令
+        'local x "hello"\ndisplay "`x\'"',           # 字符串内引用
+        'local cmd "regress"\n`cmd\' price mpg',      # 值非危险命令
+        "summarize price",                           # 无宏
+        'global dir "/allowed"\nuse "$dir/f.dta"',   # 数据路径全局宏
+    ],
+)
+def test_macro_obfuscation_allows_safe(cmd):
+    assert _flag_macro_obfuscation(cmd) is None, f"不应误伤: {cmd}"
