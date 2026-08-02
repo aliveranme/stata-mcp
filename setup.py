@@ -24,10 +24,21 @@ MIN_PYTHON_VERSION = (3, 10)
 # 颜色输出
 # =============================================================================
 
-def green(s): return f"\033[92m{s}\033[0m"
-def red(s): return f"\033[91m{s}\033[0m"
-def yellow(s): return f"\033[93m{s}\033[0m"
-def bold(s): return f"\033[1m{s}\033[0m"
+
+def green(s):
+    return f"\033[92m{s}\033[0m"
+
+
+def red(s):
+    return f"\033[91m{s}\033[0m"
+
+
+def yellow(s):
+    return f"\033[93m{s}\033[0m"
+
+
+def bold(s):
+    return f"\033[1m{s}\033[0m"
 
 
 # =============================================================================
@@ -184,6 +195,7 @@ def find_stata_installation():
         search_bases = ["/Applications", os.path.expanduser("~/Applications")]
     else:
         search_bases = ["/usr/local", "/opt"]
+
     def _looks_like_stata_root(candidate):
         edition = _detect_edition(candidate)
         utilities = os.path.join(candidate, "utilities", "pystata")
@@ -234,6 +246,7 @@ def verify_stata(path, edition="mp"):
 # =============================================================================
 # Step 2: Python 虚拟环境
 # =============================================================================
+
 
 def setup_venv(project_root):
     """创建或验证 Python 虚拟环境。"""
@@ -316,7 +329,9 @@ def install_deps(venv_dir, project_root):
     try:
         subprocess.run(
             [python_exe, "-m", "ensurepip", "--default-pip"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         result = subprocess.run(
             [python_exe, "-m", "pip", "install", FASTMCP_SPEC, "--quiet"],
@@ -329,8 +344,10 @@ def install_deps(venv_dir, project_root):
         # TimeoutExpired 不是 OSError，不捕获会以裸 traceback 退出，而 pip 要拉
         # pydantic/uvicorn/starlette 一串依赖，慢网络超时完全现实。
         print(f"  {red('✗')} 安装超时（{e.timeout} 秒）—— 网络可能较慢")
-        print("    请检查网络后重跑 setup.py，或手动执行："
-              f"\n      {python_exe} -m pip install {FASTMCP_SPEC}")
+        print(
+            "    请检查网络后重跑 setup.py，或手动执行："
+            f"\n      {python_exe} -m pip install {FASTMCP_SPEC}"
+        )
         return False
     if result.returncode != 0:
         print(f"  {red('✗')} 安装失败:\n{result.stderr}")
@@ -343,6 +360,7 @@ def install_deps(venv_dir, project_root):
 # =============================================================================
 # Step 3: 生成 .mcp.json
 # =============================================================================
+
 
 def _backup_mcp_json(path, reason):
     """把无法使用的 .mcp.json 备份为 .bak 并说明原因。"""
@@ -387,9 +405,7 @@ def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
             else:
                 # 合法 JSON 但顶层不是对象（[]、null、字符串…）—— 同样是「用不了
                 # 的既有内容」，必须走与解析失败相同的备份路径，不能静默覆盖。
-                _backup_mcp_json(
-                    mcp_json_path, f"顶层不是 JSON 对象（{type(loaded).__name__}）"
-                )
+                _backup_mcp_json(mcp_json_path, f"顶层不是 JSON 对象（{type(loaded).__name__}）")
 
     servers = existing.get("mcpServers")
     if not isinstance(servers, dict):
@@ -449,6 +465,7 @@ def generate_mcp_json(project_root, python_exe, stata_home, stata_edition="mp"):
 # Step 4: 验证
 # =============================================================================
 
+
 def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
     """测试 MCP Server 能否正常加载。
 
@@ -507,9 +524,7 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
         else:
             print(f"  {red('✗')} 服务器测试失败")
             if result.stderr.strip():
-                lines = [
-                    ln for ln in result.stderr.strip().split("\n") if "TOOLS:" not in ln
-                ]
+                lines = [ln for ln in result.stderr.strip().split("\n") if "TOOLS:" not in ln]
                 for ln in lines[-3:]:
                     print(f"    {ln[:200]}")
             return False
@@ -524,6 +539,7 @@ def test_server(project_root, python_exe, stata_home, stata_edition="mp"):
 # =============================================================================
 # 主流程
 # =============================================================================
+
 
 def main():
     # 先检查 Python 版本，避免创建不兼容的虚拟环境
