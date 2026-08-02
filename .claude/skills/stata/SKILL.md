@@ -1,12 +1,16 @@
 ---
 name: stata
 description: >
-  Stata 数据分析与计量经济学编程指南。当用户需要撰写 Stata 命令、构建 do 文件、
-  进行统计分析（回归、描述统计、假设检验）、数据清洗与处理、或使用 Stata 进行
-  计量经济学建模时，必须使用此 Skill。包括但不限于：用户提到 Stata、.do 文件、
-  .dta 数据、regress/logit/t test/summarize/tabulate 等 Stata 命令、面板数据、
-  工具变量、DID、时间序列分析等。即使用户没有明确说"Stata"，只要涉及统计分析
-  和计量建模需求，也应优先考虑调用此 Skill 来生成 Stata 代码并执行。
+  Stata 数据分析与计量经济学编程技能：撰写 Stata 命令、构建 do 文件，并经本地 MCP
+  Server（`stata`，75 个工具）在真实 Stata 上直接执行。当用户需要跑回归/描述统计/
+  假设检验（regress、logit、probit、xtreg、ivregress、ttest、summarize、tabulate）、
+  面板数据/panel data、工具变量/IV/instrumental variable、DID/双重差分/
+  difference-in-differences、时间序列/time series、稳健性检验、内生性处理、政策评估/
+  实证分析、数据清洗/合并/追加/长宽转换（merge/append/reshape）、或绘制/导出 Stata
+  图形（散点图、直方图、twoway、graph bar、histogram、scatter）时，必须使用此 Skill。
+  即使用户没有明确说 "Stata"，只要涉及统计分析、计量建模，或处理 .dta/.do 文件，
+  也应优先调用本 Skill（涉及 Stata 的图形请用本技能，而非通用绘图技能）。若用户已
+  明确指定 Python/R/SPSS 等其他统计软件，则不要调用本技能。
 ---
 
 # Stata 数据分析与计量经济学编程
@@ -22,7 +26,9 @@ description: >
 - Stata 版本：StataNow 19 / Stata 18+（取决于安装的版本）
 - 连接方式：本地 stdio，通过 pystata 直接调用 DLL
 - **会话持久**：Stata 在服务器启动时初始化一次，所有命令共享同一会话。
-  数据加载后会一直保留在内存中，直到被 `clear` 或替换。
+  数据加载后会一直保留在内存中，直到被 `clear` 或替换
+- **协议版本**：MCP initialize 协商支持 2024-11-05 ~ 2025-11-25（未知版本回退最新）；
+  `serverInfo.version` 反映项目版本（当前 1.0.8），不是 fastmcp 框架版本
 
 ---
 
@@ -35,8 +41,7 @@ description: >
 3. **路径用正斜杠** — `D:/data/file.dta`，不要用反斜杠
 4. **带空格的路径用双引号包裹** — `use "D:/my data/file.dta", clear`
 5. **检查返回值** — 用 `stata_display` 查看 `r(mean)`、`e(N)`、`e(r2)` 等
-6. **限制输出大小** — 永远不要执行 `list` 而不限制观测数。数据量大时必须用
-   `in 1/N` 或 `n` 参数限制。输出超过 4000 字符会自动分页
+6. **限制输出大小** — 永远不要执行 `list` 而不限制观测数（见下方「输出大小控制」）
 
 ### 命令执行策略
 
@@ -44,10 +49,15 @@ description: >
 - **多步骤流程** → 使用 `stata_run`，用 `\n` 连接多条命令
 - **已有 .do 文件** → 使用 `stata_run_do_file`
 - **每次 `stata_run` 应包含逻辑完整的一组命令**，避免零碎调用
+- **多命令链首错即停**：链中某条命令报错（变量名拼错、数据未加载、语法错）会**中止
+  后续命令**并指出第一条错误 —— 这是刻意行为（对齐 Stata do 文件语义），防止后续
+  命令在上一个错误状态上继续跑、覆盖磁盘数据。需要「跳过失败继续」时用 `capture`
+  包裹期望失败的命令。报错后先看第一条错误信息定位问题，再修正重跑，不要盲目重发整条链
 
 ### 输出大小控制（重要！）
 
-**始终在产生输出的命令中限制范围**，避免生成几万字符的原始输出：
+**始终在产生输出的命令中限制范围**，避免生成几万字符的原始输出（硬上限 120K，
+超出部分真的被丢弃，翻页也找不回）：
 
 | 命令 | 不推荐（输出过大） | 推荐（限制输出） |
 |------|-------------------|-----------------|
@@ -79,6 +89,9 @@ description: >
 > **任意**命令的官方语法 —— 二者合起来即「全量内置命令支持」。下面的专用工具
 > 只是给最高频的命令加了结构化参数与校验，是便利层，不是能力边界。拿不准某条
 > 命令的语法时先 `stata_help("命令名")`，再用 `stata_run` 执行。
+>
+> **timeout**：估计/后估计/长命令工具都接受 `timeout`（秒，钳制 10–1800，默认 60；
+> `stata_reshape` 默认 120）。大数据集回归、包安装、复杂模型可显式调大，避免被看门狗打断。
 
 ### 数据管理
 | 工具 | 用途 | destructiveHint |
@@ -89,10 +102,10 @@ description: >
 | `stata_use_example` | 加载官方示例数据：`sysuse`(本地) / `source="webuse"`(联网)；`action="list"` 列出可用 | ✓ |
 | `stata_merge` | 横向合并：`kind` = 1:1/m:1/1:m/m:m，`keyvars` 键变量，`keepusing` 限定带入变量。合并后查 `_merge` | ✓ |
 | `stata_append` | 纵向追加，`using` 可空格分隔多个文件；`options="generate(src)"` 标记来源 | ✓ |
-| `stata_reshape` | 长宽转换：`direction`=long/wide，`stub` 前缀，`i` 个体，`j` 区分列。面板分析要长表 | ✓ |
+| `stata_reshape` | 长宽转换：`direction`=long/wide，`stub` 前缀，`i` 个体，`j` 区分列。面板分析要长表。**非数值 j 必须传 `options="string"`**（宽表后缀是字符时，两个方向都报错） | ✓ |
 | `stata_collapse` | 按组聚合，**就地替换数据集**；`clist="(mean) price (sd) mpg"`，`by` 分组 | ✓ |
 | `stata_frame` | 多数据集 frame：`dir`/`current`/`create`/`change`/`drop`/`copy`/`rename` | ✓ |
-| `stata_verify` | 校验：`count`/`assert`/`duplicates`/`isid`/`missing`。分析前跑一遍能挡掉多数「结果诡异」的根因 | — |
+| `stata_verify` | 校验：`count`/`assert`/`duplicates`/`isid`/`missing`。**只读契约**：`duplicates` 的 `drop`/`tag(newvar)` 子命令会被拒（会改数据），删重走 `stata_run("duplicates drop")` | — |
 | `stata_save_dataset` | 保存当前数据 | ✓ |
 | `stata_set_cwd` | 更改工作目录 | ✓ |
 | `stata_generate` | 创建新变量（`generate`）；支持 `condition` | 改数据集 |
@@ -115,7 +128,7 @@ description: >
 | `stata_correlate` | 相关矩阵（`correlate`/`pwcorr`）；支持 `condition` |
 | `stata_display` | 表达式计算/返回值 |
 
-### 统计分析（只读）
+### 统计分析（只读估计）
 | 工具 | 用途 | 模型类型 |
 |------|------|----------|
 | `stata_regress` | 线性回归 (OLS)；支持 `condition` | 横截面 |
@@ -126,19 +139,19 @@ description: >
 | `stata_xtreg` | 面板回归；`effects` = fe/re/be/mle/pa（需先 `xtset`） | 面板 |
 | `stata_ivregress` | 工具变量 2SLS/LIML/GMM | 内生性 |
 | `stata_logit` | Logit（**报告原始系数**，对数几率）；优势比用 `stata_logistic` | 二元选择 |
-| `stata_mlogit` | 多分类 Logit；`baseoutcome` 指定基准类别（正整数） | 多分类 |
+| `stata_mlogit` | 多分类 Logit；`baseoutcome` 指定基准类别（类别取值，**含 0** —— 0/1/2 编码常见） | 多分类 |
 | `stata_nbreg` | 负二项回归（计数数据过度离散）；`options="exposure(pop)"` | 计数 |
 | `stata_qreg` | 分位回归；`quantile` 默认 0.5（中位数），取值 (0,1) | 分位 |
 | `stata_mixed` | 多水平混合模型；`random="|| id:"` 或 `"|| id: time"`，以 `\|\|` 开头，无需先 `xtset` | 分层 |
 
-### 后估计（只读，须先跑估计命令）
+### 后估计（须先跑估计命令；`stata_predict` 会创建变量，其余只读）
 | 工具 | 用途 |
 |------|------|
 | `stata_margins` | 边际效应 / 预测边际；`dydx` / `at` |
 | `stata_test` | 系数的 Wald 检验（联合显著、系数相等） |
-| `stata_predict` | 生成预测值/残差（会创建新变量，改数据集） |
+| `stata_predict` | 生成预测值/残差（**会创建新变量，改数据集**） |
 | `stata_estat` | 诊断：`vif` 多重共线 / `hettest` 异方差 / `ovtest` 遗漏变量 / `ic` AIC-BIC / `firststage` IV 第一阶段 |
-| `stata_estimates` | 存取模型：`store`/`restore`/`drop`（需 name）、`table`/`stats`（可多个 name 并排比较）、`dir`/`clear` |
+| `stata_estimates` | 存取模型：`store`/`restore`/`drop`（需 name）、`table`/`stats`/`describe`/`replay`（name 可选，table/stats 可多 name 并排）、`dir`/`clear` |
 | `stata_lincom` | 线性组合的 Wald 检验：`expression="_b[mpg] + _b[weight]"` |
 | `stata_nlcom` | 非线性组合（delta 法）：`expression="exp(_b[mpg])"` |
 | `stata_hausman` | 模型比较：`hausman <consistent> [<efficient>]`；需先 `stata_estimates action="store"` 存两个模型，`options="sigmamore"` 常用 |
@@ -154,7 +167,7 @@ description: >
 ### 结果导出
 | 工具 | 用途 |
 |------|------|
-| `stata_etable` | **回归表导出首选**（官方 `etable`，Stata 17+，无第三方依赖）。`estimates="m1 m2"` 并排多模型，`stars=True` 加星号，`stats="N r2"` 附统计量，`export=` 直出 .docx/.xlsx/.pdf/.tex/.html/.md |
+| `stata_etable` | **回归表导出首选**（官方 `etable`，Stata 17+，无第三方依赖）。`estimates="m1 m2"` 并排多模型，`stars=True` 加星号，`stats="N r2"` 附统计量，`export=` 直出 .docx/.xlsx/.xls/.pdf/.tex/.html/.md/.txt/.smcl（.csv/.rtf 不支持） |
 | `stata_export_excel` | 导出数据集为 .xlsx（`sheet_mode`/`cell`/`firstrow`/`if`-`in`）；`results=True` 是回归表的**旧路径**：依赖第三方 estout 且只能产出 CSV，新代码用 `stata_etable` |
 | `stata_export_delimited` | 导出为 CSV / TSV / 自定义分隔符（`delimiter`、`novarnames`、`quote` 等） |
 
@@ -167,7 +180,7 @@ description: >
 | 工具 | 用途 |
 |------|------|
 | `stata_help` | **查任意命令的官方帮助**（内置 + 已装外置，覆盖全部命令） |
-| `stata_install_package` | 安装扩展包（ssc 或完整 from() URL）；`replace=True` 即重装最新 |
+| `stata_install_package` | 安装扩展包（ssc 或完整 from() URL）；`replace=True` 即重装最新；`timeout` 真实兜底 |
 | `stata_uninstall_package` | 卸载已装包（`ado uninstall`，纯本地，与 install 对称） |
 | `stata_describe_package` | 查包详情：默认本地 `ado describe`；`source="ssc"` 联网查（装前了解） |
 | `stata_find_package` | 联网搜索扩展包（`net search`，0.6–2s）。宽泛多词查询输出极大（实测 94K 字符/24 页），用 `scope="toc"` 收窄约 8 倍；`match_any=True` 慢 13 倍慎用 |
@@ -184,17 +197,19 @@ description: >
 | 工具 | 用途 |
 |------|------|
 | `stata_list_resources` | 列出本会话已登记的文件资源（导出工具成功即登记） |
-| `stata_read_file` | 读取登记过的文件：`action="info"` 元信息 / `action="read"` base64 内容（≤16MB） |
+| `stata_read_file` | 读取登记过的文件：`action="info"` 元信息 / `action="read"` base64 内容（**上限约 80KB**——大文件用资源协议） |
 | `stata_register_file` | 显式登记磁盘上已有文件为资源（`stata_run` 自由文本生成的产物用它） |
 
-> 资源协议：`resources/read` 读 `stata-file:///<绝对路径>` 取回二进制。**只读登记过
-> 的文件** —— 未登记报错并提示登记方式，这是安全边界。
+> 资源协议：`resources/read` 读 `stata-file:///<绝对路径>` 取回二进制（**流式，上限
+> 16MB**，适合大文件）。**只读登记过的文件** —— 未登记报错并提示登记方式，这是安全
+> 边界。`stata_read_file(action="read")` 的 base64 工具载荷上限约 80KB，超限报错并引导
+> 改用 `resources/read`。
 
 ### 会话生命周期
 | 工具 | 用途 |
 |------|------|
 | `stata_clear` | 重置会话：`scope` = data（`clear all`）/ estimates / graphs / panels / all |
-| `stata_snapshot` | 会话内数据快照：`action` = save/list/restore/erase（restore/erase 需 `number`） |
+| `stata_snapshot` | 会话内数据快照：`action` = save/list/restore/erase（restore/erase 需 `number`）。**只快照内存数据集**：估计结果/宏/program/frame 结构不恢复，`restore` 后需重跑 |
 
 ### 长任务控制
 | 工具 | 用途 |
@@ -226,63 +241,12 @@ description: >
 
 ### 工具选择指南
 
-- 有专用工具的命令（回归/面板/IV/边际效应/生成变量等）→ 优先用专用工具，参数更规整、有校验
-- 专用工具未覆盖的命令（`anova`、`reshape`、`merge`、`graph bar`、`heckman` 等）→ 用 `stata_run`
+- 有专用工具的命令（回归/面板/IV/边际效应/生成变量/**merge/append/reshape/collapse/
+  frame** 等）→ 优先用专用工具，参数更规整、有校验
+- 专用工具未覆盖的命令（`anova`、`graph bar`、`heckman`、`joinby`、`gsort` 等）→ 用 `stata_run`
 - 不确定某命令的语法/选项 → 先 `stata_help("命令名")` 查官方文档，再执行
 - 多命令组合（加载 + 清洗 + 回归）→ 单次 `stata_run` 用 `\n` 连接
 - 需要第三方包 → 先 `stata_find_package` 搜索，再 `stata_install_package` 安装
-
----
-
-## 内置命令地图
-
-Stata 有 3500+ 内置命令，**全部**可经 `stata_run` 执行、`stata_help` 查语法。
-下表按族列出高频命令，帮你快速定位；具体语法与选项一律 `stata_help("命令名")`。
-
-### 数据管理
-| 类别 | 命令 |
-|------|------|
-| 生成/修改 | `generate` `replace` `egen` `recode` `rename` `drop` `keep` `order` |
-| 类型转换 | `destring` `tostring` `encode` `decode` `format` `label` |
-| 重构 | `reshape`（长宽转换）`collapse`（聚合）`expand` `contract` `separate` |
-| 合并 | `merge`（横向）`append`（纵向）`joinby` `cross` |
-| 排序/去重 | `sort` `gsort` `by`/`bysort` `duplicates` |
-| 抽样/保存 | `sample` `preserve`/`restore` `save` `use` `import`/`export` `frame` |
-
-### 数据探索
-| 类别 | 命令 |
-|------|------|
-| 结构 | `describe` `codebook` `inspect` `ds` `lookfor` `compare` |
-| 统计 | `summarize` `tabstat` `tabulate` `table` `pwcorr`/`correlate` |
-| 缺失/分布 | `misstable` `histogram` `kdensity` `pnorm`/`qnorm` |
-
-### 估计（estimation）
-| 类别 | 命令 |
-|------|------|
-| 线性 | `regress` `areg` `anova` `cnsreg` `nl` |
-| 二元/多元选择 | `logit`/`logistic` `probit` `mlogit` `ologit`/`oprobit` `clogit` |
-| 计数 | `poisson` `nbreg` `zip`/`zinb` `tpoisson` |
-| 面板（xt） | `xtreg` `xtlogit` `xtpoisson` `xtgls` `xtabond` `xttobit` |
-| 时间序列（ts） | `tsset` `arima` `var` `vec` `dfuller` `newey` |
-| 内生性/选择 | `ivregress` `heckman` `treatreg` `etregress` |
-| 生存/删失 | `stset` `stcox` `streg` `tobit` `intreg` |
-| 分位数/稳健 | `qreg` `rreg` `bootstrap` `jackknife` |
-
-### 后估计（postestimation，须先跑估计命令）
-| 类别 | 命令 |
-|------|------|
-| 预测/边际 | `predict` `margins` `marginsplot` `estat` |
-| 假设检验 | `test` `testnl` `lincom` `nlcom` `contrast` |
-| 模型比较 | `estimates store`/`table` `lrtest` `hausman` `estat ic` |
-| 诊断 | `estat vif` `estat hettest` `estat ovtest` `estat firststage` `rvfplot` |
-
-### 图形
-`twoway`（`scatter` `line` `lfit` `connected`）`histogram` `graph bar`/`box`/`pie`
-`kdensity` `marginsplot` `coefplot`(外置) —— 一律经 `stata_graph` 导出。
-
-### 编程/其他
-`forvalues` `foreach` `while` `if`/`else` `program` `local`/`global` `scalar`
-`matrix` `return`/`ereturn` `capture` `assert` `postfile`
 
 ---
 
@@ -374,7 +338,7 @@ forvalues i = 1/3 {                   // ✅
 }
 ```
 
-**每个块必须在同一次调用里闭合**。不要把开头和结尾拆到两次 `stata_run`：
+**每个块必须在同一次调用里闭合。** 不要把开头和结尾拆到两次 `stata_run`：
 
 ```stata
 // ❌ 第一次调用只发开头 —— 会被拒绝
@@ -390,103 +354,6 @@ stata_run("forvalues i = 1/3 {\n    display `i'\n}")
 `program define ... end`、`input ... end` 同理。
 
 批量处理变量时，循环比逐条调用工具高效得多 —— 一次往返完成全部迭代。
-
----
-
-## 数据分析模板
-
-### 1：快速数据探索
-```stata
-use "data.dta", clear
-describe
-codebook, compact
-summarize
-tabulate categorical_var
-```
-
-### 2：OLS 回归
-```stata
-use "data.dta", clear
-summarize depvar indepvars
-pwcorr depvar indepvars, sig
-regress depvar indepvars
-regress depvar indepvars, robust
-estimates store model1
-```
-
-### 3：Logistic 回归
-```stata
-use "data.dta", clear
-tabulate depvar
-logit depvar indepvars
-logit depvar indepvars, or
-estimates store logit_model
-```
-
-### 4：分组比较
-```stata
-use "data.dta", clear
-bysort groupvar: summarize depvar
-ttest depvar, by(groupvar)
-```
-
-### 5：数据清洗
-```stata
-use "raw_data.dta", clear
-misstable summarize                           // 缺失值报告
-drop if missing(keyvar)                        // 删除关键变量缺失
-rename oldname newname                         // 重命名
-label variable varname "变量说明"              // 变量标签
-label define lbl 1 "类别1" 2 "类别2"          // 值标签
-label values varname lbl
-generate log_price = ln(price)
-generate price_sq = price^2
-save "clean_data.dta", replace
-```
-
-### 6：面板数据（xt 系列）
-```stata
-use "panel_data.dta", clear
-xtset id year                                  // 声明面板结构
-xtdescribe                                     // 面板描述
-xtsum y x1 x2                                  // 面板摘要统计
-xtreg y x1 x2, fe                              // 固定效应
-estimates store fe                             // 必须存储，hausman 靠名字引用
-xtreg y x1 x2, re                              // 随机效应
-estimates store re
-hausman fe re                                  // Hausman 检验
-```
-
-### 7：工具变量（IV / 2SLS）
-
-**官方 `ivregress`（无需安装，诊断走 estat）**
-```stata
-use "data.dta", clear
-ivregress 2sls y (x = z1 z2), robust
-estat firststage                               // 第一阶段 F（弱工具变量检验）
-estat overid                                   // 过度识别检验（Sargan/Hansen）
-```
-
-**SSC 的 `ivreg2`（诊断直接打印在主输出里，不要用 estat）**
-```stata
-// 需要 ivreg2：先用 stata_install_package("ivreg2", source="ssc") 安装，
-// 不要把 ssc install 写进 stata_run —— 网络阻塞会长时间冻结流程（非损坏 DLL）
-use "data.dta", clear
-ivreg2 y (x = z1 z2), robust first            // first 选项输出第一阶段
-// Hansen J / Kleibergen-Paap 统计量已在上面的输出里，无需再调 estat
-// ivreg2 不注册 estat handler，`estat firststage` 会报 r(321)
-```
-
-两套不要混用：`estat firststage` / `estat overid` 只对 `ivregress` 有效。
-
-### 8：DID（双重差分）
-```stata
-use "did_data.dta", clear
-generate treat_post = treat * post
-regress y treat post treat_post, robust       // 经典 2x2 DID
-// 事件研究：需 eventdd，先用 stata_install_package("eventdd", source="ssc") 安装
-eventdd y, hdfe absorb(id year) timevar(year) method(fe)
-```
 
 ---
 
@@ -543,94 +410,18 @@ use "file.dta", clear
 
 ---
 
-## 回归后诊断
+## 参考文件（按需加载）
 
-```stata
-regress y x1 x2 x3
-estat hettest                              // 异方差检验
-estat vif                                  // 多重共线性 (VIF)
-predict resid, resid                       // 残差
-predict fitted, xb                         // 拟合值
-predict std_resid, rstandard               // 标准化残差
-swilk std_resid                            // 正态性检验
-rvfplot                                    // 残差 vs 拟合散点图
-```
+以下细节已下沉到 references/，需要时再读：
 
-## 结果存储与输出
+| 文件 | 内容 |
+|------|------|
+| `references/commands.md` | **内置命令地图**：3500+ 内置命令按族速查（数据管理/探索/估计/后估计/图形/编程） |
+| `references/templates.md` | **数据分析模板**：快速探索 / OLS / Logistic / 分组比较 / 清洗 / 面板 / IV / DID，及回归后诊断与结果存储输出配方 |
+| `references/packages.md` | **常用第三方包**：estout/reghdfe/ivreg2/csdid/rdrobust/winsor2 等 SSC 包速查表 |
 
-```stata
-regress y x1 x2, robust
-estimates store m1
-regress y x1 x2 x3, robust
-estimates store m2
-estimates table m1 m2, star stats(N r2 r2_a)
-
-// 导出（需 estout；缺失时先用 stata_install_package("estout", source="ssc") 装，
-//       不要把 ssc install 混进 stata_run —— 网络阻塞会长时间冻结流程（非损坏 DLL）
-esttab m1 m2 using "results.csv", replace
-```
-
----
-
-## 常用第三方包
-
-用法：`stata_find_package("包名")` 搜 → `stata_describe_package("包名", source="ssc")`
-看详情（可选）→ `stata_install_package("包名", source="ssc")` 装 → `stata_help("包名")`
-查语法。不再需要时 `stata_uninstall_package("包名")` 卸载。**不要**把 `ssc install`
-或 `ssc describe` 写进 `stata_run` —— 它们是网络阻塞调用（实测 3–13s 波动，慢网络更久），
-会独占串行锁冻结整个流程且看门狗超时对其无效；改走专用工具（可控时机、显式 timeout）。
-注意：这是「阻塞太久」而非「损坏 DLL」，网络正常时安装本身会干净完成。
-
-### 结果输出 / 表格
-| 包 | 用途 | 补足哪个内置 |
-|----|------|------|
-| `estout` / `esttab` / `eststo` | 估计结果格式化成表（CSV/LaTeX/RTF） | `estimates table` |
-| `outreg2` | 回归结果导出 Word/Excel/LaTeX | 同上 |
-| `coefplot` | 系数图（点估计 + 置信区间） | `marginsplot` |
-
-### 高维固定效应 / 面板
-| 包 | 用途 | 补足哪个内置 |
-|----|------|------|
-| `reghdfe` | 多维固定效应线性回归（吸收大量虚拟变量） | `areg` / `xtreg` |
-| `ivreghdfe` | 高维固定效应 + IV | `ivregress` |
-| `ppmlhdfe` | 泊松高维固定效应（引力模型常用） | `poisson` |
-| `ftools` | reghdfe/gtools 的底层依赖 | — |
-| `xtabond2` | 动态面板 GMM（差分/系统 GMM） | `xtabond` |
-| `xtscc` | Driscoll-Kraay 标准误（面板异方差/自相关） | `xtreg, vce()` |
-
-### 工具变量
-| 包 | 用途 | 补足哪个内置 |
-|----|------|------|
-| `ivreg2` | IV/2SLS，弱工具/过度识别诊断直接打印在主输出 | `ivregress`（诊断走 `estat`） |
-
-### 因果推断 / 政策评估
-| 包 | 用途 | 补足哪个内置 |
-|----|------|------|
-| `csdid` | Callaway-Sant'Anna 交错 DID（异质处理效应） | 手写 DID 交互项 |
-| `did_multiplegt` | de Chaisemartin-D'Haultfœuille DID | 同上 |
-| `eventdd` | 事件研究法 DID 图 | 同上 |
-| `drdid` | 双重稳健 DID | 同上 |
-| `rdrobust` / `rddensity` | 断点回归（RD）估计与操纵检验 | — |
-| `psmatch2` / `teffects`(内置) | 倾向得分匹配 | `teffects psmatch` |
-| `synth` / `synth_runner` | 合成控制法 | — |
-
-### 微观计量 / 分解
-| 包 | 用途 | 补足哪个内置 |
-|----|------|------|
-| `cmp` | 递归多方程混合模型（联立 probit/tobit 等） | 分别估计 |
-| `oaxaca` | Blinder-Oaxaca 分解（工资差异等） | — |
-| `gllamm` | 广义线性潜变量混合模型 | `me` 系列 |
-
-### 数据处理 / 工具
-| 包 | 用途 | 补足哪个内置 |
-|----|------|------|
-| `winsor2` | 缩尾/截尾处理（注：`suffix()` 与 `replace` 互斥） | 手写 `egen pctile` |
-| `gtools`（`gcollapse` 等） | 大数据集加速版 collapse/egen | `collapse` / `egen` |
-| `binscatter` | 分箱散点图（**headless 可能挂起**，优先原生 `twoway scatter`） | — |
-| `estout` 见上 | — | — |
-
-> 未列出的包用 `stata_find_package("关键词")` 联网搜索。装好后 `stata_help("包名")`
-> 拿权威语法，不要凭记忆拼选项。
+> 回归后诊断（`estat hettest`/`vif`/`predict` 残差等）配方在 `references/templates.md`。
+> 需要完整命令清单时读 `references/commands.md`，而不是凭记忆拼选项。
 
 ---
 
@@ -639,12 +430,17 @@ esttab m1 m2 using "results.csv", replace
 1. **分析前先 `stata_status`**，了解当前会话状态
 2. **完整流程**：加载 → 探索 → 清洗 → 分析 → 输出结果
 3. **向用户展示关键结果**，而非原始 Stata 日志的全部内容
-4. **输出大小第一原则**：永远不要产生无限制的原始输出。
+4. **输出大小第一原则**：永远不要产生无限制的原始输出（细则见「核心原则 → 输出大小控制」）。
    - `list` 必须限定 `in 1/N`（已知 74 条数据 `in 1/20`，未知数据 `in 1/10`）
    - 优先用 `summarize`、`tabulate`、`codebook` 而非 `list`
    - 确实需要全量数据时利用自动分页：先看首页，需要时再 `stata_more`
-5. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装
-5a. **缺失包的处理**：某工具报「未安装 X 包」时，**不要**自己往 `stata_run` 里塞 `ssc install`（会阻塞冻结流程）。照提示单独调用一次 `stata_install_package("X", source="ssc", timeout=120)`（联网，阻塞几秒到十几秒；超时会被干净中断不卡死），装好后**重试刚才失败的那一步**、继续原任务。不要因为装个包就放弃或重排整个分析。
+5. **错误排查顺序**：变量名拼写 → 数据是否加载 → 路径 → 包是否安装。多命令链报错时
+   看**第一条**错误信息定位（首错即停），不要盲目重发整条链
+5a. **缺失包的处理**：某工具报「未安装 X 包」时，**不要**自己往 `stata_run` 里塞
+   `ssc install`（网络阻塞会独占串行锁冻结流程）。照提示单独调用一次
+   `stata_install_package("X", source="ssc", timeout=120)`（联网，阻塞几秒到十几秒；
+   超时会被看门狗**干净中断**不卡死 —— 这是「阻塞太久」而非「损坏 DLL」），装好后
+   **重试刚才失败的那一步**、继续原任务。不要因为装个包就放弃或重排整个分析
 6. **图形需导出**：`stata_graph(command=..., export="output/fig1.png", width=1200)`。导出选项按格式而变（实测 Stata 19.5，已由 `stata_graph` 自动适配，不适用的会被丢弃并说明）：
 
    | 格式 | width/height | quality | mag | fontface |
@@ -655,17 +451,35 @@ esttab m1 m2 using "results.csv", replace
    | eps / ps | **不支持** | ✗ | ✓ | ✓ |
    | emf / wmf | **不支持** | ✗ | ✗ | ✗ |
 
-   可用性还依环境：emf/wmf 仅 Windows、gif 仅 Mac GUI、tif 不支持 console；本 MCP 是 headless console，实测只有 png/jpg/pdf/svg/eps/ps 能用。`.jpeg` 不是官方后缀。
+   可用性还依环境：emf/wmf 仅 Windows、gif 仅 Mac GUI、tif 不支持 console；本 MCP 是
+   headless console，实测只有 png/jpg/pdf/svg/eps/ps 能用。`.jpeg` 不是官方后缀
 
-6a. **主题（scheme）**：`stata_graph` 不传 `scheme` 时**不会改动**当前主题（Stata 19 默认 `stcolor`）。要看/换主题用 `stata_scheme(action="list"/"get"/"set")`；跨会话保留传 `permanently=True`。
-7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway scatter mpg weight", export="output/scatter.png", scheme="s2color")`。它把 graph 与 export 放进同一复合块，少一次往返；导出成败以文件是否真被写入为准，失败会明确报错。分两步调用（先 `scatter` 再 `graph export`）实测也能成功，但错误定位更分散。
+6a. **主题（scheme）**：`stata_graph` 不传 `scheme` 时**不会改动**当前主题（Stata 19
+   默认 `stcolor`）。要看/换主题用 `stata_scheme(action="list"/"get"/"set")`；跨会话保留
+   传 `permanently=True`
+7. **图形导出优先使用 `stata_graph(..., export=...)`**：如 `stata_graph(command="twoway
+   scatter mpg weight", export="output/scatter.png", scheme="s2color")`。它把 graph 与
+   export 放进同一复合块，少一次往返；导出成败以文件是否真被写入为准，失败会明确报错。
+   分两步调用（先 `scatter` 再 `graph export`）实测也能成功，但错误定位更分散
 8. **大输出自动分页**：单命令输出 > 4000 字符时自动分页，`stata_more(page=N)` 翻页
 9. **分析完成后向用户汇报**：用了什么方法、关键发现是什么
-10. **危险命令避免**：`stata_run` 与 `stata_graph(command=)` 都会拦截行首 `!`、`shell`、`winexec`、`python:`、`python (`、裸 `python`，以及一切 `mata` 开头的命令（Mata 可经 `_stata()` 执行任意命令并直接读写文件，与内嵌 Python 同等对待）。不要尝试构造这些命令绕过过滤，也不要在未明确告知用户风险前构造删除、修改系统文件的操作。如确有系统级操作需求，请在操作系统命令行直接执行，不要通过 Stata 中转；确需 Mata 编程请在 Stata 界面里做。
+10. **危险命令避免**：`stata_run` 与 `stata_graph(command=)` 都会拦截行首 `!`、`shell`、
+    `winexec`、`python:`、`python (`、裸 `python`，以及一切 `mata` 开头的命令（Mata 可经
+    `_stata()` 执行任意命令并直接读写文件，与内嵌 Python 同等对待）。不要尝试构造这些
+    命令绕过过滤，也不要在未明确告知用户风险前构造删除、修改系统文件的操作。如确有
+    系统级操作需求，请在操作系统命令行直接执行，不要通过 Stata 中转；确需 Mata 编程
+    请在 Stata 界面里做
 11. **默认值注意**：
     - `stata_graph(..., replace=False)` — 导出文件时默认不覆盖已有文件，需显式传入 `replace=True`
     - `stata_export_excel(..., replace=False)` — 导出文件时默认不覆盖已有文件
     - `stata_use_dataset(filepath, clear=True)` — 默认清除内存中已有数据
     - `stata_run(command, timeout=60)` — 命令默认超时 60s，安装包/复杂回归可传 `timeout=120`
-12. **`stata_graph` 非只读**：它注册为 `readOnlyHint=False, destructiveHint=True`（导出时写磁盘），Agent 应在覆盖文件前向用户确认。此前本条写作「虽然标记为只读探索」，与实际注解相反。
-13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并**不会**自动安装 `estout`：执行前先探测，缺失则报错并给出可执行的单条安装命令。照提示执行 `stata_install_package("estout", source="ssc", timeout=120)`，装好后**重试本次导出**即可。不要在 `stata_run` 里内嵌 `ssc install` —— SSC 网络请求会独占串行锁阻塞整个流程（实测 3–13s 波动，慢网络更久）；这是「阻塞太久」而非「损坏 DLL」，且 `install` 工具的 `timeout` 超时会被看门狗干净中断（不卡死），改走专用工具即可。
+    - 估计/后估计/长命令工具都接受 `timeout`（钳制 10–1800），大数据集显式调大
+12. **`stata_graph` 非只读**：它注册为 `readOnlyHint=False, destructiveHint=True`（导出时
+    写磁盘），Agent 应在覆盖文件前向用户确认。此前本条写作「虽然标记为只读探索」，
+    与实际注解相反
+13. **`stata_export_excel(results=True)`** 会强制输出为 CSV，并**不会**自动安装 `estout`：
+    执行前先探测，缺失则报错并给出可执行的单条安装命令。照提示执行
+    `stata_install_package("estout", source="ssc", timeout=120)`，装好后**重试本次导出**即可。
+    回归表导出首选 `stata_etable`（官方，无第三方依赖）—— estout 只在需要 CSV/LaTeX
+    兼容旧脚本时才值得装
