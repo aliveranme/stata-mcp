@@ -1,6 +1,6 @@
 [project]
 name = "stata-mcp-server"
-version = "1.0.0"
+version = "1.0.8"
 description = "MCP server that drives Stata via the pystata DLL bridge"
 readme = { text = "Stata MCP Server — drives Stata via pystata. See https://github.com/aliveranme/stata-mcp for full README.", content-type = "text/markdown" }
 requires-python = ">=3.10"
@@ -15,7 +15,8 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "ruff>=0.5.0",
+    # 与 CI lint.yml 的 ruff==0.16.0 锁定一致（格式规则版本漂移会导致本地绿、CI 红）
+    "ruff==0.16.0",
 ]
 
 [project.scripts]

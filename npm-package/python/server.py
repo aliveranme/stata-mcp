@@ -247,6 +247,10 @@ from mcp.types import ToolAnnotations  # noqa: E402
 
 mcp = FastMCP(
     name="StataNow 19",
+    # serverInfo.version 必须反映**项目**版本而非 fastmcp 框架版本（规范要求
+    # serverInfo{name,version}，实测审查发现不传 version 时回退到 fastmcp 版本）。
+    # 发版时同步：与 npm-package/package.json / pyproject.toml / git tag 对齐。
+    version="1.0.8",
     instructions=(
         "执行 Stata 命令、管理数据处理工作流、安装扩展包。"
         "可执行 do 文件、交互式命令、安装和管理 Stata 扩展包、"

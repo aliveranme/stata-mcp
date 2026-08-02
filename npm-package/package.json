@@ -1,6 +1,6 @@
 {
   "name": "@aliveranme/stata-mcp",
-  "version": "1.0.0",
+  "version": "1.0.8",
   "description": "MCP server that drives real Stata via pystata — 数据加载/清洗/建模/诊断/图形导出，75 个工具覆盖完整计量工作流。",
   "mcpName": "io.github.aliveranme/stata-mcp",
   "license": "MIT",

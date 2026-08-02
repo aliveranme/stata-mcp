@@ -7,12 +7,12 @@
     "url": "https://github.com/aliveranme/stata-mcp",
     "source": "github"
   },
-  "version": "1.0.0",
+  "version": "1.0.8",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@aliveranme/stata-mcp",
-      "version": "1.0.0",
+      "version": "1.0.8",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
