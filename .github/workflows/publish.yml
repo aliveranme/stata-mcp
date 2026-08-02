@@ -3,16 +3,19 @@ name: Publish npm + MCP Registry
 # 打 v* tag 时触发，一条命令完成全部发布：
 #   1. 同步 python 服务器到 npm 包
 #   2. 从 tag 解析版本 → 写入 package.json 与 server.json（tag 即版本源）
-#   3. npm publish（secrets.NPM_TOKEN，需 granular token + bypass 2fa）
-#   4. mcp-publisher login github-oidc（GitHub Actions OIDC 认证）
-#   5. mcp-publisher publish（发布到官方 MCP registry）
+#   3. npm publish 到 npmjs.org（secrets.NPM_TOKEN，需 granular token + bypass 2fa）
+#   4. npm publish 到 GitHub Packages（GITHUB_TOKEN，需 packages:write，见步骤注释）
+#   5. 创建 GitHub Release（gh CLI，需 contents:write；tag 即版本，notes 从 git log 生成）
+#   6. mcp-publisher login github-oidc（GitHub Actions OIDC 认证）
+#   7. mcp-publisher publish（发布到官方 MCP registry）
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: read
+  contents: write   # checkout + 创建 GitHub Release（gh release create 需写 Release）
   id-token: write   # OIDC：registry 用 GitHub Actions OIDC 验证 io.github 命名空间
+  packages: write   # GitHub Packages npm 发布（缺此权限 → npm publish 403 → 包从未发布）
 
 jobs:
   publish:
@@ -25,29 +28,37 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - name: 同步 python 服务器到 npm 包
+      - name: 同步 python 服务器到 npm 包（排除 __pycache__ 与日志）
         working-directory: npm-package
         run: |
           rm -rf python
           mkdir -p python
           cp ../mcp-stata-server/server.py ../mcp-stata-server/stata_helpers.py python/
           cp -r ../mcp-stata-server/tool_modules python/
+          # npm pack 的 files 字段是白名单，.npmignore 对它不生效（实测被忽略）；
+          # 必须在源头排除 __pycache__/logs，否则打进公开包。
+          find python -type d -name __pycache__ -prune -exec rm -rf {} +
+          rm -rf python/logs
 
-      - name: 同步 tag 版本到 package.json 与 server.json（tag 即版本源）
-        # v1.2.3 → 1.2.3，写入三处版本：npm package.json、server.json 顶层、server.json 包内。
-        # 保证「git tag == npm 包版本 == registry 版本」三者一致，杜绝漂移。
+      - name: 同步 tag 版本到 package.json / server.json / server.py（tag 即版本源）
+        # v1.2.3 → 1.2.3，写入四处版本：npm package.json、server.json 顶层、server.json 包内、
+        # 以及两个 server.py 的 FastMCP(version=...) 行。serverInfo.version 必须反映包版本，
+        # 否则 MCP 客户端读到的是 fastmcp 框架版本（规范要求 serverInfo 语义正确）。
+        # 用剥离 v 前缀的版本作 node argv（shell V="${GITHUB_REF_NAME#v}"）——raw ref_name
+        # 形如 "v1.2.3"，不是合法 semver，直接写进 package.json 会让 npm publish 失败。
+        # 保证「git tag == npm 包版本 == registry 版本 == serverInfo.version」一致，杜绝漂移。
         run: |
           V="${GITHUB_REF_NAME#v}"
-          node -e "const p=require('./npm-package/package.json'); p.version=process.env.V; require('fs').writeFileSync('./npm-package/package.json', JSON.stringify(p,null,2)+'\n')"
-          node -e "const s=require('./server.json'); s.version=process.env.V; s.packages[0].version=process.env.V; require('fs').writeFileSync('./server.json', JSON.stringify(s,null,2)+'\n')"
+          node -e "const V=process.argv[1]; const p=require('./npm-package/package.json'); p.version=V; require('fs').writeFileSync('./npm-package/package.json', JSON.stringify(p,null,2)+'\n')" "$V"
+          node -e "const V=process.argv[1]; const s=require('./server.json'); s.version=V; s.packages[0].version=V; require('fs').writeFileSync('./server.json', JSON.stringify(s,null,2)+'\n')" "$V"
+          node -e "const V=process.argv[1]; const fs=require('fs'); for (const f of ['mcp-stata-server/server.py','npm-package/python/server.py']) { let t=fs.readFileSync(f,'utf8'); t=t.replace(/version=\"[^\"]*\"/, 'version=\"'+V+'\"'); fs.writeFileSync(f,t) }" "$V"
           echo "=== 发布版本: $V ==="
-        env:
-          V: ${{ github.ref_name }}
 
-      - name: 校验 npm 包（mcpName + 版本）
+      - name: 校验 npm 包（mcpName + 版本 + server.py 版本）
         working-directory: npm-package
         run: |
           node -e "const p=require('./package.json'); if(p.mcpName!=='io.github.aliveranme/stata-mcp'){throw new Error('mcpName 缺失')}; const expect=process.argv[1].replace(/^v/,''); if(p.version!==expect){throw new Error('版本未同步: '+p.version)}; console.log('OK:', p.mcpName, 'v'+p.version)" "${{ github.ref_name }}"
+          node -e "const fs=require('fs'); const expect=process.argv[1].replace(/^v/,''); for (const f of ['python/server.py','../mcp-stata-server/server.py']) { if(!fs.readFileSync(f,'utf8').includes('version=\"'+expect+'\"')){throw new Error(f+' 的 serverInfo 版本未同步')} }; console.log('server.py serverInfo.version OK: v'+expect)" "${{ github.ref_name }}"
           npm pack --dry-run
 
       - name: 发布到 npmjs.org
@@ -59,16 +70,47 @@ jobs:
       - name: 发布到 GitHub Packages（npm，绑定本仓库，可选渠道）
         # 与仓库地址绑定的私有 npm registry（npm.pkg.github.com，scope @aliveranme）。
         # 非关键渠道：失败不阻断核心发布（npmjs + registry），故 continue-on-error。
-        # 需 .npmrc 显式配置 GitHub registry 的 _authToken；GITHUB_TOKEN 需仓库
-        # Actions→Workflow permissions 为 Read and write（否则 E403）。
+        #
+        # E404「does not exist under owner」根因（按因果链）：
+        #   ① GITHUB_TOKEN 缺 packages:write —— 顶层 permissions 只给了 contents:read
+        #      + id-token:write，npm publish 向 npm.pkg.github.com 返回 403，包从未真正
+        #      发布，后续 npm view 自然报「does not exist under owner」（404 = 找不到包，
+        #      不是权限码）。已在本文件 permissions 补 packages:write。
+        #   ② GitHub Packages 的 npm 包首次发布默认「私有」，且不接受 --access 参数
+        #      （可见性只能在网页改，--access public 在 GitHub Packages 上无效）。
+        #      修好 ① 后，仍需在 GitHub「Package settings → Danger Zone →
+        #      Change visibility」把 @aliveranme/stata-mcp 改为 public 一次，否则无鉴权的
+        #      npm view 仍会 404。
+        # 发布方式：写显式 .npmrc（scope 路由 + _authToken）而非 npm config set ——
+        # 项目级 .npmrc 优先级最高、与 GitHub 官方示例一致；去掉了 --access public。
         continue-on-error: true
         working-directory: npm-package
         run: |
-          npm config set //npm.pkg.github.com/:_authToken="$NODE_AUTH_TOKEN"
-          npm config set @aliveranme:registry=https://npm.pkg.github.com/
-          npm publish --registry=https://npm.pkg.github.com --access public
+          printf '@aliveranme:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > .npmrc
+          npm publish --registry=https://npm.pkg.github.com
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 创建 GitHub Release（v* tag 即版本）
+        # 触发是 v* tag push：GITHUB_REF_NAME 即 tag 名（如 v1.2.3），tag 已随 push
+        # 存在于远端。gh release create 直接用该 tag —— tag 自身就是目标提交的锚点，
+        # 不依赖 HEAD，规避「tag push 时 HEAD 不一定等于 tag 指向的提交」的问题。
+        # notes：取 上一个 tag..本 tag 的非 merge 提交（git log --oneline --no-merges）；
+        # 无上一 tag（首个 release）时退回 --generate-notes，由 GitHub 服务端生成。
+        # 需要顶层 permissions 的 contents: write（gh 写 Release 需要）。
+        # ubuntu-latest 镜像自带 gh CLI，无需额外安装。
+        run: |
+          PREV="$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME"^ 2>/dev/null || true)"
+          if [ -n "$PREV" ]; then
+            NOTES="$(git log --oneline --no-merges "$PREV..$GITHUB_REF_NAME")"
+          fi
+          if [ -n "${NOTES:-}" ]; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes "$NOTES"
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 安装 mcp-publisher（下载 Linux 预构建二进制）
         # 不用 brew：GitHub Actions ubuntu 无预装 Homebrew，且 brew 安装不稳。
