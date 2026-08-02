@@ -5,15 +5,15 @@
   "description": "通过 pystata 驱动真实 Stata 的 MCP 服务器：数据加载/清洗/建模/诊断/图形导出，75 个工具覆盖完整计量工作流。",
   "repository": {
     "url": "https://github.com/aliveranme/stata-mcp",
-    "source": "git"
+    "source": "github"
   },
   "version": "1.0.0",
   "packages": [
     {
-      "registryType": "pypi",
+      "registryType": "npm",
       "identifier": "stata-mcp-server",
       "version": "1.0.0",
-      "runtimeHint": "uvx",
+      "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
       },

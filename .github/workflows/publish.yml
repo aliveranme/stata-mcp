@@ -1,0 +1,38 @@
+name: Publish npm + MCP Registry
+
+# 打 v* tag 时触发：同步 python 服务器 → 构建 npm 包 → 发布到 npmjs.org
+# （需在 GitHub secrets 配置 NPM_TOKEN —— npmjs.org 的 access token）
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: 同步 python 服务器到 npm 包
+        working-directory: npm-package
+        run: |
+          rm -rf python
+          mkdir -p python
+          cp ../mcp-stata-server/server.py ../mcp-stata-server/stata_helpers.py python/
+          cp -r ../mcp-stata-server/tool_modules python/
+
+      - name: 校验 npm 包（含 mcpName 字段）
+        working-directory: npm-package
+        run: |
+          node -e "const p=require('./package.json'); if(p.mcpName!=='io.github.aliveranme/stata-mcp'){throw new Error('mcpName 缺失')}; console.log('mcpName OK:', p.mcpName)"
+          npm pack --dry-run
+
+      - name: 发布到 npmjs.org
+        working-directory: npm-package
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

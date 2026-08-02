@@ -1,8 +1,10 @@
 [project]
 name = "stata-mcp-server"
-version = "0.1.0"
+version = "1.0.0"
 description = "MCP server that drives Stata via the pystata DLL bridge"
+readme = { text = "Stata MCP Server — drives Stata via pystata. See https://github.com/aliveranme/stata-mcp for full README.", content-type = "text/markdown" }
 requires-python = ">=3.10"
+license = { text = "MIT" }
 dependencies = [
     # server.py 从 fastmcp.tools.base 导入 ToolResult，该模块在 3.2.0 才出现。
     # 实测 3.0.0 / 3.1.0 均 ModuleNotFoundError，import 阶段即崩，不能放宽下界。
@@ -15,6 +17,13 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5.0",
 ]
+
+[project.scripts]
+stata-mcp-server = "server:main"
+
+[tool.setuptools]
+py-modules = ["server", "stata_helpers"]
+packages = ["tool_modules"]
 
 [build-system]
 requires = ["setuptools>=61.0"]

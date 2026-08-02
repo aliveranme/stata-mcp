@@ -1,0 +1,24 @@
+{
+  "name": "stata-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server that drives real Stata via pystata — 数据加载/清洗/建模/诊断/图形导出，75 个工具覆盖完整计量工作流。",
+  "mcpName": "io.github.aliveranme/stata-mcp",
+  "license": "MIT",
+  "bin": {
+    "stata-mcp-server": "index.js"
+  },
+  "files": [
+    "index.js",
+    "python/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "stata",
+    "pystata",
+    "econometrics"
+  ]
+}

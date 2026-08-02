@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.aliveranme/stata-mcp -->
 <p align="center">
   <img src="./assets/readme/hero.svg" width="100%"
        alt="Stata MCP Server — 让 Claude Agent 直接驱动 Stata：一个持久会话跑完加载、建模、诊断、导出。示例展示真实回归输出 regress price weight mpg，weight 系数 1.7466，R²=0.293，N=74。">
