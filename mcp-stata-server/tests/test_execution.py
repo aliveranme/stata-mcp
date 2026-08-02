@@ -578,3 +578,70 @@ def test_watchdog_timeout_note_reaches_caller(exec_mocks):
     assert "已被中断" in out
     assert "0.05s" in out
     assert "timeout" in out
+
+
+def test_run_do_file_rejects_dangerous_command(tmp_path):
+    """do 文件内容含 shell-out 必须被拒（真机确认此前可执行主机命令）。"""
+    from unittest.mock import patch
+
+    from fastmcp.tools.base import ToolResult
+
+    from server import stata_run_do_file
+
+    do_file = tmp_path / "evil.do"
+    do_file.write_text("display 1\nshell whoami\ndisplay 2\n", encoding="utf-8")
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run_do_file(str(do_file))
+    assert isinstance(result, ToolResult) and result.is_error
+    assert "危险命令" in result.content[0].text
+    mock_run.assert_not_called()
+
+
+def test_run_do_file_rejects_macro_obfuscation(tmp_path):
+    """do 文件含宏间接调用危险命令必须被拒。"""
+    from unittest.mock import patch
+
+    from fastmcp.tools.base import ToolResult
+
+    from server import stata_run_do_file
+
+    do_file = tmp_path / "macro.do"
+    do_file.write_text('local c "shell whoami"\n`c\'\n', encoding="utf-8")
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run_do_file(str(do_file))
+    assert isinstance(result, ToolResult) and result.is_error
+    assert "宏间接" in result.content[0].text
+    mock_run.assert_not_called()
+
+
+def test_run_do_file_rejects_comment_obfuscation(tmp_path):
+    """do 文件 `sh/*x*/ell` 注释混淆必须被解析后护栏拦截。"""
+    from unittest.mock import patch
+
+    from fastmcp.tools.base import ToolResult
+
+    from server import stata_run_do_file
+
+    do_file = tmp_path / "obfus.do"
+    do_file.write_text("display 1\nsh/*x*/ell echo hi\ndisplay 2\n", encoding="utf-8")
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run_do_file(str(do_file))
+    assert isinstance(result, ToolResult) and result.is_error
+    assert "危险命令" in result.content[0].text
+    mock_run.assert_not_called()
+
+
+def test_run_do_file_rejects_macro_equals_form(tmp_path):
+    from unittest.mock import patch
+
+    from fastmcp.tools.base import ToolResult
+
+    from server import stata_run_do_file
+
+    do_file = tmp_path / "m2.do"
+    do_file.write_text('local c = "shell whoami"\n`c\'\n', encoding="utf-8")
+    with patch("server._run_stata_command") as mock_run:
+        result = stata_run_do_file(str(do_file))
+    assert isinstance(result, ToolResult) and result.is_error
+    assert "宏间接" in result.content[0].text
+    mock_run.assert_not_called()

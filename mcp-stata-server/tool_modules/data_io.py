@@ -105,6 +105,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         condition: str = "",
         in_range: str = "",
         options: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """加载 Stata 数据集 (.dta 文件) 到内存中。
 
@@ -119,6 +120,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             varlist: 只载入这些变量（空格分隔），留空 = 全部。
             condition: if 条件子句（可选）—— 只载入满足条件的观测。
             in_range: 观测范围（可选），如 "1/1000"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             数据集加载确认信息及变量列表。
@@ -141,17 +143,19 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         opts = " ".join(p for p in ("clear" if clear else "", options.strip()) if p)
         if opts:
             cmd += f", {opts}"
-        return deps.run_stata_command(cmd, require_file=filepath)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout, require_file=filepath)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_save_dataset(
-        filepath: str, replace: bool = False, options: str = ""
+        filepath: str, replace: bool = False, options: str = "", timeout: int = 60
     ) -> str | deps.ToolResult:
         """将当前内存中的数据集保存为 .dta 文件。
 
         Args:
             filepath: 保存路径（建议使用 .dta 扩展名）。
             replace: 是否覆盖已有文件（默认 False）。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             保存确认信息。
@@ -163,7 +167,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         normalized = deps.normalize_path(filepath)
         opts = " ".join(p for p in ("replace" if replace else "", options.strip()) if p)
         suffix = f", {opts}" if opts else ""
-        result = deps.run_stata_command(f'save "{normalized}"{suffix}')
+        safe_timeout = max(10, min(timeout, 1800))
+        result = deps.run_stata_command(f'save "{normalized}"{suffix}', timeout=safe_timeout)
         if isinstance(result, deps.ToolResult):
             return result  # 保存失败，不登记资源
         reg_err = deps.register_resource(normalized, "stata_save_dataset")
@@ -174,22 +179,30 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         return deps.append_text(result, f"\n(文件已保存，但登记为资源失败: {reg_err})")
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-    def stata_set_cwd(path: str) -> str | deps.ToolResult:
+    def stata_set_cwd(path: str, timeout: int = 60) -> str | deps.ToolResult:
         """更改 Stata 的工作目录。
 
         Args:
             path: 新的工作目录路径。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             当前工作目录确认信息。
         """
         if err := deps.validate_path(path):
             return deps.result_or_error(err)
-        return deps.run_stata_command(f'cd "{deps.normalize_path(path)}"')
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(
+            f'cd "{deps.normalize_path(path)}"', timeout=safe_timeout
+        )
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_use_example(
-        name: str = "", source: str = "sysuse", clear: bool = True, action: str = "load"
+        name: str = "",
+        source: str = "sysuse",
+        clear: bool = True,
+        action: str = "load",
+        timeout: int = 0,
     ) -> str | deps.ToolResult:
         """加载 Stata 官方示例数据集（``sysuse`` / ``webuse``）。
 
@@ -203,6 +216,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             clear: 加载前清空内存数据（默认 True）。
             action: ``load``（默认）或 ``list`` —— 列出本地可用示例
                 （``sysuse dir``；webuse 没有对应子命令）。
+            timeout: 命令超时秒数（钳制 10–1800）。webuse 联网取数默认 120、
+                其余默认 60，显式传值优先。长命令/大文件可显式调大。
 
         Returns:
             加载确认与数据集概览。
@@ -215,9 +230,13 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             return deps.make_error(
                 f'错误: action 只能是 "load" 或 "list"（收到 {action!r}）'
             )
+        # timeout=0（默认）表示「自动」：webuse 联网取数给足 120s，其余 60s；
+        # 显式传值则以用户指定的为准。
+        effective = timeout if timeout else (120 if source == "webuse" else 60)
+        safe_timeout = max(10, min(effective, 1800))
         if action == "list":
             # webuse 没有 dir 子命令，列表一律走本地 sysuse dir。
-            return deps.run_stata_command("sysuse dir")
+            return deps.run_stata_command("sysuse dir", timeout=safe_timeout)
         if not name.strip():
             return deps.make_error('错误: 请提供数据集名，如 name="auto"')
         if err := deps.validate_identifier(name, "name", required=True):
@@ -227,7 +246,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         if clear:
             cmd += ", clear"
         # webuse 要联网取数，给足超时。
-        return deps.run_stata_command(cmd, timeout=120 if source == "webuse" else 60)
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_import(
@@ -245,6 +264,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         condition: str = "",
         in_range: str = "",
         options: str = "",
+        timeout: int = 120,
     ) -> str | deps.ToolResult:
         """导入非 .dta 格式的数据文件（与 stata_export_* 对称）。
 
@@ -267,11 +287,13 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             delimiter: 分隔符 —— 单字符或关键字 ``"tab"``。**仅 delimited**。
             varnames: 变量名所在行号，或 ``"nonames"``。**仅 delimited**。
             encoding: 文件编码，如 "utf-8"、"gbk"。支持 delimited / sas / spss。
-            case: 变量名大小写 —— preserve / lower / upper。excel 与 delimited 均支持。
+            case: 变量名大小写 —— preserve / lower / upper。支持 excel /
+                delimited / sas / spss / dbase（parquet 除外）。
             varlist: 只导入这些变量。支持 sas / spss / parquet。
             condition: if 条件子句。支持 sas / spss。
             in_range: 观测范围。支持 sas / spss。
             options: 其余官方选项的自由文本逃生舱。
+            timeout: 命令超时秒数（默认 120，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             导入确认信息（含变量与观测数概览）。
@@ -396,7 +418,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         if opts:
             cmd += f", {' '.join(opts)}"
 
-        result = deps.run_stata_command(cmd, timeout=120, require_file=require_path)
+        safe_timeout = max(10, min(timeout, 1800))
+        result = deps.run_stata_command(cmd, timeout=safe_timeout, require_file=require_path)
         if isinstance(result, deps.ToolResult):
             return result
         if dropped:

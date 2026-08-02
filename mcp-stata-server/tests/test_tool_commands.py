@@ -24,6 +24,7 @@ from server import (
     stata_list,
     stata_logistic,
     stata_margins,
+    stata_merge,
     stata_ping,
     stata_poisson,
     stata_predict,
@@ -3023,3 +3024,72 @@ def test_etable_rejects_injection_in_estimates():
     result = stata_etable(estimates='m1) export("/evil/x.docx") //')
     text = result.content[0].text if hasattr(result, "content") else result
     assert "错误" in text
+
+
+def test_truncation_notice_not_duplicated():
+    """单块超限时收集层已注入截断提示，聚合层不得再追加（实战发现双提示）。"""
+    from unittest.mock import patch
+
+    from server import _TRUNCATION_NOTICE, _run_stata_command
+
+    big = "x" * 120000
+    with patch("server._execute_safe", return_value=(0, big + _TRUNCATION_NOTICE)):
+        result = _run_stata_command("list x, n=0")
+    text = result if isinstance(result, str) else result.content[0].text
+    assert text.count("已截断") == 1, "截断提示应只出现一次"
+
+
+def test_list_empty_result_hints_zero_match():
+    """有数据但 list 匹配 0 行时应给可操作提示（实战发现与数据缺失无法区分）。"""
+    from unittest.mock import patch
+
+    from server import stata_list
+
+    with patch("server._run_stata_command", return_value="(命令执行成功，无文本输出)"):
+        result = stata_list("price", condition="foreign == 1", in_range="1/10")
+    assert isinstance(result, str)
+    assert "未列出任何观测" in result
+
+
+# ---------------------------------------------------------------------------
+# 第二轮审查：timeout 钳制透传 / 图形错误分支
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        (stata_regress, dict(depvar="price", indepvars="weight", timeout=300)),
+    ],
+)
+def test_estimation_timeout_passed_and_clamped(tool, args):
+    with patch("server._run_stata_command") as mock_run:
+        mock_run.return_value = "ok"
+        tool(**args)
+    assert mock_run.call_args.kwargs.get("timeout") == 300
+
+
+def test_regress_timeout_clamped_high():
+    with patch("server._run_stata_command") as mock_run:
+        mock_run.return_value = "ok"
+        stata_regress("price", "weight", timeout=5000)
+    assert mock_run.call_args.kwargs.get("timeout") == 1800
+
+
+def test_merge_timeout_passed():
+    with patch("server._run_stata_command") as mock_run:
+        mock_run.return_value = "ok"
+        stata_merge(kind="1:1", keyvars="make", using="auto.dta", timeout=300)
+    assert mock_run.call_args.kwargs.get("timeout") == 300
+
+
+def test_graph_export_nonexistent_dir_hint(tmp_path):
+    """图形导出到不存在目录应提示目录不存在（第二轮审查修复）。"""
+    from server import stata_graph
+
+    bad = str(tmp_path / "no_such_dir" / "x.png")
+    with patch("server._run_stata_command", return_value="captured"):
+        with patch("server._file_written_since", return_value=False):
+            result = stata_graph("scatter price weight", export=bad, replace=True)
+    assert getattr(result, "is_error", False)
+    assert "目录不存在" in str(result)

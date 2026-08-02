@@ -28,7 +28,9 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
     """
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def stata_lincom(expression: str, options: str = "") -> str | deps.ToolResult:
+    def stata_lincom(
+        expression: str, options: str = "", timeout: int = 60
+    ) -> str | deps.ToolResult:
         """对当前估计结果做线性组合的 Wald 检验（``lincom``）。
 
         **前提**：先运行过一个估计命令（``regress`` / ``logit`` 等），可用
@@ -46,6 +48,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         Args:
             expression: 线性组合表达式（必填），如 ``_b[mpg] + _b[weight]``。
             options: 官方选项，如 ``level(95)``。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             Wald 检验结果（统计量与 p 值）。
@@ -59,10 +62,13 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd = f"lincom {expression.strip()}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd, timeout=60)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def stata_nlcom(expression: str, options: str = "") -> str | deps.ToolResult:
+    def stata_nlcom(
+        expression: str, options: str = "", timeout: int = 60
+    ) -> str | deps.ToolResult:
         """对当前估计结果做非线性组合的 delta 法检验（``nlcom``）。
 
         **前提**：先运行过一个估计命令，可用 ``stata_status`` 确认「当前活跃」
@@ -80,6 +86,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             expression: 非线性组合表达式（必填），如 ``exp(_b[mpg])``；多个
                 表达式用空格或括号分组并列，如 ``(_b[x1]/_b[x2]) (exp(_b[x1]))``。
             options: 官方选项，如 ``level(95)``。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             delta 法检验结果（各表达式的估计值、标准误、置信区间与 p 值）。
@@ -95,11 +102,12 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd = f"nlcom {expression.strip()}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd, timeout=60)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_hausman(
-        consistent: str, efficient: str = "", options: str = ""
+        consistent: str, efficient: str = "", options: str = "", timeout: int = 60
     ) -> str | deps.ToolResult:
         """对两个已存储的估计结果做 Hausman 设定检验（``hausman``）。
 
@@ -109,8 +117,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         活跃**的估计结果。
 
         典型用法（固定效应 vs 随机效应面板模型）：
-            1. ``stata_xtreg("y", "x1 x2", fe=True)`` 后 ``estimates store fe``
-            2. ``stata_xtreg("y", "x1 x2", re=True)`` 后 ``estimates store re``
+            1. ``stata_xtreg("y", "x1 x2", effects="fe")`` 后 ``estimates store fe``
+            2. ``stata_xtreg("y", "x1 x2", effects="re")`` 后 ``estimates store re``
             3. ``stata_hausman("fe", "re")``  —— p 值显著拒绝随机效应假设
 
         Args:
@@ -118,6 +126,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             efficient: 有效估计的存储名（可选），留空用当前活跃估计，如 "re"。
             options: 官方选项，如 ``sigmamore``（用一致估计的协方差）、
                 ``constant``（含截距项比较）、``alleqs``（比较全部方程）。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             Hausman 检验结果（chi2 统计量与 p 值）。
@@ -138,7 +147,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd += f" {efficient.strip()}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd, timeout=60)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）
     return {k: v for k, v in locals().items() if k.startswith("stata_") and callable(v)}

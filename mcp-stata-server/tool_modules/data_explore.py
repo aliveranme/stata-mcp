@@ -141,7 +141,30 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd += f" in 1/{n}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        result = deps.run_stata_command(cmd)
+
+        # 实战发现的两种误导性空结果（真机验证）：
+        # ① 有数据但筛选匹配 0 行 → 返回「执行成功无文本输出」，与「数据缺失」无法区分；
+        # ② 空数据集上默认的 `in 1/<n>` → Stata 报 r(198) observation numbers out of
+        #    range，与真实语法错误同码，错误文本不具可操作性。
+        if isinstance(result, str) and "无文本输出" in result:
+            return result + (
+                "\n提示: list 未列出任何观测 —— 可能筛选未匹配（if+in 是「前 n 条观测里"
+                "满足条件」的语义，不是「满足条件的前 n 条」），或当前数据集无观测。"
+                "用 stata_tabulate / stata_summarize 确认数据规模。"
+            )
+        err_text = str(result)
+        if "observation numbers out of range" in err_text:
+            probe = deps.run_stata_command("display c(N)")
+            n_text = str(probe).strip()
+            digits = "".join(ch for ch in n_text if ch.isdigit())
+            if digits == "0":
+                return deps.make_error(
+                    "错误: 当前内存中没有数据集（c(N)=0）。请先用 "
+                    'stata_use_dataset("路径.dta") 载入数据，或 '
+                    'stata_run("sysuse auto, clear") 载入示例数据。'
+                )
+        return result
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_codebook(
@@ -201,8 +224,6 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         Returns:
             频数/交叉表。
         """
-        if not varname.strip():
-            return deps.make_error("错误：请提供至少一个变量名。")
         if err := deps.validate_identifier(varname, "varname", required=True):
             return deps.result_or_error(err)
         if err := deps.validate_identifier(byvar, "byvar"):

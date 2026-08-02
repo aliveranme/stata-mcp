@@ -266,3 +266,12 @@ def test_stata_run_save_output_path_validated(tmp_path):
     bad = f"{tmp_path}\x00nul"
     result = stata_run("display 1", save_output=bad)
     assert isinstance(result, ToolResult) and result.is_error
+
+
+def test_register_resource_preserves_original_source(tmp_path):
+    """重复登记保留原始来源（实战发现：覆盖会丢元数据）。"""
+    p = tmp_path / "x.dta"
+    p.write_bytes(b"\x93\x11")
+    _register_resource(str(p), "stata_save_dataset")
+    _register_resource(str(p), "stata_register_file")  # 再次登记
+    assert _resource_lookup(str(p))["source"] == "stata_save_dataset"

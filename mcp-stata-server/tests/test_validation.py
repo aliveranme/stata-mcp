@@ -527,3 +527,29 @@ def test_macro_obfuscation_blocked(cmd):
 )
 def test_macro_obfuscation_allows_safe(cmd):
     assert _flag_macro_obfuscation(cmd) is None, f"不应误伤: {cmd}"
+
+
+# ---------------------------------------------------------------------------
+# 第二轮审查修复：宏 = 形式、复合引号、#d 缩写
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'local c = "shell whoami"\n`c\' whoami',
+        'global g = "era /tmp/x"\n$g',
+        'local c `"shell whoami"\'\n`c\' whoami',
+        'local c "sh whoami"\n`c\'',
+    ],
+)
+def test_macro_obfuscation_equals_and_compound_forms_blocked(cmd):
+    assert _flag_macro_obfuscation(cmd) is not None, f"应拦截: {cmd}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    ["#d ;\ndisplay 1 ;", "#d;\ndisplay 2 ;"],
+)
+def test_delimit_abbreviation_blocked(cmd):
+    assert _precheck_command(cmd) is not None

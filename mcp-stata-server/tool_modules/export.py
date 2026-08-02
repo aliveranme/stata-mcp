@@ -54,6 +54,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         condition: str = "",
         in_range: str = "",
         options: str = "",
+        timeout: int = 120,
     ) -> str | deps.ToolResult:
         """将当前数据集导出为 Excel (.xlsx/.xls) 文件，或将回归结果导出为 CSV。
 
@@ -81,6 +82,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             in_range: 观测范围（可选），如 "1/100"。
             options: 其余官方选项的自由文本逃生舱，如
                      ``'keepcellfmt missing("NA") datestring("%td")'``。
+            timeout: 命令超时秒数（默认 120，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             导出确认信息。
@@ -117,6 +119,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 f'错误: firstrow 只能是 "variables" / "varlabels" / "none"（收到 {firstrow!r}）'
             )
 
+        safe_timeout = max(10, min(timeout, 1800))
         export_path = deps.normalize_path(filepath)
         replace_opt = "replace" if replace else ""
         firstrow_opt = "" if firstrow == "none" else f"firstrow({firstrow})"
@@ -203,7 +206,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         # 命令未执行）时，旧文件仍在，原实现回报「已导出 28 B」。
         before_ns = deps.mtime_ns(export_path) if os.path.isfile(export_path) else None
 
-        result = deps.run_stata_command(cmd, timeout=120)
+        result = deps.run_stata_command(cmd, timeout=safe_timeout)
 
         # 若 run_stata_command 已标记错误，透传；空选择这类误导性诊断补一句解释。
         if isinstance(result, deps.ToolResult):
@@ -233,6 +236,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         stats: str = "",
         title: str = "",
         options: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """生成回归结果表并可导出（官方 ``etable``，Stata 17+）。
 
@@ -254,6 +258,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 （官方语法是每个各写一个 ``mstat()``，此处自动展开）。
             title: 表标题。
             options: 其余官方选项，如 "column(dvlabel)"、"cstat(_r_b, nformat(%9.3f))"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             表格文本；导出时附确认信息。
@@ -300,7 +305,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         before_ns = (
             deps.mtime_ns(export_path) if export_path and os.path.isfile(export_path) else None
         )
-        result = deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        result = deps.run_stata_command(cmd, timeout=safe_timeout)
         if isinstance(result, deps.ToolResult) or not export_path:
             return result
 
@@ -308,6 +314,11 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         # 只看输出很容易把失败当成功（与 stata_graph 同一判定思路）。
         if not deps.file_written_since(export_path, before_ns):
             hint = "" if replace else "\n提示：目标文件已存在时需传 replace=True。"
+            # 实战发现：已传 replace=True 却仍报 r(602)「文件已存在」时，真实根因
+            # 往往是目标目录不存在（Stata 自身怪癖：不存在目录 + replace 报 602）。
+            parent = os.path.dirname(export_path)
+            if replace and parent and not os.path.isdir(parent):
+                hint = f"\n提示：目标目录不存在: {parent} —— 请先创建目录。"
             return deps.make_error(f"错误: 表格未能写入 {export_path}{hint}\n{result}")
         reg_err = deps.register_resource(export_path, "stata_etable")
         note = "" if reg_err is None else f"\n(登记资源失败: {reg_err})"
@@ -326,6 +337,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         condition: str = "",
         in_range: str = "",
         options: str = "",
+        timeout: int = 120,
     ) -> str | deps.ToolResult:
         """将当前数据集导出为分隔文本文件（CSV / TSV / 自定义分隔符）。
 
@@ -345,6 +357,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             condition: if 条件子句（可选）。
             in_range: 观测范围（可选），如 "1/100"。
             options: 其余官方选项的自由文本逃生舱。
+            timeout: 命令超时秒数（默认 120，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             导出确认信息。
@@ -353,13 +366,14 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             return deps.result_or_error(err)
         if err := deps.validate_varlist(varlist, "varlist"):
             return deps.result_or_error(err)
-        for value, label in (
-            (condition, "condition"),
-            (in_range, "in_range"),
-            (options, "options"),
-        ):
-            if err := deps.validate_no_injection(value, label):
+        # condition/in_range 拼在 `using "<路径>"` 之后，`//` 等注释记号会把已校验
+        # 的路径整段注释掉 —— 必须走 filter_expr 级校验（与 export_excel 一致，
+        # 实战审查发现此前漏用较弱的 no_injection）。
+        for value, label in ((condition, "condition"), (in_range, "in_range")):
+            if err := deps.validate_filter_expr(value, label):
                 return deps.result_or_error(err)
+        if err := deps.validate_no_injection(options, "options"):
+            return deps.result_or_error(err)
 
         # delimiter 拼进 delimiter("<c>")，双引号会提前闭合；tab 是关键字不加引号。
         # 实测 Stata 对 delimiter("tab") 与 delimiter(tab) 一视同仁（都产出制表符，
@@ -399,7 +413,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         # 只判断「文件存在」会把上次留下的同名文件当成本次成功。
         before_ns = deps.mtime_ns(export_path) if os.path.isfile(export_path) else None
 
-        result = deps.run_stata_command(cmd, timeout=120)
+        safe_timeout = max(10, min(timeout, 1800))
+        result = deps.run_stata_command(cmd, timeout=safe_timeout)
         if isinstance(result, deps.ToolResult):
             raw = result.content[0].text if result.content else ""
             if hint := deps.empty_selection_hint(raw, condition, in_range):

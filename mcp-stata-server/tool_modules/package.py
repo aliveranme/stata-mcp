@@ -176,7 +176,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         if err := deps.validate_no_injection(options, "options"):
             return deps.result_or_error(err)
         if not keyword.strip():
-            return deps.make_error("错误：请提供搜索关键词。")
+            return deps.make_error("错误: 请提供搜索关键词。")
         if scope and scope not in ("toc", "pkg", "tocpkg", "everywhere", "filenames"):
             return deps.make_error(
                 '错误: scope 只能是 "toc" / "pkg" / "tocpkg" / "everywhere" / '
@@ -236,7 +236,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         """
         topic = command.strip()
         if not topic:
-            return deps.make_error("错误：请提供要查询的命令名。")
+            return deps.make_error("错误: 请提供要查询的命令名。")
         if not _HELP_TOPIC_RE.match(topic):
             return deps.make_error(
                 "错误: 命令名只能包含字母、数字、下划线和空格（用于子主题，"

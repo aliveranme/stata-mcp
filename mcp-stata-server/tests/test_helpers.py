@@ -616,3 +616,23 @@ def test_compact_keeps_error_text():
     out = _compact_output(text)
     assert "[返回码: 601] file not found" in out
     assert "some context" in out
+
+
+# ---------------------------------------------------------------------------
+# 第二轮审查：timeout 钳制 / 分页截断标志
+# ---------------------------------------------------------------------------
+
+
+def test_paginate_shows_truncated_banner_on_first_page():
+    from server import _TRUNCATION_NOTICE, _paginate
+
+    text = "x" * 9000 + "\n" + _TRUNCATION_NOTICE
+    out = _paginate(text, 1, page_size=4000, truncated=True)
+    assert "已截断" in out
+
+
+def test_paginate_no_banner_when_not_truncated():
+    from server import _paginate
+
+    out = _paginate("x" * 5000, 1, page_size=4000, truncated=False)
+    assert "已截断" not in out

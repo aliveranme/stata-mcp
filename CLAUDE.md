@@ -39,7 +39,7 @@ stata-mcp/
 | 示例数据 | `stata_use_example` | — | `sysuse`(本地) / `webuse`(联网) 加载官方示例数据集；`action="list"` 列出可用 |
 | 数据生成 | `stata_generate`, `stata_egen` | — | 创建变量（改数据集，非只读）；支持官方 `[type]` 存储类型与 `[if] [in]` |
 | 数据重构 | `stata_merge`, `stata_append`, `stata_reshape`, `stata_collapse`, `stata_frame`, `stata_replace`, `stata_drop`, `stata_keep`, `stata_rename`, `stata_recode`, `stata_destring` | — | 横向合并(1:1/m:1/1:m/m:m)、纵向追加(可多文件)、长宽转换、按组聚合、多数据集 frame；后六个是变量级清洗：`replace`/`recode` 覆盖原变量，`drop`/`keep` 支持「删变量」或「删观测」两种形态（二选一），`destring` 强制 `replace` 或 `generate()` 二选一 |
-| 数据校验 | `stata_verify` | ✓ | `count`/`assert`/`duplicates`/`isid`/`misstable` 五合一 |
+| 数据校验 | `stata_verify` | ✓ | `count`/`assert`/`duplicates`/`isid`/`missing` 五合一（missing 走 `misstable summarize`） |
 | 数据探索 | `stata_describe`, `stata_codebook`, `stata_summarize`, `stata_list`, `stata_tabulate`, `stata_correlate`, `stata_display` | ✓ | 只读探索 |
 | 估计 | `stata_regress`, `stata_logistic`, `stata_probit`, `stata_poisson`, `stata_ttest`, `stata_xtreg`, `stata_ivregress`, `stata_logit`, `stata_mlogit`, `stata_nbreg`, `stata_qreg`, `stata_mixed` | ✓ | OLS/Logit/Probit/Poisson/t 检验/面板/IV + 扩展族：`logit`（原始系数，`logistic` 是 OR）、`mlogit` 多分类、`nbreg` 负二项、`qreg` 分位（`quantile` 默认 0.5）、`mixed` 多水平（`random` 以 `\|\|` 开头） |
 | 后估计 | `stata_margins`, `stata_test`, `stata_predict`, `stata_estat`, `stata_estimates`, `stata_lincom`, `stata_nlcom`, `stata_hausman` | ✓* | 边际效应/Wald 检验/预测（`stata_predict` 会创建变量，非只读）；`stata_estat` 诊断(vif/hettest/ovtest/ic)；`stata_estimates` 存取与并排比较模型；`lincom` 线性组合、`nlcom` 非线性组合（delta 法）、`hausman` 模型比较（需先 `estimates store` 两个模型） |
@@ -236,6 +236,31 @@ do 文件常在开头写 `ssc install foo`，内联执行会让整段脚本卡�
   并发风险。块与块之间靠命令返回后检查取消标志终止，因此**晚到的 break 不会被下一条
   命令消费**（不再复现「打断下一条无辜命令」的历史缺陷）。
 - **进度粒度**：以「命令块」为单位（当前块/总块数），do 文件整体是一条命令块，粒度到此为止。
+
+### 实战压力测试发现与修复（2026-08，6 路并行真实 Stata 19.5 实测）
+
+用 Stata 自带数据集（auto/census/bpwide/nlswork/hsng2 等）并行跑了 6 类场景
+（数据管理/探索/估计/面板时序/图形导出/后台会话），~240 次真实调用。系统整体
+稳定（零 DLL 崩溃/挂死/看门狗误伤），发现并修复以下不足：
+
+| 发现 | 修复 |
+|------|------|
+| `stata_qreg` docstring 推荐 `vce(bootstrap)`，实测 r(198)（官方正解是 `bsqreg`） | docstring 改为 `vce(iid)`/`vce(robust)`，注明 bootstrap 走 `stata_run("bsqreg ...")` |
+| `stata_hausman` docstring 示例用 `fe=True`，实际签名是 `effects="fe"` | docstring 修正 |
+| `stata_reshape` 非数值 j（bpwide 的 before/after）两个方向都要 `options="string"`，docstring 未提及；r(498) 未收录 | docstring 注明；r(498) 加入返回码释义表 |
+| 估计/后估计工具无法覆盖 60s 看门狗（无 timeout 参数） | 19 个估计工具统一补 `timeout` 参数（钳制 10–1800） |
+| `snapshot save` 附加的 `snapshot list` 把创建记录打印两遍 | 去掉附加 list（save 输出已含编号） |
+| `stata_background("")` 接受空命令 | 入口拒绝空/纯空白 |
+| `stata_clear` 后误报「请先载入数据」 | 清空返回确认文本 |
+| `stata_list` 匹配 0 行返回「无文本输出」，与数据缺失无法区分；空数据上 r(198) | 0 匹配给「未列出任何观测」提示；空数据给友好指引 |
+| 120K 截断提示被收集层与聚合层各追加一次（双提示）；且只出现在最后一页，首页无从得知 | 聚合层去重；`_paginate` 增 `truncated` 标志，页首提示 |
+| 图形导出到不存在目录报「failed to export format」；真实原因（r111）埋在「文件为空」之后；空数据集导出空白图无警告 | 错误先列 Stata 真实原因；目录不存在给出提示 |
+| `stata_etable` 已传 replace 仍报 r(602)「文件已存在」（真实根因：目录不存在） | replace + r602 时提示目录可能不存在 |
+| 重复登记资源覆盖原始来源 | `_register_resource` 保留首登来源 |
+| 后台任务取消丢已执行输出 | 取消分支并入当前块输出，标注「已执行 N/M 块」 |
+| 测试运行污染生产日志（pytest 的 traceback 进 logs/stata-mcp.log，`stata_read_log` 读到噪音） | conftest 摘掉文件 handler |
+| 看门狗超时文案「看门狗超时会走这里」是调试口吻 | 改为面向用户的中文说明 |
+| 后台任务期间主线程 stdout 会被 RedirectOutput 捕获进任务结果（进程级替换；MCP 生产走 stdio 无实际影响） | `stata_background` docstring 明确「任务运行期间不要向进程 stdout 写内容」 |
 
 ## Gotchas
 
@@ -490,6 +515,32 @@ stata_graph(command="twoway scatter price weight", export="fig.pdf", width=800)
 | 宏间接调用绕过全部前缀护栏 | `local c "shell whoami"` 后 `` `c' whoami `` 展开成 `shell whoami` —— 真机确认旧护栏放行且主机 shell 真实执行（输出 MACRO_EXECUTED） | `_flag_macro_obfuscation`：扫描 local/global 字面量定义，值为危险命令的宏名 + 命令位（行首剥前缀后）引用即拒；只查命令位引用，`display "\`c'"` 字符串内引用不误伤 |
 | do 文件的第三方包安装不可控 | `net install`（任意 from() URL）/`github install`/`adoupdate`/`update all` 在 do 文件里原样执行，不经过受控预装路径与来源白名单 | `_flag_unmanaged_package_commands`：do 文件含这些命令即整体拒绝并引导改用 `stata_install_package`（ssc 或完整 https from() URL，带 timeout）；`ssc install` 仍走受控预装 |
 | do 文件/长命令输出含噪声计数行 | `(22 real changes made)` 等统计计数行每条命令打一行，挤占 token；连续空行同样浪费 | `compact=True`（stata_run / stata_run_do_file opt-in）：`_compact_output` 删计数行 + 折叠空行，结果表与错误文本绝不动（真机验证） |
+
+### 第二轮对抗性审查（2026-08，执行核心/安全纵深/模块一致性/性能/测试质量 5 维）
+
+35 agent 并行审查 + 对抗性证伪，29 条发现全部确认并修复：
+
+**安全纵深（堵剩余绕过面）**：
+- do 文件内容护栏从原始文本升级为**解析后块**检查（挡 `sh/*x*/ell` 注释混淆）；
+  且 do 文件内容里的数据路径同样受沙箱审计（配置白名单时，锁内逐行）
+- 宏混淆防御补 `=` 形式（`local c = "shell …"`）与复合引号（`` `"shell …"' ``）；
+  跨调用 def/use 是护栏固有边界（无法跟踪会话状态），已文档化
+- 后台任务的自由文本同样走路径审计（此前完全跳过）
+- 路径审计命令集补官方缩写（`sav`/`imp`/`cop`/`exp`/`lo`…），精确 token 不误伤
+- 包管理拦截补缩写（`net ins`/`github ins`）与 `version 15:` 前缀
+- `#d`（#delimit 缩写）纳入 delimit 拦截
+
+**执行核心正确性**：
+- 截断去重修硬上限：旧 `full[:idx]+notice` 在截断块非首个时超 120K（实测 170K）；
+  且把提示后的看门狗超时指引整条丢弃 —— 现收口到 120K 并保留尾部关键信息
+- 被取消的后台任务不再收到伪造的「超时、调大 timeout」建议
+- 后台任务错误分支补「已跳过后续 N 条命令」提示（与前台一致）
+- 错误路径（had_error）前置截断提示
+- 移除死字段 `_BackgroundTask.in_execute`
+
+**模块一致性**：`export_delimited` 的筛选子句升到 `_validate_filter_expr`（此前弱校验可被 `//` 注释掉路径）；16 个长命令工具（merge/append/reshape/collapse/import/export/graph 等）补 `timeout` 参数（对齐 19 个估计工具）；全角冒号统一；verify/import 文档对齐；scheme 补 destructiveHint；tabulate 去冗余预检。
+
+**测试质量**：conftest 补 `_ALLOWED_ROOTS_CACHE` 重置；新增 20+ 回归测试（timeout 钳制、分页截断标志、do 文件混淆/宏/路径审计、后台审计、graph 目录提示等）。
 
 ## 权限配置
 

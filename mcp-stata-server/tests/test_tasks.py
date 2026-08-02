@@ -158,7 +158,7 @@ def test_cancel_finished_task():
 def test_cancel_running_task_sets_event_not_direct_break():
     """取消通过 cancel_event 交给看门狗（锁内二次确认），不再直接跨线程 SetBreak。"""
     task = _make_task("display 1")
-    task.in_execute = True
+    task.cancel_requested = False
     with patch("server._set_break") as mock_break:
         found, msg = _bg_cancel(task.task_id)
     assert found
@@ -270,3 +270,18 @@ def test_task_list_empty_and_populated():
     task.blocks = ["display 1"]
     listing = _text(stata_task_list())
     assert task.task_id in listing and "running" in listing
+
+
+def test_worker_cancel_keeps_partial_output():
+    """取消时保留已执行块的输出（实战发现：取消前的内容曾被丢弃）。"""
+    task = _make_task("display 1\ndisplay 2")
+
+    def fake_exec(cmd, timeout=60, full_output_path=None, cancel_event=None):
+        task.cancel_requested = True  # 第一条后到达取消
+        return (0, "1")
+
+    with patch("server._execute_safe", side_effect=fake_exec):
+        _bg_worker(task)
+    assert task.status == "cancelled"
+    assert "1" in task.result  # 已执行输出保留
+    assert "已取消" in task.result and "块" in task.result

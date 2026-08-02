@@ -108,8 +108,8 @@ def test_snapshot_save_with_label():
         mock_run.return_value = "ok"
         stata_snapshot(action="save", label="清洗后")
     cmd = mock_run.call_args.args[0]
-    assert 'snapshot save, label("清洗后")' in cmd
-    assert "snapshot list" in cmd  # 附加列表便于确认编号
+    # save 输出本身已含创建确认，不再附加 snapshot list（避免重复打印）
+    assert cmd == 'snapshot save, label("清洗后")'
 
 
 def test_snapshot_save_no_label():
@@ -117,7 +117,7 @@ def test_snapshot_save_no_label():
         mock_run.return_value = "ok"
         stata_snapshot(action="save")
     cmd = mock_run.call_args.args[0]
-    assert cmd == "snapshot save\nsnapshot list"
+    assert cmd == "snapshot save"
 
 
 def test_snapshot_save_rejects_quotes_in_label():
@@ -153,3 +153,12 @@ def test_read_log_missing_file(tmp_path, monkeypatch):
 def test_read_log_bad_action():
     result = stata_read_log(action="delete")
     assert isinstance(result, ToolResult) and result.is_error
+
+
+def test_clear_returns_confirmation_not_empty_hint():
+    """清空是故意的，不应误报「请先载入数据」（实战发现）。"""
+    with patch("server._run_stata_command", return_value="(无输出：当前内存中没有数据集。)"):
+        result = stata_clear(scope="all")
+    assert isinstance(result, str)
+    assert "已清理会话" in result
+    assert "当前内存中没有数据集" not in result

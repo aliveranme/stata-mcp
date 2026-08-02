@@ -227,3 +227,18 @@ def test_do_file_compact_removes_count_lines(stata, outdir):
     assert "(22 real changes made)" in raw, raw[:200]
     assert "(22 real changes made)" not in compact, compact[:200]
     assert "Variable" in compact and "price" in compact, compact[:200]  # 结果表保留
+
+
+def test_list_zero_match_gives_hint(stata):
+    """有数据但 list 匹配 0 行 → 可操作提示（实战发现与数据缺失无法区分）。"""
+    stata.stata_run("sysuse auto, clear")
+    out = result_text(stata.stata_list("price", condition="foreign == 999", in_range="1/10"))
+    assert "未列出任何观测" in out, out[:200]
+
+
+def test_clear_returns_confirmation(stata):
+    """clear 后返回确认而非误导性的空数据提示（实战发现）。"""
+    stata.stata_run("sysuse auto, clear")
+    out = result_text(stata.stata_clear(scope="all"))
+    assert "已清理会话" in out, out[:200]
+    assert "当前内存中没有数据集" not in out, out[:200]

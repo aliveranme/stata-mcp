@@ -48,6 +48,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         quality: int = 0,
         mag: int = 0,
         fontface: str = "",
+        timeout: int = 120,
     ) -> str | deps.ToolResult:
         """生成 Stata 图形并可选导出为文件。
 
@@ -76,6 +77,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             mag: 缩放百分比 1–10000（默认 0 = 不指定，Stata 默认 100）。
                  **仅 .pdf/.eps/.ps**。
             fontface: 默认字体名（默认空 = 不指定）。**仅 .pdf/.eps/.ps/.svg**。
+            timeout: 命令超时秒数（默认 120，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             图形生成确认信息。
@@ -103,6 +105,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             ):
                 if value < 0:
                     return deps.make_error(f"错误: {label} 不能为负数（{value}）")
+            safe_timeout = max(10, min(timeout, 1800))
             if export:
                 if err := deps.validate_path(export):
                     return deps.result_or_error(err)
@@ -117,7 +120,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             scheme_line = f"set scheme {scheme}\n" if scheme else ""
 
             if not export:
-                return deps.run_stata_command(f"{scheme_line}{command}", timeout=120)
+                return deps.run_stata_command(f"{scheme_line}{command}", timeout=safe_timeout)
 
             # 导出模式：使用 { } 复合块确保 graph + export 原子执行
             export_path = deps.normalize_path(export)
@@ -148,7 +151,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 f"capture noisily graph drop Graph"
             )
 
-            result = deps.run_stata_command(compound, timeout=120)
+            result = deps.run_stata_command(compound, timeout=safe_timeout)
 
             # 若 run_stata_command 已标记错误，直接透传，不追加成功提示
             if isinstance(result, deps.ToolResult):
@@ -161,8 +164,13 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 hint = ""
                 if before_ns is not None and not replace:
                     hint = "\n提示：目标文件已存在且 replace=False，如需覆盖请传 replace=True。"
+                parent = os.path.dirname(export_path)
+                if parent and not os.path.isdir(parent):
+                    hint += f"\n提示：目标目录不存在: {parent} —— 请先创建目录。"
+                # 实战发现：真实原因（Stata 输出，如 variable not found）被埋在「文件为空」
+                # 之后。Stata 原因放最前，结论在后，Agent 第一眼就看到根因。
                 return deps.make_error(
-                    f"错误: 图形导出失败，未生成文件或文件为空 {export_path}{hint}\n{result.strip()}"
+                    f"图形导出失败：\n{result.strip()}\n(未生成文件或文件为空 {export_path}){hint}"
                 )
 
             result += f"\n(图形已导出: {export_path}, {deps.format_size(export_path)})"
@@ -179,9 +187,12 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         except Exception as e:
             return deps.make_error(f"图形生成失败: {type(e).__name__}: {e}")
 
-    @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False))
+    @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_scheme(
-        action: str = "list", scheme: str = "", permanently: bool = False
+        action: str = "list",
+        scheme: str = "",
+        permanently: bool = False,
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """查询或设置 Stata 图形主题（scheme）。
 
@@ -194,6 +205,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                     ``set``（切换方案）。
             scheme: 方案名，仅 action="set" 时必填。
             permanently: 是否写入 Stata 配置、跨会话保留（默认 False，仅本会话生效）。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             方案清单、当前方案名，或设置确认。
@@ -203,13 +215,14 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 f'错误: action 只能是 "list" / "get" / "set"（收到 {action!r}）'
             )
 
+        safe_timeout = max(10, min(timeout, 1800))
         if action == "list":
             # 官方查询命令；ssc 没有对应子命令，`graph query, schemes` 是唯一入口。
-            return deps.run_stata_command("graph query, schemes")
+            return deps.run_stata_command("graph query, schemes", timeout=safe_timeout)
 
         if action == "get":
             # 不能用裸 `set scheme` 查询 —— 那是设置命令，不带参数时行为不同。
-            return deps.run_stata_command("display c(scheme)")
+            return deps.run_stata_command("display c(scheme)", timeout=safe_timeout)
 
         if not scheme.strip():
             # 空值会拼出裸 `set scheme`，改变命令语义而非报错。
@@ -218,7 +231,9 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             return deps.result_or_error(err)
 
         suffix = ", permanently" if permanently else ""
-        return deps.run_stata_command(f"set scheme {scheme.strip()}{suffix}")
+        return deps.run_stata_command(
+            f"set scheme {scheme.strip()}{suffix}", timeout=safe_timeout
+        )
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）
     return {k: v for k, v in locals().items() if k.startswith("stata_") and callable(v)}

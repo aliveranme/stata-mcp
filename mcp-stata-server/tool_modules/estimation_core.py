@@ -40,6 +40,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行线性回归分析 (OLS)。
 
@@ -50,6 +51,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             indepvars: 自变量列表（空格分隔）。
             options: 额外选项，如 "robust"（稳健标准误）、"noconstant"。
             condition: if 条件子句（可选）。例："foreign == 1 & price < 10000"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             回归分析结果表。
@@ -68,7 +70,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_logistic(
@@ -77,6 +80,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行 Logistic 回归分析。
 
@@ -89,6 +93,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 ``logistic`` 默认即报告优势比（``or`` 可写但冗余）；想看原始系数
                 用 ``coef``，或改用 ``stata_run("logit ...")``。
             condition: if 条件子句（可选）。例："age >= 18"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             Logistic 回归结果表。
@@ -107,7 +112,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_ttest(
@@ -117,6 +123,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行 t 检验（单样本 / 按组两样本 / 配对 / 非配对）。
 
@@ -140,6 +147,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             options: 额外选项，如 "unequal"、"welch"、"level(90)"、"unpaired"。
             condition: if 条件子句（可选）。例："!missing(price)".
             in_range: 观测范围（可选），如 "1/100"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             t 检验结果表。
@@ -180,7 +188,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         )
         if opts:
             cmd += f", {opts}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_probit(
@@ -190,6 +199,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行 Probit 回归（二元因变量）。
 
@@ -200,6 +210,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 平均边际效应（probit 系数不能直接解读，通常需要边际效应）。
             options: 额外选项，如 "robust"、"vce(cluster id)"。
             condition: if 条件子句（可选）。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             Probit 回归结果（可选附平均边际效应）。
@@ -220,7 +231,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd += f", {options}"
         if marginal_effects:
             cmd += "\nmargins, dydx(*)"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_poisson(
@@ -230,6 +242,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行 Poisson 回归（计数因变量）。
 
@@ -239,6 +252,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             irr: True 时报告发生率比（incidence-rate ratios）而非系数。
             options: 额外选项，如 "robust"、"exposure(varname)"、"vce(cluster id)"。
             condition: if 条件子句（可选）。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             Poisson 回归结果表。
@@ -258,7 +272,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         opt_parts = [p for p in (("irr" if irr else ""), options.strip()) if p]
         if opt_parts:
             cmd += f", {' '.join(opt_parts)}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_xtreg(
@@ -268,6 +283,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行面板数据回归（xtreg）。
 
@@ -281,6 +297,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             effects: 估计量，取值 fe(固定效应)/re(随机效应)/be(组间)/mle/pa（默认 fe）。
             options: 额外选项，如 "robust"、"vce(cluster id)"。
             condition: if 条件子句（可选）。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             面板回归结果表。
@@ -304,7 +321,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         opt_parts = [p for p in (eff, options.strip()) if p]
         cmd += f", {' '.join(opt_parts)}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_ivregress(
@@ -316,6 +334,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行工具变量回归（ivregress，2SLS/LIML/GMM）。
 
@@ -331,6 +350,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             estimator: 估计量 2sls/liml/gmm（默认 2sls）。
             options: 额外选项，如 "robust"、"first"、"vce(cluster id)"。
             condition: if 条件子句（可选）。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             工具变量回归结果表。
@@ -363,7 +383,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）
     return {k: v for k, v in locals().items() if k.startswith("stata_") and callable(v)}

@@ -142,3 +142,15 @@ def test_do_file_clear_all_mid_run(stata, outdir):
     r = stata.stata_run_do_file(str(do_file))
     txt = result_text(r)
     assert "崩溃" not in txt and "无响应" not in txt
+
+
+def test_do_file_shell_command_rejected(stata, outdir):
+    """do 文件含 shell-out 被拒（此前真机确认可执行主机命令并污染 stdout）。"""
+    do_file = outdir / "shell.do"
+    do_file.write_text("shell echo X\n", encoding="utf-8")
+    r = stata.stata_run_do_file(str(do_file))
+    txt = result_text(r)
+    assert "危险命令" in txt, txt[:200]
+    # 错误文本会引用被拒命令的目标（echo X），故不能断言 X 不在文本；
+    # 改为断言「拒绝执行」且无任何 shell 执行证据（输出应只有错误信息）。
+    assert "拒绝执行" in txt, txt[:200]

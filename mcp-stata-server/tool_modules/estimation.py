@@ -40,6 +40,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行 Logit 回归分析。
 
@@ -54,6 +55,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 "level(90)"、"noconstant"；想要 OR 可传 "or"。
             condition: if 条件子句（可选）。例："age >= 18 & sex == 1"。
             in_range: 观测范围（可选），如 "1/500"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             Logit 回归结果表（系数、标准误、z 值、p 值与模型诊断统计量）。
@@ -72,7 +74,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd, timeout=60)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_mlogit(
@@ -82,6 +85,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行多分类 Logit 回归分析（multinomial logit）。
 
@@ -96,6 +100,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             options: 额外选项，如 "robust"、"baselevels"、"rrr"（相对风险比）。
             condition: if 条件子句（可选）。例："income > 0"。
             in_range: 观测范围（可选），如 "1/500"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             多分类 Logit 回归结果表（各类别的相对风险比/系数）。
@@ -125,7 +130,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             opts.append(options.strip())
         if opts:
             cmd += ", " + " ".join(opts)
-        return deps.run_stata_command(cmd, timeout=60)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_nbreg(
@@ -134,6 +140,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行负二项回归分析（negative binomial regression）。
 
@@ -147,6 +154,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 的发生率）、"robust"、"vce(cluster id)"、"irls"。
             condition: if 条件子句（可选）。例："year >= 2000"。
             in_range: 观测范围（可选），如 "1/500"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             负二项回归结果表（系数、alpha、对数似然与 LR 检验）。
@@ -165,7 +173,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd, timeout=60)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_qreg(
@@ -175,6 +184,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行分位数回归（quantile regression，qreg）。
 
@@ -186,10 +196,13 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             indepvars: 自变量列表（空格分隔）。
             quantile: 目标分位数，取值在 (0, 1) 开区间，如 0.25 / 0.5 / 0.9。
                 例：``quantile=0.9`` 拼出 ``qreg ... , quantile(0.9)``。
-            options: 额外选项，如 "vce(bootstrap)"（bootstrap 标准误）、
-                "vce(iid)"、"noconstant"。
+            options: 额外选项，如 "vce(iid)"（同方差假设，官方默认）、
+                "vce(robust)"（稳健）、"noconstant"。**注意 qreg 不接受
+                vce(bootstrap)**（实测 r(198)）—— bootstrap 标准误请用
+                ``stata_run("bsqreg depvar indeps, reps(200)")``。
             condition: if 条件子句（可选）。例："foreign == 1"。
             in_range: 观测范围（可选），如 "1/500"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             分位数回归结果表（系数、标准误、t 值、p 值）。
@@ -226,7 +239,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             opts.append(options.strip())
         if opts:
             cmd += ", " + " ".join(opts)
-        return deps.run_stata_command(cmd, timeout=60)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_mixed(
@@ -236,6 +250,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """运行多层混合效应线性回归（multilevel mixed-effects，mixed）。
 
@@ -253,6 +268,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 "vce(robust)"、"noconstant"。
             condition: if 条件子句（可选）。例："!missing(price)"。
             in_range: 观测范围（可选），如 "1/500"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             混合效应模型估计表（固定效应系数、随机效应方差分量、LR 检验）。
@@ -284,7 +300,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd += f" {random.strip()}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd, timeout=60)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）
     return {k: v for k, v in locals().items() if k.startswith("stata_") and callable(v)}

@@ -162,3 +162,43 @@ def test_stata_run_allows_inside_path(roots, monkeypatch):
     result = stata_run('use "/allowed/data.dta"')
     assert not getattr(result, "is_error", False)
     assert calls and "use" in calls[0]
+
+
+def test_audit_matches_stata_abbreviations(roots):
+    """官方缩写（sav/imp/cop 等）不得绕过路径审计（第二轮审查发现）。"""
+    assert _audit('sav "/evil/out.dta", replace') is not None
+    assert _audit('imp excel using "/evil/x.xlsx"') is not None
+    assert _audit('cop "/evil/a.dta" "/allowed/b.dta"') is not None
+    assert _audit('exp delimited "/evil/x.csv"') is not None
+    assert _audit('lo using "/evil/x.log"') is not None
+    # 精确 token：lowess 不应被误当 lo
+    assert _audit("lowess price weight") is None
+
+
+def test_audit_pkg_abbreviation(roots):
+    """net ins / github ins 缩写不得绕过包管理拦截。"""
+    from server import _flag_unmanaged_package_commands
+
+    assert _flag_unmanaged_package_commands("net ins foo, from(x)") == ["net ins foo, from(x)"]
+    assert _flag_unmanaged_package_commands("github ins bar") == ["github ins bar"]
+    assert _flag_unmanaged_package_commands("version 15: net install foo, from(x)") == [
+        "version 15: net install foo, from(x)"
+    ]
+    assert _flag_unmanaged_package_commands("ssc install estout") == []
+
+
+def test_background_path_audit(roots, monkeypatch):
+    """后台任务的自由文本同样受路径审计（第二轮审查发现此前跳过）。"""
+    from unittest.mock import patch
+
+    import server
+    from server import _BackgroundTask, _bg_worker
+
+    task = _BackgroundTask(task_id="audit1", command='use "/evil/x.dta"', timeout=60)
+    monkeypatch.setattr(server, "_get_stata_cwd_locked", lambda: "/allowed")
+    # 审计应在执行前拦截；若审计未触发会调用 _execute_safe（mock 会挂起），
+    # 故防御性 patch 使其抛错证明未被调用。
+    with patch("server._execute_safe", side_effect=AssertionError("不应执行")):
+        _bg_worker(task)  # _bg_worker 内部自行持 _stata_lock（非重入，外层不能再包）
+    assert task.status == "failed"
+    assert "沙箱外" in task.result

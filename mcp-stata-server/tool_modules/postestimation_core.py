@@ -50,6 +50,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         options: str = "",
         condition: str = "",
         in_range: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """估计边际效应 / 预测边际（margins，后估计命令）。
 
@@ -63,6 +64,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             options: 额外选项，如 "atmeans"、"vce(unconditional)"。
             condition: if 条件子句（可选）—— 只在满足条件的子样本上求边际。
             in_range: 观测范围（可选），如 "1/100"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             边际效应表。
@@ -92,10 +94,13 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             opt_parts.append(options.strip())
         if opt_parts:
             cmd += f", {' '.join(opt_parts)}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def stata_test(spec: str, options: str = "") -> str | deps.ToolResult:
+    def stata_test(
+        spec: str, options: str = "", timeout: int = 60
+    ) -> str | deps.ToolResult:
         """对上一个估计结果做 Wald 检验（test，后估计命令）。
 
         **前提**：先运行过一个估计命令。``test`` 作用于已存储的估计结果，
@@ -109,6 +114,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 - "weight = 0.5"      系数等于某值
             options: 官方选项，如 "mtest"（多重比较校正）、"accumulate"（累积
                 前次检验）、"notest"（只累积不输出）、"common"、"df(#)"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             Wald 检验结果（F 或 chi2 统计量与 p 值）。
@@ -122,10 +128,13 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd = f"test {spec.strip()}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def stata_estat(subcommand: str, options: str = "") -> str | deps.ToolResult:
+    def stata_estat(
+        subcommand: str, options: str = "", timeout: int = 60
+    ) -> str | deps.ToolResult:
         """运行后估计诊断（``estat``）。
 
         **前提**：先运行过一个估计命令（可用 ``stata_status`` 确认「当前活跃」）。
@@ -138,6 +147,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         Args:
             subcommand: estat 子命令名，如 "vif"、"hettest"。
             options: 该子命令的官方选项，如 "rhs iid"、"all"。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             诊断结果表。
@@ -151,11 +161,12 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd = f"estat {subcommand.strip()}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def stata_estimates(
-        action: str = "dir", name: str = "", options: str = ""
+        action: str = "dir", name: str = "", options: str = "", timeout: int = 60
     ) -> str | deps.ToolResult:
         """管理已存储的估计结果（``estimates``）。
 
@@ -168,6 +179,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 ``dir`` / ``clear``（无需 name）。
             name: 估计结果名；``table`` / ``stats`` 可给多个（空格分隔）。
             options: 官方选项，如 "star stats(N r2)"（table）、"aic bic"（stats）。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长模型/大样本可显式调大。
 
         Returns:
             操作确认或比较表。
@@ -188,7 +200,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd += f" {name.strip()}"
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）
     return {k: v for k, v in locals().items() if k.startswith("stata_") and callable(v)}

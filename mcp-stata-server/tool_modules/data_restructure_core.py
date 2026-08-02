@@ -52,7 +52,10 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_frame(
-        action: str = "dir", name: str = "", newname: str = ""
+        action: str = "dir",
+        name: str = "",
+        newname: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """管理数据 frame —— 在内存中同时持有多个数据集（Stata 16+）。
 
@@ -65,6 +68,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
                 ``copy`` / ``rename``（需 name 与 newname）。
             name: 目标 frame 名。
             newname: copy / rename 的新名字。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             frame 清单或操作确认。
@@ -82,16 +86,20 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         if action in _FRAME_NEED_NEWNAME and not newname.strip():
             return deps.make_error(f'错误: action="{action}" 必须提供 newname')
 
+        safe_timeout = max(10, min(timeout, 1800))
         if action == "dir":
-            return deps.run_stata_command("frames dir")
+            return deps.run_stata_command("frames dir", timeout=safe_timeout)
         if action == "current":
             # `frame pwf` = print working frame，与 c(frame) 等价但更自解释。
-            return deps.run_stata_command("frame pwf")
+            return deps.run_stata_command("frame pwf", timeout=safe_timeout)
         if action in _FRAME_NEED_NEWNAME:
             return deps.run_stata_command(
-                f"frame {action} {name.strip()} {newname.strip()}"
+                f"frame {action} {name.strip()} {newname.strip()}",
+                timeout=safe_timeout,
             )
-        return deps.run_stata_command(f"frame {action} {name.strip()}")
+        return deps.run_stata_command(
+            f"frame {action} {name.strip()}", timeout=safe_timeout
+        )
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def stata_verify(
@@ -101,6 +109,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         condition: str = "",
         in_range: str = "",
         options: str = "",
+        timeout: int = 60,
     ) -> str | deps.ToolResult:
         """数据完整性检查（``count`` / ``assert`` / ``duplicates`` / ``isid`` /
         ``misstable``）。
@@ -119,6 +128,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             in_range: 观测范围（同上）。
             options: ``duplicates`` 的子命令（``report`` 默认 / ``list`` /
                 ``examples`` / ``tag(newvar)`` / ``drop``），或其他官方选项。
+            timeout: 命令超时秒数（默认 60，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             检查结果；``assert`` 不成立时以错误结果返回。
@@ -134,8 +144,11 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             if err := deps.validate_no_injection(value, label):
                 return deps.result_or_error(err)
 
+        safe_timeout = max(10, min(timeout, 1800))
         if check == "count":
-            return deps.run_stata_command("count" + deps.filter_clause(condition, in_range))
+            return deps.run_stata_command(
+                "count" + deps.filter_clause(condition, in_range), timeout=safe_timeout
+            )
 
         if check == "assert":
             if not expression.strip():
@@ -143,7 +156,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd = f"assert {expression.strip()}" + deps.filter_clause(condition, in_range)
             if options.strip():
                 cmd += f", {options.strip()}"
-            return deps.run_stata_command(cmd)
+            return deps.run_stata_command(cmd, timeout=safe_timeout)
 
         if check == "duplicates":
             # duplicates 的第一个词是子命令而非选项，故从 options 取，缺省 report。
@@ -162,7 +175,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             if varlist.strip():
                 cmd += f" {varlist.strip()}"
             cmd += deps.filter_clause(condition, in_range)
-            return deps.run_stata_command(cmd)
+            return deps.run_stata_command(cmd, timeout=safe_timeout)
 
         if check == "isid":
             if not varlist.strip():
@@ -172,7 +185,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd = f"isid {varlist.strip()}"
             if options.strip():
                 cmd += f", {options.strip()}"
-            return deps.run_stata_command(cmd)
+            return deps.run_stata_command(cmd, timeout=safe_timeout)
 
         cmd = "misstable summarize"
         if varlist.strip():
@@ -180,7 +193,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd += deps.filter_clause(condition, in_range)
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd)
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_merge(
@@ -191,6 +204,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         condition: str = "",
         in_range: str = "",
         options: str = "",
+        timeout: int = 120,
     ) -> str | deps.ToolResult:
         """横向合并数据集（``merge``）。
 
@@ -207,6 +221,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             in_range: ``merge`` 官方语法不支持 in；传入会明确拒绝，避免生成非法命令。
             options: 官方选项，如 "nogenerate"、"keep(match)"、"assert(match)"、
                 "update replace"、"force"、"noreport"。
+            timeout: 命令超时秒数（默认 120，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             合并结果的匹配汇总表。
@@ -244,10 +259,15 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         )
         if opts:
             cmd += f", {opts}"
-        return deps.run_stata_command(cmd, timeout=120, require_file=paths[0])
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout, require_file=paths[0])
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-    def stata_append(using: str, options: str = "") -> str | deps.ToolResult:
+    def stata_append(
+        using: str,
+        options: str = "",
+        timeout: int = 120,
+    ) -> str | deps.ToolResult:
         """纵向追加数据集（``append``）。
 
         官方语法：``append using filename [filename …] [, options]`` —— 可一次
@@ -257,6 +277,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             using: 一个或多个 .dta 文件路径（空格分隔）。
             options: 官方选项，如 "generate(src)"（标记来源）、"keep(varlist)"、
                 "nolabel"、"nonotes"、"force"（允许字符/数值类型不一致）。
+            timeout: 命令超时秒数（默认 120，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             追加确认信息。
@@ -276,11 +297,17 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         cmd = "append using " + " ".join(f'"{p}"' for p in paths)
         if options.strip():
             cmd += f", {options.strip()}"
-        return deps.run_stata_command(cmd, timeout=120, require_file=paths[0])
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout, require_file=paths[0])
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_reshape(
-        direction: str, stub: str, i: str, j: str = "", options: str = ""
+        direction: str,
+        stub: str,
+        i: str,
+        j: str = "",
+        options: str = "",
+        timeout: int = 120,
     ) -> str | deps.ToolResult:
         """长宽表互转（``reshape``）。
 
@@ -290,13 +317,20 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         ``long``：宽转长，把 ``inc1980 inc1981`` 合成 ``inc`` 加一列 ``year``。
         ``wide``：长转宽，反向操作。
 
+        **非数值 j 必须传 ``options="string"``**：宽表后缀是字符（如 bpwide 的
+        ``bp_before``/``bp_after``，j 取 before/after）时，long 与 wide 两个方向
+        都报错（r(498) 变量含全部缺失值 / r(109) 类型不匹配）—— 两个方向都要
+        加 ``options="string"``。
+
         Args:
             direction: "long" 或 "wide"。
             stub: 变量名前缀，如 "inc"（对应 inc1980、inc1981 …）。可给多个。
             i: 个体标识变量（转换前后都唯一标识一行/一组）。
             j: 区分列的变量 —— long 方向可省略（Stata 默认新建 ``_j``），wide
                方向必须提供一个已存在的 j 变量。
-            options: 官方选项，如 "string"（j 是字符串）、"atwl(_)"。
+            options: 官方选项，如 "string"（j 是字符串，非数值后缀必传）、
+               "atwl(_)"。
+            timeout: 命令超时秒数（默认 120，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             转换前后的形态汇总。
@@ -327,7 +361,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             cmd += f" j({j.strip()})"
         if options.strip():
             cmd += f" {options.strip()}"
-        return deps.run_stata_command(cmd, timeout=120)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     @mcp.tool(annotations=deps.ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def stata_collapse(
@@ -336,6 +371,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         condition: str = "",
         in_range: str = "",
         options: str = "",
+        timeout: int = 120,
     ) -> str | deps.ToolResult:
         """按组聚合，把数据集**就地替换**为汇总结果（``collapse``）。
 
@@ -352,6 +388,7 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
             condition: if 条件子句（可选）。
             in_range: 观测范围（可选）。
             options: 官方选项，如 "cw"（成列删除缺失）、"fast"（不 preserve）。
+            timeout: 命令超时秒数（默认 120，钳制 10–1800）。长命令/大文件可显式调大。
 
         Returns:
             聚合确认信息。
@@ -374,7 +411,8 @@ def register(mcp: Any, deps: Any) -> dict[str, Any]:
         )
         if opts:
             cmd += f", {opts}"
-        return deps.run_stata_command(cmd, timeout=120)
+        safe_timeout = max(10, min(timeout, 1800))
+        return deps.run_stata_command(cmd, timeout=safe_timeout)
 
     # 收集本模块的工具函数（只认 `stata_` 前缀的可调用局部变量）
     return {k: v for k, v in locals().items() if k.startswith("stata_") and callable(v)}

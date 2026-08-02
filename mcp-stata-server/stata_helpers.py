@@ -24,8 +24,11 @@ from urllib.parse import quote
 PAGE_SIZE = 4_000
 
 
-def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
+def _paginate(text: str, page: int, page_size: int = PAGE_SIZE, truncated: bool = False) -> str:
     """将文本分页，返回指定页及导航信息。
+
+    截断感知：``truncated=True`` 时页首给出明确提示 —— 截断原文在文本末尾，
+    翻到最后一页才看得到，首页用户会误把截断总量当完整输出。
 
     Args:
         text: 完整文本
@@ -56,6 +59,8 @@ def _paginate(text: str, page: int, page_size: int = PAGE_SIZE) -> str:
 
     chunk = text[start:end]
     header = f"── 第 {page}/{total_pages} 页（共 {total_chars} 字符）──\n"
+    if truncated:
+        header += "⚠ 输出已截断（超过 120K 上限，后半段已丢弃；缩小范围或用 save_output 取全量）\n"
     footer = f"\n── 第 {page}/{total_pages} 页"
     if page < total_pages:
         footer += f" — 使用 stata_more(page={page + 1}) 翻下页"
@@ -889,9 +894,10 @@ def _validate_command_blocks(command: str) -> str | None:
 
 
 def _has_delimit_change(command: str) -> bool:
-    """检测行首的 ``#delimit``（字符串内的同名字样不算）。"""
+    """检测行首的 ``#delimit``（含官方缩写 ``#d``；字符串内的同名字样不算）。"""
     return any(
-        _split_top_level(raw_line, '"')[0].strip().lower().startswith("#delimit")
+        _split_top_level(raw_line, '"')[0].strip().lower()
+        .startswith(("#delimit", "#d"))
         for raw_line in command.split("\n")
     )
 
@@ -916,7 +922,13 @@ def _flag_macro_obfuscation(command: str) -> str | None:
     dangerous: dict[str, tuple[str, str]] = {}
     for m in _MACRO_DEF_RE.finditer(command):
         kind, name, value = m.group(1).lower(), m.group(2), m.group(3)
-        bare = value.strip().strip('"').strip()
+        bare = value.strip()
+        if bare.startswith("="):  # `local c = "shell ..."` 等号形式
+            bare = bare[1:].strip()
+        if bare.startswith('`"') and bare.endswith("'"):  # 复合引号 `" ... "'
+            bare = bare[2:-1].strip()
+        else:
+            bare = bare.strip('"').strip()
         if bare and _match_dangerous_prefix(bare) is not None:
             dangerous[name] = (bare, kind)
     if not dangerous:

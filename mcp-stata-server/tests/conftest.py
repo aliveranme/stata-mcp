@@ -94,6 +94,26 @@ if "sfi" not in sys.modules:
     sys.modules["sfi"] = _mock_sfi
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_server_log():
+    """测试不污染生产日志 logs/stata-mcp.log。
+
+    实战发现：server.py 在 import 时（模块级）挂上 RotatingFileHandler，pytest
+    用例的错误/异常会经 logger 写入生产日志，stata_read_log 因此读到本机跑过
+    pytest 后混入的 traceback 与 mock 噪音。摘掉文件 handler，保留 stderr。
+    """
+    import logging
+    import logging.handlers
+
+    import server
+
+    server.logger.handlers = [
+        h for h in server.logger.handlers
+        if not isinstance(h, logging.handlers.RotatingFileHandler)
+    ]
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _reset_server_globals():
     """重置 server 的模块级可变状态，消除测试顺序相关性。
@@ -102,10 +122,13 @@ def _reset_server_globals():
     残留值会让后续用例在 2 秒缓存窗口内跳过心跳，走上与单独运行时不同的分支；
     _last_output 同理会让 stata_more 的用例读到上一个用例的输出。
     _resource_registry / _bg_tasks 由资源与后台任务用例写入，残留会污染后续用例。
+    _ALLOWED_ROOTS_CACHE 由路径沙箱用例写入（第二轮审查发现漏重置），残留会让
+    后续用例沿用前一个用例的 STATA_ALLOWED_ROOTS 白名单。
     """
     import server
 
     server._last_ping_time = 0.0
+    server._ALLOWED_ROOTS_CACHE = None
     with server._output_lock:
         server._last_output = ""
     with server._resource_lock:
@@ -113,6 +136,7 @@ def _reset_server_globals():
     with server._bg_lock:
         server._bg_tasks.clear()
     yield
+    server._ALLOWED_ROOTS_CACHE = None
     server._last_ping_time = 0.0
     with server._resource_lock:
         server._resource_registry.clear()

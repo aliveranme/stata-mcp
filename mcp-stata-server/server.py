@@ -312,7 +312,7 @@ _ESTOUT_PROBE_CMD = "which estout"
 # 未收录的返回码退化为「未知返回码(N)」，其后紧跟 Stata 原文，不会丢信息。
 STATA_RC_MESSAGES = {
     0: "成功",
-    1: "已中断（Break）—— 看门狗超时会走这里",
+    1: "已中断（Break）—— 命令执行超过超时上限被看门狗打断",
     2: "网络连接超时",
     3: "当前没有载入数据集",
     4: "内存中的数据集有未保存的修改（加 clear 选项或先 save）",
@@ -328,6 +328,7 @@ STATA_RC_MESSAGES = {
     199: "命令不存在（拼写有误或包未安装）",
     301: "找不到已存储的估计结果（先运行估计命令）",
     459: "变量不能唯一识别观测（isid/duplicates 校验失败）",
+    498: "变量含全部缺失值（reshape 常见：j 变量值非数值时需 options='string'）",
     601: "文件不存在",
     602: "文件已存在（加 replace）",
     603: "文件无法打开",
@@ -883,13 +884,18 @@ def _execute_single(
                 total_len += len(tail)
 
     # 看门狗中断后 Stata 返回的是通用错误码（实测 rc=1「未指定的错误」），
-    # 单看返回码会让调用方去排查命令语法，故显式点明超时与可行的下一步。
+    # 单看返回码会让调用方去排查命令语法，故显式点明中断原因与可行的下一步。
+    # 区分超时与取消：取消（cancel_event 置位）不伪造「超时、调大 timeout」的
+    # 误导指引（实战审查发现被取消的后台任务会拿到假的超时建议）。
     if did_break:
-        out_buf.write(
-            f"\n(命令执行超过 {timeout}s 上限已被中断。"
-            "如属正常的长耗时任务，请显式传入更大的 timeout；"
-            "若命令可能在 headless 环境挂起，请改用更轻量的写法。)"
-        )
+        if cancel_event is not None and cancel_event.is_set():
+            out_buf.write("\n(命令已被请求取消。)")
+        else:
+            out_buf.write(
+                f"\n(命令执行超过 {timeout}s 上限已被中断。"
+                "如属正常的长耗时任务，请显式传入更大的 timeout；"
+                "若命令可能在 headless 环境挂起，请改用更轻量的写法。)"
+            )
 
     if full_fh is not None:
         full_fh.close()
@@ -951,11 +957,18 @@ def _result_or_error(value: str | ToolResult) -> str | ToolResult:
 # 只审计**带引号**的路径（Stata 对含空格路径的标准写法，无歧义）；裸未加引号的
 # 单 token 可能是 varlist/选项，跳过以免误伤。webuse/sysuse 联网/本地库加载不含
 # 用户本地路径，不审计。含宏（$ `）的路径无法静态解析，跳过（fail-open）。
+# 官方最小缩写也纳入（实战审查发现全写匹配可被 `sav`/`imp`/`cop` 等缩写绕过；
+# 精确 token 匹配，`lowess` 不会被误当 `lo`）。
 _PATH_USING_COMMANDS = frozenset(
-    {"import", "insheet", "infile", "infix", "merge", "append", "joinby",
-     "export", "log", "graph", "filefilter", "translate", "copy"}
+    {"import", "imp", "insheet", "ins", "infile", "inf", "infix", "infi",
+     "merge", "mer", "append", "app", "joinby", "join",
+     "export", "exp", "log", "lo", "graph", "gr",
+     "filefilter", "fif", "translate", "tra", "copy", "cop"}
 )
-_PATH_ARG_COMMANDS = frozenset({"use", "save", "do", "run", "include", "cd", "mkdir", "rmdir", "erase"})
+_PATH_ARG_COMMANDS = frozenset(
+    {"use", "us", "save", "sav", "do", "run", "include", "inc", "cd",
+     "mkdir", "rmdir", "erase"}
+)
 
 
 def _audit_block_paths(block: str) -> str | None:
@@ -989,7 +1002,12 @@ def _audit_block_paths(block: str) -> str | None:
         for m in re.finditer(r"\busing\s*\"([^\"]+)\"", line, re.IGNORECASE):
             candidates.append(m.group(1))
         # 无 using 的引号路径（graph export "x.png" / copy "a" "b"）
-        if base_cmd in ("graph", "copy", "filefilter", "translate"):
+        # 无 using 的引号路径（graph export "x.png" / copy "a" "b" /
+        # export delimited "x.csv"）—— 含官方缩写
+        if base_cmd in (
+            "graph", "gr", "copy", "cop", "filefilter", "fif",
+            "translate", "tra", "export", "exp",
+        ):
             candidates.extend(re.findall(r"\"([^\"]+)\"", line))
     elif base_cmd in _PATH_ARG_COMMANDS:
         m = re.search(r"\"([^\"]+)\"", line)
@@ -1183,20 +1201,37 @@ def _run_stata_command(
         # 仍先执行完所有块再截断：块的副作用（如 save/export）必须照常发生，
         # 不能因为输出超限就跳过后续命令。
         if len(full) > MAX_OUTPUT_CHARS:
-            full = full[:MAX_OUTPUT_CHARS] + _TRUNCATION_NOTICE
+            # 去重截断提示：单块超限时收集层已在块内注入 _TRUNCATION_NOTICE。
+            # 但要收口到 120K 硬上限，并保留提示后的关键信息（如看门狗超时说明）——
+            # 旧实现 `full[:idx] + notice` 在「截断块不是第一个」时 idx>120K 导致
+            # 超过硬上限（实测 170K），且把提示后的超时指引整条丢弃。
+            idx = full.find(_TRUNCATION_NOTICE)
+            if idx != -1:
+                after = full[idx + len(_TRUNCATION_NOTICE):]  # 提示后内容（超时说明等）
+                room_for_head = MAX_OUTPUT_CHARS - len(_TRUNCATION_NOTICE) - len(after)
+                full = full[: max(0, room_for_head)] + _TRUNCATION_NOTICE + after
+            else:
+                full = full[:MAX_OUTPUT_CHARS] + _TRUNCATION_NOTICE
         with _output_lock:
             _last_output = full
 
         # 若任何 block 出错，返回 isError=true
         if had_error:
-            return _make_error_result(full)
+            err_text = full
+            if _TRUNCATION_NOTICE in full:
+                # 错误路径不走 _paginate（无截断页首横幅），把截断提示前置
+                err_text = "(输出已被 120K 上限截断，后半段已丢弃)\n" + err_text
+            return _make_error_result(err_text)
 
         # 自动分页：仅当是单条命令且输出超过阈值
+        # truncated 标志：文本已被 120K 上限截断时，让分页页首给出明确提示
+        # （截断原文在文本末尾，翻到最后一页才看得到，首页会误读为完整总量）。
+        truncated = _TRUNCATION_NOTICE in full
         if len(blocks) == 1 and len(full) > PAGE_SIZE:
-            return _paginate(full, page)
+            return _paginate(full, page, truncated=truncated)
         elif len(blocks) > 1 and len(full) > PAGE_SIZE * 3:
             # 多命令输出也分页
-            return _paginate(full, page)
+            return _paginate(full, page, truncated=truncated)
 
         return full
 
@@ -1221,6 +1256,11 @@ def _register_resource(path: str, source: str) -> str | None:
         size = os.path.getsize(abs_path)
     except OSError as e:
         return f"错误: 无法读取文件大小 — {abs_path}: {e}"
+    with _resource_lock:
+        existing = _resource_registry.get(abs_path)
+        # 重复登记保留原始来源（实战发现：已由 stata_save_dataset 登记的文件再
+        # 经 stata_register_file 登记，来源被覆盖成后者的工具名，元数据失真）。
+        source = existing["source"] if existing else source
     entry = {
         "path": abs_path,
         "source": source,
@@ -1381,7 +1421,6 @@ class _BackgroundTask:
     is_error: bool = False
     cancel_requested: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event)
-    in_execute: bool = False        # 是否正卡在 StataSO_Execute 里（历史字段，取消改由看门狗处理）
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
 
@@ -1442,20 +1481,34 @@ def _bg_worker(task: _BackgroundTask) -> None:
                     task.result = buf.getvalue() + "\n(任务已取消，尚未执行剩余命令)"
                     task.finished_at = time.time()
                     return
+                # 后台自由文本同样受路径审计（与 _run_stata_command 一致，仅配置
+                # 白名单时启用）。实战审查发现此前后台块完全跳过审计。
+                if _init_allowed_roots():
+                    if err := _audit_block_paths(block):
+                        task.status = "failed"
+                        task.result = err
+                        task.is_error = True
+                        task.finished_at = time.time()
+                        return
                 task.block_index = index
                 task.current_block = block
-                task.in_execute = True
-                try:
-                    rc, out = _execute_safe(
-                        block, task.timeout, cancel_event=task.cancel_event
-                    )
-                finally:
-                    task.in_execute = False
+                rc, out = _execute_safe(
+                    block, task.timeout, cancel_event=task.cancel_event
+                )
 
                 # 取消请求可能在看门狗窗口内到达（事件触发 SetBreak）：以取消为准
                 if task.cancel_requested:
+                    # 保留已执行部分的输出（含被中断块的产出），并明确是用户取消
+                    # 而非失败 —— 实战发现取消前打印的内容曾被整块丢弃。
+                    if out.strip():
+                        if hwritten:
+                            buf.write("\n")
+                        buf.write(out.strip())
+                        hwritten = True
                     task.status = "cancelled"
-                    task.result = buf.getvalue() + "\n(任务已取消)"
+                    task.result = buf.getvalue() + (
+                        f"\n(任务已取消，已执行 {index + 1}/{len(task.blocks)} 块)"
+                    )
                     task.finished_at = time.time()
                     return
                 if rc == 998:
@@ -1477,6 +1530,14 @@ def _bg_worker(task: _BackgroundTask) -> None:
                         buf.write("\n")
                     buf.write(_format_error(rc, block, out))
                     hwritten = True
+                    # 与 _run_stata_command 的首错即停一致：提示剩余块被跳过 + capture 逃生
+                    remaining = len(task.blocks) - index - 1
+                    if remaining > 0:
+                        buf.write(
+                            f"\n[已跳过后续 {remaining} 条命令]"
+                            " 出错后中止，避免在陈旧/半截状态上继续执行。"
+                            " 如需忽略该错误继续，请在该命令前加 Stata 的 capture 前缀。"
+                        )
                     break
                 elif out.strip():
                     if hwritten:
@@ -1501,7 +1562,13 @@ def _bg_worker(task: _BackgroundTask) -> None:
 
         full = buf.getvalue()
         if len(full) > MAX_OUTPUT_CHARS:
-            full = full[:MAX_OUTPUT_CHARS] + _TRUNCATION_NOTICE
+            idx = full.find(_TRUNCATION_NOTICE)
+            if idx != -1:
+                after = full[idx + len(_TRUNCATION_NOTICE):]
+                room_for_head = MAX_OUTPUT_CHARS - len(_TRUNCATION_NOTICE) - len(after)
+                full = full[: max(0, room_for_head)] + _TRUNCATION_NOTICE + after
+            else:
+                full = full[:MAX_OUTPUT_CHARS] + _TRUNCATION_NOTICE
         task.result = full
         task.is_error = had_error
         task.status = "failed" if had_error else "done"
@@ -1711,15 +1778,23 @@ def _extract_ssc_installs(do_text: str) -> tuple[str, list[tuple[str, bool]]]:
 # 出现即整体拒绝并重定向到 stata_install_package。net install 的第三方 URL 是
 # 注入面，adoupdate/update all 会改写本机包/Stata 状态。
 _UNMANAGED_PKG_RE = re.compile(
-    r"^\s*(?:(?:qui(?:etly)?|cap(?:ture)?|noi(?:sily)?)\s+)*"
-    r"(net\s+install|github\s+install|adoupdate|update\s+all)\b",
+    r"(?:net|github)\s+ins(?:t(?:a?l?l?)?)?\b|adou(?:pdate)?\b|update\s+all\b",
     re.IGNORECASE,
 )
 
 
 def _flag_unmanaged_package_commands(do_text: str) -> list[str]:
-    """扫描 do 文件里的不受控安装命令，返回违规行列表（空=安全）。"""
-    return [ln.strip() for ln in do_text.split("\n") if _UNMANAGED_PKG_RE.match(ln)]
+    """扫描 do 文件里的不受控安装命令，返回违规行列表（空=安全）。
+
+    先剥已知前缀（capture/quietly/by/version 冒号形态），再匹配含官方缩写
+    （net inst / github ins / adou）的安装命令 —— 实战审查发现全写匹配可被
+    缩写与 `version 15: net install` 前缀绕过。
+    """
+    blocked: list[str] = []
+    for raw in do_text.split("\n"):
+        if _UNMANAGED_PKG_RE.match(_light_strip_prefixes(raw).strip()):
+            blocked.append(raw.strip())
+    return blocked
 
 
 def _prepare_ssc_installs(installs: list[tuple[str, bool]], timeout: int) -> list[str]:
@@ -1901,6 +1976,36 @@ def stata_run_do_file(
             '  stata_install_package("包名", source="ssc", timeout=120)'
         )
 
+    # do 文件内容经 Stata 直接执行，**不经过** stata_run 的入口护栏 —— 真机确认
+    # do 文件里的 `shell echo …` / `!rm` 会真实执行主机命令，且 shell 子进程的输出
+    # 直接写进程 stdout（MCP 下会污染 stdio 通道）。对 do 文件内容同样施加护栏：
+    # 用**解析后**块检查（挡 `sh/*x*/ell` 注释混淆），并拒宏间接调用。合法 do 文件
+    # （建模/清洗/绘图）不含这些命令，不受影响。
+    if reason := _validate_command_blocks(do_text):
+        return _make_error_result(
+            "错误: do 文件包含危险命令（可执行主机系统/删除文件代码），已拒绝执行：\n"
+            f"  {reason}\n"
+            "Stata MCP 不执行含 shell-out / 文件销毁 / 代码执行命令的 do 文件。\n"
+            "如确有必要，请通过操作系统或 Stata 界面直接执行。"
+        )
+    if reason := _flag_macro_obfuscation(do_text):
+        return _make_error_result(
+            "错误: do 文件通过宏间接调用危险命令，已拒绝执行：\n"
+            f"  {reason}"
+        )
+
+    # do 文件**内容**里的数据命令路径同样受沙箱约束（配置 STATA_ALLOWED_ROOTS 时）。
+    # 此前只审计外层 `do "path"`，内容里的 `use "越界"` 完全漏审（实战审查发现）。
+    # 锁内解析（相对路径按 Stata cwd 权威校验）；逐行审计（块内命令也逐行可判）。
+    if _init_allowed_roots():
+        with _stata_lock:
+            for do_line in do_text.split("\n"):
+                if err := _audit_block_paths(do_line):
+                    return _make_error_result(
+                        "错误: do 文件内容引用了沙箱外路径，已拒绝执行：\n"
+                        f"  {do_line.strip()}\n  {err}"
+                    )
+
     cleaned, installs = _extract_ssc_installs(do_text)
     if not installs:
         # 无 ssc install：原样执行，走标准 require_file 权威路径，行为不变。
@@ -2072,7 +2177,7 @@ def stata_more(page: int = 0, page_size: int = 0) -> str | ToolResult:
     if not cached:
         return "(没有缓存的输出，请先执行 Stata 命令)"
     ps = page_size if page_size > 0 else PAGE_SIZE
-    return _paginate(cached, page, ps)
+    return _paginate(cached, page, ps, truncated=_TRUNCATION_NOTICE in cached)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -2400,6 +2505,12 @@ def stata_clear(scope: str = "all") -> str | ToolResult:
         cmds.append("capture xtset, clear")
         cmds.append("capture tsset, clear")
     result = _run_stata_command("\n".join(cmds), timeout=120)
+    # 清空后 c(N)=0，_describe_empty_result 会误报「请先载入数据」（实战发现：
+    # Agent 可能以为 clear 失败而多余地重新载入）。清空是**故意的**，返回确认。
+    if isinstance(result, str) and (
+        "当前内存中没有数据集" in result or "无文本输出" in result
+    ):
+        result = f"已清理会话（scope={scope}）：数据集/估计/图形/面板已重置。"
     if scope == "all":
         # 命令执行完（成功或失败）才撤内存侧状态；磁盘文件本身不删除。
         # 必须声明 global：否则赋值会创建同名局部变量，重置形同虚设。
@@ -2450,8 +2561,9 @@ def stata_snapshot(
     cmd = "snapshot save"
     if label.strip():
         cmd += f', label("{label.strip()}")'
-    # 附加列表便于确认自动分配的编号
-    cmd += "\nsnapshot list"
+    # 不再附加 snapshot list：save 输出本身已含 "snapshot N (label) created at"，
+    # 再 list 一遍会把创建记录打印两次（真机实测冗余）。编号用
+    # stata_snapshot(action="list") 单独查。
     return _run_stata_command(cmd, timeout=120)
 
 
@@ -2472,6 +2584,11 @@ def stata_background(command: str, timeout: int = 300) -> str | ToolResult:
     用 ``stata_task_status`` 查进度、``stata_task_cancel`` 取消、
     ``stata_task_result`` 取结果、``stata_task_list`` 列全部。
 
+    **后台任务运行期间不要向进程 stdout 写内容**：pystata 的 RedirectOutput 是
+    进程级替换 sys.stdout，任务执行窗口内主线程的任何 print() 会被捕获进任务
+    结果（实测并发主线程 print 出现在 stata_task_result 里）。MCP 生产环境走
+    stdio、工具不打印，故无实际影响；但测试/自定义主线程打印需避开该窗口。
+
     Args:
         command: 要执行的 Stata 命令（可多行，含 { } 复合块）。
         timeout: 单块超时秒数（默认 300，钳制 10–3600）。
@@ -2480,6 +2597,8 @@ def stata_background(command: str, timeout: int = 300) -> str | ToolResult:
         任务号与提交确认。
     """
     safe_timeout = max(_BG_TIMEOUT_MIN, min(timeout, _BG_TIMEOUT_MAX))
+    if not command or not command.strip():
+        return _make_error_result("错误: command 不能为空")
     if "\x00" in command:
         return _make_error_result("错误: command 包含空字节")
     if len(command) > MAX_COMMAND_LENGTH:
