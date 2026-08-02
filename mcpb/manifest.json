@@ -1,0 +1,57 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "stata-mcp",
+  "version": "1.0.8",
+  "description": "Drive real Stata from Claude Desktop: 75 MCP tools (data loading/cleaning/modeling/diagnostics/graph export) via pystata.",
+  "display_name": "Stata MCP",
+  "author": {
+    "name": "aliveranme",
+    "email": "aliveranme@users.noreply.github.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "stata",
+    "mcp",
+    "pystata",
+    "econometrics"
+  ],
+  "server": {
+    "type": "python",
+    "entry_point": "server/index.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/server/index.py"
+      ],
+      "env": {
+        "STATA_HOME": "${user_config.stataHome}",
+        "STATA_EDITION": "${user_config.edition}"
+      }
+    }
+  },
+  "user_config": {
+    "stataHome": {
+      "type": "directory",
+      "title": "Stata 安装目录",
+      "description": "含 utilities/pystata 的 Stata 安装根目录（如 /Applications/StataNow 或 C:/Program Files/StataNow/StataNow19）",
+      "default": "${HOME}",
+      "required": true
+    },
+    "edition": {
+      "type": "string",
+      "title": "Stata 版本 (mp / se / be)",
+      "description": "你的 Stata 版本，默认 mp。",
+      "default": "mp",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  }
+}
